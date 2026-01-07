@@ -1,0 +1,99 @@
+id: "causal-tracing-002"
+skill: "causal-tracing"
+difficulty: "hard"
+title: "Full Causal Tracing with MLP/Attention Decomposition"
+query: |
+  Implement a complete causal tracing experiment for GPT-2 that:
+
+  1. Uses noise-based corruption on the source prompt
+  2. Restores clean activations at specific layers
+  3. Separately analyzes MLP vs Attention contributions
+
+  Base: "The Eiffel Tower is located in" (expects: Paris)
+  Source: "The Colosseum is located in" (expects: Rome)
+
+  Create three result tensors:
+  - restoration_effects[n_layers]: Effect of restoring each layer
+  - mlp_effects[n_layers]: Effect of restoring only MLP at each layer
+  - attn_effects[n_layers]: Effect of restoring only attention at each layer
+
+expected_concepts:
+  - "noise-based corruption"
+  - "selective restoration"
+  - "MLP vs attention separation"
+  - "probability measurement"
+  - "multiple intervention types"
+
+validation:
+  must_include:
+    - "model.trace"
+    - "mlp.output"
+    - "attn.output"
+    - "randn"
+    - ".save()"
+  must_not_include: []
+  expected_output:
+    type: "dict"
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  base_prompt = "The Eiffel Tower is located in"
+  source_prompt = "The Colosseum is located in"
+  rome_token = model.tokenizer(" Rome")["input_ids"][0]
+
+  def add_noise(activation, noise_level=0.1):
+      return activation + noise_level * torch.randn_like(activation)
+
+  n_layers = len(model.transformer.h)
+  restoration_effects = torch.zeros(n_layers)
+  mlp_effects = torch.zeros(n_layers)
+  attn_effects = torch.zeros(n_layers)
+
+  # Get clean activations
+  with model.trace(source_prompt):
+      clean_hiddens = [layer.output[0].save() for layer in model.transformer.h]
+      clean_mlp = [layer.mlp.output[0].save() for layer in model.transformer.h]
+      clean_attn = [layer.attn.output[0].save() for layer in model.transformer.h]
+
+  # Test full layer restoration
+  for layer_idx in range(n_layers):
+      with model.trace(source_prompt):
+          for idx, layer in enumerate(model.transformer.h):
+              if idx == layer_idx:
+                  layer.output[0][:] = clean_hiddens[idx]
+              else:
+                  layer.output[0][:] = add_noise(layer.output[0])
+          logits = model.lm_head.output.save()
+      restoration_effects[layer_idx] = torch.softmax(logits.value[0, -1], dim=-1)[rome_token]
+
+  # Test MLP-only restoration
+  for layer_idx in range(n_layers):
+      with model.trace(source_prompt):
+          for idx, layer in enumerate(model.transformer.h):
+              layer.output[0][:] = add_noise(layer.output[0])
+          model.transformer.h[layer_idx].mlp.output[0][:] = clean_mlp[layer_idx]
+          logits = model.lm_head.output.save()
+      mlp_effects[layer_idx] = torch.softmax(logits.value[0, -1], dim=-1)[rome_token]
+
+  # Test Attention-only restoration
+  for layer_idx in range(n_layers):
+      with model.trace(source_prompt):
+          for idx, layer in enumerate(model.transformer.h):
+              layer.output[0][:] = add_noise(layer.output[0])
+          model.transformer.h[layer_idx].attn.output[0][:] = clean_attn[layer_idx]
+          logits = model.lm_head.output.save()
+      attn_effects[layer_idx] = torch.softmax(logits.value[0, -1], dim=-1)[rome_token]
+
+  print("Restoration effects:", restoration_effects)
+  print("MLP effects:", mlp_effects)
+  print("Attention effects:", attn_effects)
+
+tags:
+  - "causal-tracing"
+  - "mlp-attention"
+  - "noise-corruption"
+  - "decomposition"

@@ -1,0 +1,59 @@
+id: "logit-lens-002"
+skill: "logit-lens"
+difficulty: "medium"
+title: "Full Logit Lens Visualization"
+query: |
+  Implement a complete logit lens analysis for GPT-2 on the prompt
+  "The Eiffel Tower is in the city of". For each layer, decode the top
+  predicted token at the final position. Create a list showing how the
+  prediction evolves across layers.
+
+  Print the layer number and predicted token for each layer.
+
+expected_concepts:
+  - "iterating over all layers"
+  - "applying ln_f and lm_head"
+  - "softmax and argmax"
+  - "tokenizer decoding"
+  - "tracking predictions across layers"
+
+validation:
+  must_include:
+    - "model.trace"
+    - "for layer"
+    - "ln_f"
+    - "lm_head"
+    - "softmax"
+    - "argmax"
+    - ".save()"
+  must_not_include:
+    - pattern: "tracer.invoke"
+      reason: "Unnecessary invoke for single prompt"
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  prompt = "The Eiffel Tower is in the city of"
+  layers = model.transformer.h
+  layer_predictions = []
+
+  with model.trace(prompt):
+      for layer_idx, layer in enumerate(layers):
+          hidden = layer.output[0]
+          normed = model.transformer.ln_f(hidden)
+          logits = model.lm_head(normed)
+          probs = torch.nn.functional.softmax(logits[:, -1, :], dim=-1).save()
+          layer_predictions.append(probs)
+
+  for layer_idx, probs in enumerate(layer_predictions):
+      top_token = probs.value.argmax(dim=-1)
+      word = model.tokenizer.decode(top_token[0])
+      print(f"Layer {layer_idx}: {word}")
+
+tags:
+  - "logit-lens"
+  - "visualization"
+  - "layer-analysis"

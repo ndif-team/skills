@@ -1,0 +1,13 @@
+[project]
+name = "skills-benchmark"
+version = "0.1.0"
+description = "Benchmark suite for evaluating coding agents on NDIF-relevant skills"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=0.75.0",
+    "nnsight>=0.5.13",
+    "pyyaml>=6.0.3",
+    "torch>=2.9.1",
+    "transformers>=4.57.3",
+]

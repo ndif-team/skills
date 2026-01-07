@@ -1,0 +1,88 @@
+id: "attribution-patching-001"
+skill: "attribution-patching"
+difficulty: "medium"
+title: "Basic Attribution Patching"
+query: |
+  Implement attribution patching for GPT-2 to approximate activation patching
+  results using gradients. Use the IOI task prompts:
+
+  Clean: "After John and Mary went to the store, Mary gave a bottle of milk to"
+  Corrupted: "After John and Mary went to the store, John gave a bottle of milk to"
+
+  Compute the attribution score for each layer using:
+  attribution = gradient * (clean_activation - corrupted_activation)
+
+expected_concepts:
+  - "gradient access with .backward() context"
+  - "requires_grad enabling"
+  - "reverse order gradient access"
+  - "attribution computation"
+
+validation:
+  must_include:
+    - "model.trace"
+    - ".backward()"
+    - "requires_grad"
+    - ".grad"
+    - ".save()"
+  must_not_include:
+    - pattern: "\\.grad\\.save\\(\\)[^)]*\\.backward"
+      reason: "Accessing grad before backward context"
+  expected_output:
+    type: "tensor"
+    shape: [12]
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  clean_prompt = "After John and Mary went to the store, Mary gave a bottle of milk to"
+  corrupted_prompt = "After John and Mary went to the store, John gave a bottle of milk to"
+
+  correct_token = model.tokenizer(" John")["input_ids"][0]
+  incorrect_token = model.tokenizer(" Mary")["input_ids"][0]
+
+  def logit_diff(logits):
+      return logits[0, -1, correct_token] - logits[0, -1, incorrect_token]
+
+  n_layers = len(model.transformer.h)
+  clean_acts = []
+  corrupted_acts = []
+  corrupted_grads = []
+
+  # Clean forward pass
+  with model.trace(clean_prompt):
+      for layer in model.transformer.h:
+          clean_acts.append(layer.output[0].save())
+
+  # Corrupted forward + backward pass
+  with model.trace(corrupted_prompt):
+      for layer in model.transformer.h:
+          act = layer.output[0]
+          act.requires_grad = True
+          corrupted_acts.append(act.save())
+
+      logits = model.lm_head.output
+      metric = logit_diff(logits)
+
+      with metric.backward():
+          for layer in reversed(model.transformer.h):
+              corrupted_grads.insert(0, layer.output[0].grad.save())
+
+  # Compute attributions
+  attributions = []
+  for i in range(n_layers):
+      clean = clean_acts[i].value
+      corrupted = corrupted_acts[i].value
+      grad = corrupted_grads[i].value
+      attr = (grad * (clean - corrupted)).sum()
+      attributions.append(attr.item())
+
+  print(torch.tensor(attributions))
+
+tags:
+  - "attribution-patching"
+  - "gradients"
+  - "ioi-task"

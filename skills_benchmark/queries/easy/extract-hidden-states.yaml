@@ -1,0 +1,39 @@
+id: "basics-001"
+skill: "nnsight-basics"
+difficulty: "easy"
+title: "Extract Hidden States"
+query: |
+  Using NNsight, load GPT-2 and extract the hidden states from layer 5
+  for the prompt "The Eiffel Tower is in". Print the shape of the hidden states.
+
+expected_concepts:
+  - "LanguageModel initialization"
+  - "trace context"
+  - "layer output access"
+  - "save() for persistence"
+
+validation:
+  must_include:
+    - "LanguageModel"
+    - "model.trace"
+    - ".output"
+    - ".save()"
+    - "transformer.h[5]"
+  must_not_include:
+    - pattern: "model\\.transformer\\.h\\[5\\]\\.output\\[0\\]$"
+      reason: "Missing .save() call"
+
+reference_solution: |
+  from nnsight import LanguageModel
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  with model.trace("The Eiffel Tower is in"):
+      hidden_states = model.transformer.h[5].output[0].save()
+
+  print(hidden_states.value.shape)
+
+tags:
+  - "basics"
+  - "hidden-states"
+  - "gpt2"

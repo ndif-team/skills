@@ -74,6 +74,27 @@ skills/
             └── ...
 ```
 
+## Benchmarking
+
+The `skills_benchmark/` directory contains a framework for evaluating how much these skills improve AI agent performance on NNsight coding tasks.
+
+**Key features:**
+
+- Multiple benchmark queries across 3 difficulty levels (`easy`, `medium`, `hard`)
+- Structural validation for required/forbidden patterns
+- Deprecated pattern detection (pre-NNsight 0.5 APIs)
+- Comparison tools for with-skills vs without-skills runs
+
+```bash
+# Run benchmark with mock runner
+python skills_benchmark/runners/base.py --num-runs 1 --output results/test.json
+
+# Compare two benchmark runs
+python skills_benchmark/analyze.py compare results/with_skills.json results/without_skills.json
+```
+
+See [`skills_benchmark/README.md`](skills_benchmark/README.md) for full documentation.
+
 ## Resources
 
 - [NNsight Documentation](https://nnsight.net/)

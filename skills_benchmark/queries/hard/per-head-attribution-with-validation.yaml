@@ -1,0 +1,121 @@
+id: "attribution-patching-002"
+skill: "attribution-patching"
+difficulty: "hard"
+title: "Per-Head Attribution with Validation"
+query: |
+  Implement per-attention-head attribution patching for GPT-2 on the IOI task,
+  then validate the top 3 most important heads with actual activation patching.
+
+  1. Use attribution patching to efficiently score all 144 heads (12 layers x 12 heads)
+  2. Identify the top 3 heads by absolute attribution score
+  3. Validate these 3 heads using actual activation patching
+  4. Report correlation between attribution and patching scores for the top 3
+
+  This demonstrates using attribution for screening and patching for confirmation.
+
+expected_concepts:
+  - "attention head attribution via c_proj.input"
+  - "reshaping for per-head analysis"
+  - "efficient gradient computation"
+  - "validation with actual patching"
+  - "correlation analysis"
+
+validation:
+  must_include:
+    - "model.trace"
+    - ".backward()"
+    - "c_proj.input"
+    - "rearrange"
+    - ".grad"
+    - ".save()"
+  must_not_include:
+    - pattern: "\\.grad\\.save\\(\\)[^)]*\\.backward"
+      reason: "Accessing grad before backward context"
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+  from einops import rearrange
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  clean_prompt = "After John and Mary went to the store, Mary gave a bottle of milk to"
+  corrupted_prompt = "After John and Mary went to the store, John gave a bottle of milk to"
+
+  correct_token = model.tokenizer(" John")["input_ids"][0]
+  incorrect_token = model.tokenizer(" Mary")["input_ids"][0]
+
+  def logit_diff(logits):
+      return logits[0, -1, correct_token] - logits[0, -1, incorrect_token]
+
+  n_layers = len(model.transformer.h)
+  n_heads = model.config.n_head
+  head_dim = model.config.n_embd // n_heads
+
+  # Step 1: Attribution patching for all heads
+  clean_attn = []
+  corrupted_attn = []
+  attn_grads = []
+
+  with model.trace(clean_prompt):
+      for layer in model.transformer.h:
+          clean_attn.append(layer.attn.c_proj.input[0][0].save())
+
+  with model.trace(corrupted_prompt):
+      for layer in model.transformer.h:
+          attn_out = layer.attn.c_proj.input[0][0]
+          attn_out.requires_grad = True
+          corrupted_attn.append(attn_out.save())
+
+      metric = logit_diff(model.lm_head.output)
+
+      with metric.backward():
+          for layer in reversed(model.transformer.h):
+              attn_grads.insert(0, layer.attn.c_proj.input[0][0].grad.save())
+
+  # Compute per-head attributions
+  head_attrs = torch.zeros(n_layers, n_heads)
+  for layer_idx in range(n_layers):
+      clean = clean_attn[layer_idx].value
+      corrupted = corrupted_attn[layer_idx].value
+      grad = attn_grads[layer_idx].value
+
+      clean_heads = rearrange(clean, 'b s (h d) -> b s h d', h=n_heads)
+      corrupted_heads = rearrange(corrupted, 'b s (h d) -> b s h d', h=n_heads)
+      grad_heads = rearrange(grad, 'b s (h d) -> b s h d', h=n_heads)
+
+      diff = clean_heads - corrupted_heads
+      attr = (grad_heads * diff).sum(dim=(0, 1, 3))
+      head_attrs[layer_idx] = attr
+
+  # Step 2: Find top 3 heads
+  flat_attrs = head_attrs.flatten()
+  top_indices = flat_attrs.abs().topk(3).indices
+  top_heads = [(idx.item() // n_heads, idx.item() % n_heads) for idx in top_indices]
+  print(f"Top 3 heads by attribution: {top_heads}")
+
+  # Step 3: Validate with actual patching
+  with model.trace(clean_prompt):
+      clean_attn_full = [layer.attn.c_proj.input[0][0].save()
+                         for layer in model.transformer.h]
+
+  patching_scores = []
+  for layer_idx, head_idx in top_heads:
+      with model.trace(corrupted_prompt):
+          start = head_idx * head_dim
+          end = (head_idx + 1) * head_dim
+          model.transformer.h[layer_idx].attn.c_proj.input[0][0][:, :, start:end] = \
+              clean_attn_full[layer_idx][:, :, start:end]
+          patched_logits = model.lm_head.output.save()
+      patching_scores.append(logit_diff(patched_logits.value).item())
+
+  # Step 4: Report results
+  attribution_scores = [head_attrs[l, h].item() for l, h in top_heads]
+  print(f"Attribution scores: {attribution_scores}")
+  print(f"Patching scores: {patching_scores}")
+
+tags:
+  - "attribution-patching"
+  - "attention-heads"
+  - "validation"
+  - "screening"

@@ -1,0 +1,38 @@
+id: "basics-002"
+skill: "nnsight-basics"
+difficulty: "easy"
+title: "Zero Ablation Intervention"
+query: |
+  Using NNsight, load GPT-2 and zero out the output of layer 8's MLP
+  for the prompt "Hello world". Save and print the final logits shape.
+
+expected_concepts:
+  - "trace context"
+  - "in-place intervention"
+  - "mlp output access"
+  - "lm_head output"
+
+validation:
+  must_include:
+    - "model.trace"
+    - "mlp.output"
+    - "= 0"
+    - "lm_head"
+    - ".save()"
+  must_not_include: []
+
+reference_solution: |
+  from nnsight import LanguageModel
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  with model.trace("Hello world"):
+      model.transformer.h[8].mlp.output[0][:] = 0
+      logits = model.lm_head.output.save()
+
+  print(logits.value.shape)
+
+tags:
+  - "basics"
+  - "intervention"
+  - "ablation"

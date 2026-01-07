@@ -1,0 +1,38 @@
+id: "basics-004"
+skill: "nnsight-basics"
+difficulty: "easy"
+title: "Early Stopping"
+query: |
+  Using NNsight with GPT-2, extract the hidden states from layer 3 for the prompt
+  "Hello world" and then stop the forward pass early using tracer.stop().
+  This saves computation by not running layers 4-11.
+
+expected_concepts:
+  - "trace context with tracer"
+  - "early stopping"
+  - "tracer.stop()"
+  - "saving values before stop"
+
+validation:
+  must_include:
+    - "model.trace"
+    - "tracer.stop()"
+    - "transformer.h[3]"
+    - ".save()"
+  must_not_include: []
+
+reference_solution: |
+  from nnsight import LanguageModel
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  with model.trace("Hello world") as tracer:
+      hidden = model.transformer.h[3].output[0].save()
+      tracer.stop()
+
+  print(hidden.value.shape)
+
+tags:
+  - "basics"
+  - "early-stopping"
+  - "efficiency"
