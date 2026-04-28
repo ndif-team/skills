@@ -1,26 +1,9 @@
 ---
 name: causal-tracing
-description: Causal mediation analysis to identify which model components mediate specific behaviors. Use when investigating how information flows through the network and which neurons or layers are causally responsible for outputs.
+description: "Perform causal mediation analysis to identify which model components mediate specific behaviors using nnsight — compute direct and indirect causal effects, patch activations between runs, and decompose MLP vs attention contributions. Use when performing causal tracing, investigating information flow, running ablation studies, or identifying causally responsible neurons and layers in mechanistic interpretability research."
 ---
 
 # Causal Tracing
-
-Causal tracing (causal mediation analysis) identifies which intermediate computations causally mediate the relationship between inputs and outputs. It reveals not just what correlates with behavior, but what causes it.
-
-## Core Concepts
-
-### Three Types of Causal Effects
-
-1. **Total Effect**: Change in output when modifying input
-2. **Direct Effect**: Effect of restoring a component from clean to corrupted run
-3. **Indirect Effect**: Effect of corrupting a component in an otherwise clean run
-
-### The Interchange Intervention
-
-Swap activations between two runs to test causal relationships:
-
-- **Source run**: Produces the activation value
-- **Base run**: Receives the swapped activation
 
 ## Setup
 
@@ -217,10 +200,3 @@ axes[1].set_ylabel('Layer')
 plt.tight_layout()
 ```
 
-## Interpretation Guidelines
-
-- **Early layers + subject position**: Often store entity information
-- **Middle layers + last subject token**: Information extraction/lookup
-- **Late layers + final position**: Prediction formation
-- **High indirect effect**: Component is necessary for behavior
-- **High direct effect**: Component is sufficient to cause behavior

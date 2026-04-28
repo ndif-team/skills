@@ -1,27 +1,9 @@
 ---
 name: attribution-patching
-description: Gradient-based approximation to activation patching for scalable circuit analysis. Use when activation patching is too slow or when analyzing many components simultaneously.
+description: "Compute attribution scores via gradient-based approximation to activation patching for scalable circuit analysis using nnsight. Use when ranking model components by causal importance, performing attribution patching (AtP), analyzing many components simultaneously in mechanistic interpretability, or when full activation patching is too slow."
 ---
 
 # Attribution Patching
-
-Attribution patching uses gradients to approximate activation patching results in a single backward pass, making it practical to analyze thousands of components simultaneously.
-
-## Core Idea
-
-Instead of running separate forward passes for each component:
-
-1. Run clean and corrupted forward passes
-2. Compute gradients of the metric w.r.t. corrupted activations
-3. Multiply gradients by (clean - corrupted) activation differences
-
-This linear approximation works when clean and corrupted runs are similar.
-
-## Mathematical Formula
-
-```
-attribution(component) = grad_corrupted(metric) * (clean_activation - corrupted_activation)
-```
 
 ## Setup
 
@@ -194,33 +176,27 @@ for i in range(n_layers):
     attributions.append(attr.item())
 ```
 
-## Comparison with Activation Patching
+## Validation Against Activation Patching
 
-| Aspect | Activation Patching | Attribution Patching |
-| ------ | ------------------- | -------------------- |
-| Accuracy | Exact | Approximation |
-| Speed | O(n_components) forwards | O(1) forward + backward |
-| Memory | Lower per run | Higher (stores grads) |
-| Best for | Few components | Many components |
-
-## Validation
-
-Compare attribution results against ground truth patching:
+Verify attribution scores correlate with ground-truth patching by running activation patching on the top-attributed components:
 
 ```python
-# Scatter plot: attribution vs actual patching effect
-import matplotlib.pyplot as plt
+# Run activation patching on top-K attributed layers for ground truth
+top_k_layers = attributions.topk(5).indices
 
-plt.scatter(attributions, actual_patching_results)
-plt.xlabel("Attribution Score")
-plt.ylabel("Actual Patching Effect")
-plt.title("Attribution vs Patching Correlation")
-correlation = torch.corrcoef(torch.stack([attributions, actual_patching_results]))[0, 1]
-plt.text(0.1, 0.9, f"r = {correlation:.3f}", transform=plt.gca().transAxes)
+with model.trace(clean_prompt):
+    clean_hiddens = [layer.output[0].save() for layer in model.transformer.h]
+
+patching_results = []
+for layer_idx in top_k_layers:
+    with model.trace(corrupted_prompt):
+        model.transformer.h[layer_idx].output[0][:] = clean_hiddens[layer_idx]
+        patched_logits = model.lm_head.output.save()
+    patching_results.append(logit_diff(patched_logits.value))
+
+# Compare: high correlation (r > 0.8) confirms attribution approximation is reliable
+attr_scores = attributions[top_k_layers]
+patch_scores = torch.tensor(patching_results)
+correlation = torch.corrcoef(torch.stack([attr_scores, patch_scores]))[0, 1]
+print(f"Attribution vs patching correlation: r = {correlation:.3f}")
 ```
-
-## When to Use
-
-- **Use attribution patching**: Initial exploration, many components, large models
-- **Use activation patching**: Validating specific components, exact measurements needed
-- **Combine both**: Attribution for screening, patching for confirmation

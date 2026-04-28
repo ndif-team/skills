@@ -1,19 +1,9 @@
 ---
 name: activation-patching
-description: Causal intervention via activation patching to identify important model components. Use when determining which layers, heads, or positions are causally responsible for model behavior.
+description: "Perform causal interventions via activation patching to identify important model components using nnsight — patch activations between clean and corrupted runs, generate component importance scores, and test individual attention heads. Use when determining which layers, heads, or positions are causally responsible for model behavior, running ablation experiments, or validating circuit hypotheses in mechanistic interpretability."
 ---
 
 # Activation Patching
-
-Activation patching is a causal intervention technique that identifies which model components are responsible for specific behaviors by swapping activations between different inputs.
-
-## Core Concept
-
-1. **Clean run**: Run model on prompt that produces desired behavior
-2. **Corrupted run**: Run on modified prompt that changes the behavior
-3. **Patch**: Replace corrupted activations with clean ones, measure if behavior is restored
-
-If patching a component restores the clean behavior, that component is causally important.
 
 ## Basic Setup
 
@@ -165,9 +155,3 @@ plt.tight_layout()
 plt.show()
 ```
 
-## Interpretation
-
-- **High positive values**: Component is important for correct behavior
-- **Values near 0**: Component doesn't affect this behavior
-- **Negative values**: Component actively pushes toward wrong answer
-- **Clusters of importance**: Suggest circuits or computational stages

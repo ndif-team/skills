@@ -1,18 +1,9 @@
 ---
 name: nnsight-basics
-description: Core nnsight concepts for neural network interpretability. Use when setting up models, tracing activations, saving values, or making basic interventions on model internals.
+description: "Core nnsight patterns for neural network interpretability — load models, trace forward passes, hook into transformer layers, save and modify activations, and access gradients. Use when setting up nnsight models, extracting hidden states, patching activations, performing mechanistic interpretability experiments, or making interventions on transformer internals."
 ---
 
 # NNsight Basics
-
-NNsight provides full access to neural network internals during forward passes. This skill covers the fundamental patterns for tracing, saving, and modifying activations.
-
-## Installation
-
-```python
-pip install nnsight
-pip install torch transformers
-```
 
 ## Loading Models
 
@@ -33,8 +24,6 @@ model = NNsight(your_pytorch_model)
 ```
 
 ## The Tracing Context
-
-All interventions happen inside `model.trace()`. Your code interleaves with the forward pass.
 
 ```python
 with model.trace("The Eiffel Tower is in"):
@@ -65,17 +54,14 @@ with model.trace(prompt):
 
 ## Saving Values
 
-Values only persist if explicitly saved:
-
 ```python
-# Call .save() on the proxy to persist it outside the trace
 output = model.transformer.h[0].output[0].save()
 ```
 
-After exiting the trace context, access the actual tensor via `.value`:
+Access the actual tensor via `.value` after exiting the trace:
 
 ```python
-print(output.value.shape)  # Access the saved tensor
+print(output.value.shape)
 ```
 
 ## Basic Interventions
@@ -244,8 +230,3 @@ with model.trace("Hello", remote=True):
     hidden = model.model.layers[-1].output[0].save()
 ```
 
-## Common Pitfalls
-
-1. **Forgetting `.save()`**: Values not saved are lost after tracing
-2. **Out-of-order access**: Access modules in execution order only
-3. **Using values inside trace**: Use `.save()` and access `.value` outside the trace

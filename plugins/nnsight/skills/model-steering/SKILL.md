@@ -1,15 +1,11 @@
 ---
 name: model-steering
-description: Control model behavior through persistent edits and steering interventions. Use when modifying model outputs, applying steering vectors, or creating persistently modified model versions.
+description: "Apply activation steering vectors, compute contrastive activation differences, create persistent model edits, and perform ablation studies using nnsight. Use when changing model behavior without retraining, applying representation engineering or activation addition (ActAdd), computing steering vectors from contrastive prompts, ablating attention heads, or creating persistently modified model versions."
 ---
 
 # Model Steering
 
-Model steering manipulates model activations to control outputs without retraining. This includes one-off interventions, persistent edits, and steering vector techniques.
-
 ## Basic Steering Intervention
-
-Modify activations during a single forward pass:
 
 ```python
 from nnsight import LanguageModel
@@ -228,10 +224,21 @@ for val, idx in zip(bottom_values, bottom_indices):
     print(f"  {model.tokenizer.decode(idx)}: {val:.3f}")
 ```
 
-## Best Practices
+## Verifying a Steering Vector
 
-1. **Layer selection**: Middle-to-late layers often work best
-2. **Strength tuning**: Start small (0.1-0.5), increase gradually
-3. **Validation**: Test on diverse prompts to avoid overfitting
-4. **Orthogonalization**: Remove overlap with other behaviors
-5. **Position**: Final token position usually most effective
+Compare steered vs unsteered outputs to confirm the vector produces the intended behavioral shift:
+
+```python
+test_prompts = ["I think the movie was", "The food at this restaurant is", "My experience was"]
+
+for prompt in test_prompts:
+    with model.trace(prompt):
+        baseline = model.lm_head.output.save()
+    with model.trace(prompt):
+        model.transformer.h[layer_idx].output[0][:, -1, :] += steering_strength * steering_vector
+        steered = model.lm_head.output.save()
+
+    base_token = model.tokenizer.decode(baseline.value[0, -1].argmax())
+    steer_token = model.tokenizer.decode(steered.value[0, -1].argmax())
+    print(f"'{prompt}' → baseline: '{base_token}', steered: '{steer_token}'")
+```
