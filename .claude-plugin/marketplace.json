@@ -8,7 +8,7 @@
     {
       "name": "nnsight",
       "source": "./plugins/nnsight",
-      "description": "Neural network interpretability with nnsight - includes skills for tracing, logit lens, activation patching, attribution patching, causal tracing, and model steering"
+      "description": "Neural network interpretability with nnsight - includes skills for tracing, logit lens, activation patching, attribution patching, causal tracing, model steering, and remote execution"
     }
   ]
 }
