@@ -78,6 +78,31 @@ After exiting the trace context, access the actual tensor via `.value`:
 print(output.value.shape)  # Access the saved tensor
 ```
 
+## Caching Activations in One Pass
+
+Every `with model.trace(...):` is a full forward pass. If you want activations from many modules of the *same* input, gather them inside a single trace by looping over the modules — don't open one trace per module.
+
+```python
+# One forward pass, collects every layer's output
+hidden_states = list()
+with model.trace(prompt):
+    for layer in model.transformer.h:
+        hidden_states.append(layer.output[0].save())
+
+print(hidden_states[0].value.shape)
+```
+
+The anti-pattern is opening N traces to fetch N layers' outputs from one input — that's N forward passes for no reason.
+
+For the catch-all "give me everything" case, `tracer.cache()` captures all module outputs without listing them by name:
+
+```python
+with model.trace(prompt) as tracer:
+    cache = tracer.cache()
+```
+
+The general rule: structure traces by *what input* you're running, not by *what activations* you're gathering.
+
 ## Basic Interventions
 
 **Zero out activations:**
@@ -105,7 +130,9 @@ with model.trace(prompt):
 
 ## Batched Processing with Invokers
 
-Process multiple inputs in one trace using `tracer.invoke()`:
+`tracer.invoke()` runs multiple inputs through one forward pass while keeping their interventions isolated. Indices inside an invoke block refer to that invoke's slice of the batch — write `[:, -1, :]` as if it were the only input and nnsight handles the underlying batch arithmetic.
+
+**Distinct prompts in one pass:**
 
 ```python
 with model.trace() as tracer:
@@ -115,8 +142,53 @@ with model.trace() as tracer:
     with tracer.invoke("Second prompt"):
         second_output = model.lm_head.output.save()
 
-# Access results
 print(first_output.value.shape, second_output.value.shape)
+```
+
+**Sweep pattern.** When you want the same intervention applied with one varying parameter (patching each head one at a time, ablating each position, sweeping a steering coefficient), put the loop inside the trace and create one invoke per variant. Don't pass the input to `model.trace()` — pass it to each invoke:
+
+```python
+results = list().save()
+with model.trace() as tracer:                        # no input here
+    for head_idx in range(n_heads):
+        with tracer.invoke(prompt):                  # input passed per-invoke
+            start, end = head_idx * head_dim, (head_idx + 1) * head_dim
+            model.transformer.h[layer].attn.c_proj.input[0][0][:, :, start:end] = \
+                clean_attn[:, :, start:end]
+            results.append(model.lm_head.output[:, -1].save())
+```
+
+This collapses N forward passes into one. The effective batch size grows with the number of invokes, so chunk the loop into groups if you OOM.
+
+## Module Skipping
+
+`module.skip(value)` bypasses a module's forward pass entirely — `value` becomes the output that propagates to the next module. Use it to substitute cached activations or short-circuit computation you've already done.
+
+```python
+# Pre-cache layer outputs from one input
+clean_acts = list()
+with model.trace(clean_prompt):
+    for layer in model.model.layers:
+        clean_acts.append(layer.output)
+
+# On a different input, skip layers 0..L-1 by replacing their outputs with the cache,
+# then intervene at layer L with everything before it bypassed
+with model.trace(other_prompt):
+    for i in range(L):
+        model.model.layers[i].skip(clean_acts[i])
+    # ...patch at layer L...
+```
+
+The savings scale with how much computation you skip — depth × sequence length. On small models with short sequences the bookkeeping can outweigh the savings; on deep models it's substantial.
+
+**Multi-invoke constraint.** If you call `.skip()` on a module in any invoke of a trace, you must call it in *every* invoke of that trace. Invokes share one underlying forward pass, so the skip has to apply uniformly:
+
+```python
+with model.trace() as tracer:
+    with tracer.invoke(prompt_a):
+        model.model.layers[3].skip(value_a)  # required
+    with tracer.invoke(prompt_b):
+        model.model.layers[3].skip(value_b)  # also required, even if value differs
 ```
 
 ## Cross-Prompt Interventions (Barriers)
@@ -223,13 +295,6 @@ with model.scan(prompt):
     shape = model.transformer.h[0].output[0].shape.save()
 ```
 
-**Cache all module outputs:**
-
-```python
-with model.trace(prompt) as tracer:
-    cache = tracer.cache()  # Stores all outputs
-```
-
 ## Remote Execution (NDIF)
 
 For large models, use NDIF's remote infrastructure:
@@ -243,6 +308,8 @@ model = LanguageModel("meta-llama/Llama-3.1-70B")
 with model.trace("Hello", remote=True):
     hidden = model.model.layers[-1].output[0].save()
 ```
+
+When writing more than one trace against a remote model, see the `remote` skill for the request-batching and download-pruning patterns that keep latency manageable.
 
 ## Common Pitfalls
 
