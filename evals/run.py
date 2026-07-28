@@ -2,21 +2,30 @@
 """Run the grid: tasks x resource conditions x models x repeats.
 
 Results are appended to a JSONL file, one record per run, so a sweep can be
-interrupted and resumed without re-paying for completed cells.
+interrupted and resumed without repeating completed cells.
 
-    # what would run, and what it should cost
+On a Claude subscription nothing here is billed — the `claude` CLI authenticates
+with your existing login, and the dollar figures it reports are the API-EQUIVALENT
+price of the tokens, not a charge. Budget with --max-tokens; --max-cost is the
+same ceiling expressed in that proxy currency.
+
+    # what would run, and how much usage it should take
     python run.py --dry-run
 
     # a cheap smoke sweep
     python run.py --conditions none skills --tasks basic_01_trace_and_save --repeats 1
 
-    # the full grid, resumable, with a spend ceiling
-    python run.py --models sonnet opus --repeats 3 --max-cost 250 --output results/grid.jsonl
+    # the full grid, resumable, with a usage ceiling
+    python run.py --models sonnet opus --repeats 3 --max-tokens 100_000_000 --output results/grid.jsonl
     python run.py --resume --output results/grid.jsonl      # continue where it stopped
 
 Metrics recorded per run: pass/fail, wall-clock for the agent and for execution,
-tokens by class, dollars, turns, which resource files were read, which skills
-fired, and a failure class for anything that did not pass.
+tokens by class, API-equivalent dollars, turns, which resource files were read,
+which skills fired, and a failure class for anything that did not pass.
+
+Account-level failures (usage window, expired login) stop the sweep instead of
+being recorded as task failures — otherwise a limit hit mid-run would silently
+turn into a wall of zeros in the results.
 """
 
 from __future__ import annotations
@@ -37,7 +46,12 @@ from evalkit.registry import Difficulty, TaskKind, load_all, select  # noqa: E40
 from evalkit.runner import run_task  # noqa: E402
 
 # Rough per-task cost, measured on the smoke runs. Only used by --dry-run.
+# Rough per-task usage, measured on the smoke runs. `cost` here is the
+# API-EQUIVALENT price the CLI reports; on a Claude subscription nothing is
+# billed against it, so treat it as a proxy for how much usage a sweep burns.
+# `tokens` is the number that actually matters against a subscription window.
 COST_HINTS = {"none": 0.005, "static": 0.12, "agentic": 0.11}
+TOKEN_HINTS = {"none": 2_000, "static": 60_000, "agentic": 55_000}
 
 
 def cell_key(record: dict) -> tuple:
@@ -75,7 +89,10 @@ def main(argv=None) -> int:
     parser.add_argument("--output", default="results/grid.jsonl")
     parser.add_argument("--resume", action="store_true", help="skip cells already in the output file")
     parser.add_argument("--dry-run", action="store_true", help="list the grid and estimate cost")
-    parser.add_argument("--max-cost", type=float, help="stop once this many dollars have been spent")
+    parser.add_argument("--max-cost", type=float,
+                        help="stop once API-equivalent cost reaches this (proxy, not billed on a subscription)")
+    parser.add_argument("--max-tokens", type=int,
+                        help="stop once this many tokens have been used (the real budget on a subscription)")
     parser.add_argument("--timeout", type=int, default=900, help="per-agent-call timeout")
     args = parser.parse_args(argv)
 
@@ -110,11 +127,15 @@ def main(argv=None) -> int:
     estimate = sum(
         COST_HINTS.get(cell[1].name, COST_HINTS.get(cell[1].mode, 0.1)) for cell in pending
     )
+    token_estimate = sum(
+        TOKEN_HINTS.get(cell[1].name, TOKEN_HINTS.get(cell[1].mode, 50_000)) for cell in pending
+    )
     print(f"{len(tasks)} tasks x {len(conditions)} conditions x {len(args.models)} models "
           f"x {args.repeats} repeats = {len(cells)} cells")
     if done:
         print(f"{len(cells) - len(pending)} already done, {len(pending)} to run")
-    print(f"rough cost estimate: ${estimate:.2f}\n")
+    print(f"rough usage estimate: {token_estimate:,} tokens "
+          f"(~${estimate:.2f} API-equivalent; not billed on a Claude subscription)\n")
 
     if args.dry_run:
         for model in args.models:
@@ -126,13 +147,17 @@ def main(argv=None) -> int:
     providers = {model: get_provider(args.provider, model, timeout=args.timeout) for model in args.models}
 
     spent = 0.0
+    tokens_used = 0
     passed = 0
     started_all = time.time()
 
     with output.open("a") as handle:
         for index, (model, condition, task, repeat) in enumerate(pending, start=1):
             if args.max_cost is not None and spent >= args.max_cost:
-                print(f"\nstopping: spent ${spent:.2f}, ceiling ${args.max_cost:.2f}")
+                print(f"\nstopping: ${spent:.2f} API-equivalent reached the ${args.max_cost:.2f} ceiling")
+                break
+            if args.max_tokens is not None and tokens_used >= args.max_tokens:
+                print(f"\nstopping: {tokens_used:,} tokens reached the {args.max_tokens:,} ceiling")
                 break
 
             try:
@@ -143,6 +168,14 @@ def main(argv=None) -> int:
                 traceback.print_exc()
             else:
                 error = "" if response.ok else response.error
+
+            if response is not None and getattr(response, "error_kind", "") == "limit":
+                print(
+                    f"\nSTOPPING — the account, not the task, failed:\n  {response.error[:300]}\n\n"
+                    "This cell was NOT recorded, so it will be retried. Resume with:\n"
+                    f"  python run.py --resume --output {output} ...\n"
+                )
+                break
 
             if response is not None and response.ok:
                 outcome = run_task(task, response.text)
@@ -170,6 +203,7 @@ def main(argv=None) -> int:
 
             if response is not None:
                 spent += response.cost_usd
+                tokens_used += response.total_tokens
             passed += int(record["passed"])
 
             mark = "PASS" if record["passed"] else "fail"
@@ -180,12 +214,15 @@ def main(argv=None) -> int:
                 detail = f" [agent: {error[:40]}]"
             print(
                 f"{index:>4}/{len(pending)} {mark} {model:<7} {condition.name:<15} "
-                f"{task.id:<44} ${spent:6.2f}{detail}"
+                f"{task.id:<44} {tokens_used / 1000:6.0f}k{detail}"
             )
 
     elapsed = time.time() - started_all
     attempted = min(len(pending), index if pending else 0)
-    print(f"\n{passed}/{attempted} passed  |  ${spent:.2f}  |  {elapsed / 60:.1f} min")
+    print(
+        f"\n{passed}/{attempted} passed  |  {tokens_used:,} tokens  "
+        f"|  ${spent:.2f} API-equivalent  |  {elapsed / 60:.1f} min"
+    )
     print(f"records appended to {output}")
     print(f"report with:  python report.py {output}")
     return 0

@@ -7,7 +7,8 @@
 Headline table is per condition: pass rate with a Wilson interval (agents are
 stochastic, so a bare percentage over a handful of runs is noise), plus the two
 efficiency numbers that decide whether a resource is worth its context —
-**tokens per solve** and **dollars per solve**.
+**tokens per solve** and **API-equivalent dollars per solve** (on a subscription
+the dollars are a proxy for usage, not a charge).
 """
 
 from __future__ import annotations
@@ -83,8 +84,8 @@ def format_table(summary: dict[str, dict], label: str, order: list[str] | None =
     names = [n for n in names if n in summary]
     width = max([len(label)] + [len(n) for n in names])
     lines = [
-        f"| {label:<{width}} | pass | 95% CI | n | tok/solve | $/solve | med s | turns | reads |",
-        f"|{'-' * (width + 2)}|------|--------|---|-----------|---------|-------|-------|-------|",
+        f"| {label:<{width}} | pass | 95% CI | n | tok/solve | $-equiv/solve | med s | turns | reads |",
+        f"|{'-' * (width + 2)}|------|--------|---|-----------|---------------|-------|-------|-------|",
     ]
     for name in names:
         s = summary[name]
@@ -144,7 +145,8 @@ def build_report(records: list[dict], condition_order: list[str] | None) -> str:
         f"{len({r['task_id'] for r in records})} tasks · "
         f"{len({r['condition'] for r in records})} conditions · "
         f"{len({r['model'] for r in records})} model(s) · "
-        f"${sum(r.get('agent', {}).get('cost_usd', 0) for r in records):.2f} spent",
+        f"{sum(r.get('agent', {}).get('total_tokens', 0) for r in records):,} tokens "
+        f"(${sum(r.get('agent', {}).get('cost_usd', 0) for r in records):.2f} API-equivalent)",
         "",
         "## By resource condition",
         "",

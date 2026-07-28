@@ -36,11 +36,36 @@ AGENTIC_TOOLS = ["Read", "Grep", "Glob", "Skill"]
 DENIED_TOOLS = ["Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]
 
 
+# Signals that the account, not the task, is what failed. On a subscription the
+# realistic way a long sweep dies is hitting a usage window — and if those cells
+# were recorded as task failures they would silently corrupt the results.
+LIMIT_MARKERS = (
+    "usage limit",
+    "rate limit",
+    "rate_limit",
+    "429",
+    "quota",
+    "not logged in",
+    "please run /login",
+    "authentication",
+    "credit balance",
+    "overloaded",
+)
+
+
+def classify_error(text: str) -> str:
+    """'limit' for account/quota problems, 'task' for anything else."""
+    lowered = (text or "").lower()
+    return "limit" if any(marker in lowered for marker in LIMIT_MARKERS) else "task"
+
+
 @dataclass
 class AgentResponse:
     text: str
     ok: bool = True
     error: str = ""
+    #: "" when fine, "limit" when the account is the problem, "task" otherwise.
+    error_kind: str = ""
     duration_seconds: float = 0.0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -66,6 +91,7 @@ class AgentResponse:
         return {
             "ok": self.ok,
             "error": self.error,
+            "error_kind": self.error_kind,
             "duration_seconds": round(self.duration_seconds, 3),
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -206,6 +232,7 @@ class ClaudeCodeProvider:
                     text="",
                     ok=False,
                     error=f"claude CLI timed out after {self.timeout}s",
+                    error_kind="task",
                     duration_seconds=time.time() - started,
                 )
             elapsed = time.time() - started
@@ -214,6 +241,13 @@ class ClaudeCodeProvider:
         response.duration_seconds = elapsed
         if not response.ok and not response.error:
             response.error = (completed.stderr or completed.stdout or "")[-500:]
+        if not response.ok:
+            response.error_kind = classify_error(response.error)
+        elif not response.text.strip():
+            # A silent empty answer is usually the CLI refusing to start.
+            response.ok = False
+            response.error = "empty response from the CLI"
+            response.error_kind = classify_error(completed.stderr or "")
         return response
 
 
@@ -304,8 +338,10 @@ class AnthropicProvider:
                 messages=[{"role": "user", "content": prompt}],
             )
         except Exception as exc:  # noqa: BLE001 — surfaced in the record
+            message_text = f"{type(exc).__name__}: {exc}"
             return AgentResponse(
-                text="", ok=False, error=f"{type(exc).__name__}: {exc}",
+                text="", ok=False, error=message_text,
+                error_kind=classify_error(message_text),
                 duration_seconds=time.time() - started,
             )
 
