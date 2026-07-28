@@ -157,22 +157,6 @@ register_mcq(
 )
 
 register_mcq(
-    id='mcq_advanced_04_eproperty_iproperty',
-    name='04 eproperty iproperty',
-    difficulty=Difficulty.ADVANCED,
-    question="What is `eproperty` and what does its decorated stub method's body do at runtime?",
-    choices=[
-        'A normal `@property` -- the body is invoked on every access and its return value is the result.',
-        'A descriptor for `IEnvoy` objects; the stub body is NEVER executed for its return value -- it carries pre-setup decorators (e.g. `@requires_output`) and donates `__name__`/`__doc__`. `__get__` blocks on `interleaver.current.request(...)` until a hook delivers the value.',
-        'A class-level cache; the body runs once and the result is memoized for the lifetime of the model.',
-        "A coroutine wrapper; the body is scheduled on the worker thread's event loop.",
-    ],
-    correct_index=1,
-    explanation='`docs/concepts/envoy-and-eproperty.md` -- the descriptor is in `interleaver.py:60`; the stub is a no-op carrier for setup decorators.',
-    tags=['envoy', 'eproperty', 'advanced'],
-)
-
-register_mcq(
     id='mcq_advanced_05_envoy_call_hook_default',
     name='05 envoy call hook default',
     difficulty=Difficulty.ADVANCED,
@@ -202,22 +186,6 @@ register_mcq(
     correct_index=1,
     explanation='`docs/usage/scan.md` and `docs/gotchas/save.md` -- scan is a tracing context that goes through the same exit filter; use `nnsight.save(...)` for non-tensor values like ints.',
     tags=['scan', 'save', 'advanced'],
-)
-
-register_mcq(
-    id='mcq_advanced_07_edit_inplace_persistent',
-    name='07 edit inplace persistent',
-    difficulty=Difficulty.ADVANCED,
-    question='What is the effect of `with model.edit(inplace=True): model.h[1].output[0][:] = 0`?',
-    choices=[
-        'Runs the intervention once on a default input, then discards it.',
-        'Compiles the intervention as a `Mediator` and prepends it to `_default_mediators`; every subsequent `model.trace(...)` runs that intervention before user invokes.',
-        'Returns a new edited copy; the original `model` is unchanged.',
-        'Raises -- `inplace=True` is not supported on `LanguageModel`.',
-    ],
-    correct_index=1,
-    explanation='`docs/usage/edit.md` -- `EditingBackend` builds a Mediator from the body; `InterleavingTracer.compile` prepends `_default_mediators` to every future trace.',
-    tags=['edit', 'advanced', 'persistent'],
 )
 
 register_mcq(
@@ -282,22 +250,6 @@ register_mcq(
     correct_index=1,
     explanation="`docs/models/vllm.md` -- `vllm.py:102/112` defines `logits` and `samples` as iterating eproperties; they're VLLM-specific.",
     tags=['vllm', 'advanced', 'eproperty'],
-)
-
-register_mcq(
-    id='mcq_meta_01_pymount_config',
-    name='01 pymount config',
-    difficulty=Difficulty.INTERMEDIATE,
-    question='What does `CONFIG.APP.PYMOUNT` (default `True`) control?',
-    choices=[
-        'Whether traces are mounted to a shared GPU memory pool.',
-        'Whether the `py_mount.c` C extension injects `.save()` and `.stop()` onto every Python `object` so that `tensor.save()` / `[1,2,3].save()` works. With it `False` you must use `nnsight.save(obj)` explicitly.',
-        'Whether nnsight uses Python multiprocessing for batches.',
-        'Whether print statements are forwarded from the worker thread.',
-    ],
-    correct_index=1,
-    explanation='`docs/reference/config.md` and `docs/reference/glossary.md#pymount` -- pymount is a C extension; disabling it forces use of `nnsight.save(...)`.',
-    tags=['config', 'pymount', 'meta'],
 )
 
 register_mcq(
@@ -529,4 +481,78 @@ register_mcq(
     correct_index=1,
     explanation="No backward through the engine, and no scan or source-tracing on fused kernels. Tensor parallelism is supported and transparent.",
     tags=["vllm"],
+)
+
+
+# ---------------------------------------------------------------------------
+# Corrected against the 0.8 source. These three were ported from the 0.7-era
+# suite with their old answers intact — the sort of drift this testbed exists to
+# catch, found by a reader rather than by the harness. Each keeps the superseded
+# description as a distractor.
+# ---------------------------------------------------------------------------
+
+register_mcq(
+    id="mcq_advanced_04_eproperty",
+    name="eproperty stub semantics",
+    difficulty=Difficulty.ADVANCED,
+    question="What does the body of a method decorated with `@eproperty` do at runtime in nnsight 0.8?",
+    choices=[
+        "Nothing — the body is never executed for its return value; it exists to carry "
+        "pre-setup decorators and donate `__name__`/`__doc__` to the descriptor.",
+        "It is the preprocess step: `__get__` parks on the interleaver for the served "
+        "value, then calls the body with it and returns whatever the body returns.",
+        "It runs once and the result is memoized on the class for the lifetime of the model.",
+        "It is scheduled as a coroutine on the worker's event loop.",
+    ],
+    correct_index=1,
+    explanation=(
+        "src/nnsight/intervention/eproperty.py __get__: value = Mediator.value(location); "
+        "if self._preprocess is not None: value = self._preprocess(obj, value). The module "
+        "docstring states 'The decorated stub *is* the preprocess'. `.postprocess` handles "
+        "writes and `.transform` maps an edited view back to the model's layout. Option A "
+        "describes the pre-0.8 descriptor."
+    ),
+    tags=["internals", "eproperty"],
+)
+
+register_mcq(
+    id="mcq_meta_01_pymount_config",
+    name="PYMOUNT",
+    difficulty=Difficulty.ADVANCED,
+    question="What does `CONFIG.APP.PYMOUNT` (default True) control?",
+    choices=[
+        "Whether the C extension mounts `.save()` onto every Python object, so `value.save()` "
+        "works on builtins; with it off, use `nnsight.save(value)`.",
+        "Whether the C extension injects both `.save()` and `.stop()` onto every Python object.",
+        "Whether model weights are memory-mapped rather than copied into RAM.",
+        "Whether the interleaver mounts its hooks eagerly at model load.",
+    ],
+    correct_index=0,
+    explanation=(
+        "src/nnsight/__init__.py: `if CONFIG.APP.PYMOUNT: from ._c import mount; "
+        "mount(save, 'save')` — one name, `save`. The mount is optional and wrapped in a "
+        "try/except, so `nnsight.save(value)` always works regardless."
+    ),
+    tags=["internals", "config"],
+)
+
+register_mcq(
+    id="mcq_advanced_07_edit_inplace",
+    name="persistent edits",
+    difficulty=Difficulty.ADVANCED,
+    question="Where does `with model.edit(inplace=True):` put the intervention, and how is it undone?",
+    choices=[
+        "It rewrites the module's forward; undo by reloading the model.",
+        "It appends a compiled Mediator to `envoy._edits`, which is prepended to the "
+        "mediators of every later run; `model.clear_edits()` empties that list.",
+        "It appends to `_default_mediators`; `model.reset()` clears it.",
+        "It stores a hook handle on the interleaver; removing it requires the handle.",
+    ],
+    correct_index=1,
+    explanation=(
+        "src/nnsight/intervention/envoy.py: `self._edits: list[Mediator] = []`, and "
+        "`clear_edits()` sets `self._edits = []`. Non-inplace `edit()` stores on a shallow "
+        "copy instead, so the original envoy stays clean."
+    ),
+    tags=["internals", "edit"],
 )
