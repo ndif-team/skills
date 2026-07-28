@@ -70,9 +70,17 @@ nothing and simply produces the wrong answer, which is the class documentation
 most needs to prevent. One is not a bug at all but an inefficiency (12 forward
 passes where 1 would do); it is verified by counting real forward calls.
 
-**mcq** (32) — one of N choices. Measures whether the agent *knows* the rule, as
+**mcq** (32) — one of four choices. Measures whether the agent *knows* the rule, as
 opposed to being able to *operationalize* it. A large mcq-over-code gap means the
 material explains without giving usable templates.
+
+The first version of this set was not measuring knowledge at all: the keyed
+answer was the longest choice in 29/32 questions and letter B in 29/32, so either
+heuristic alone scored 91% — which is where the no-resources baseline landed.
+`python -m evalkit.audit --mcq-bias` now enforces that the keyed answer is the
+longest no more than 40% of the time, that no letter holds more than 40% of the
+answers, and that choices within a question stay inside a 1.6x length spread.
+Run it whenever you add a question.
 
 ## Metrics
 
@@ -114,6 +122,13 @@ with model.trace("Hello"):
 
 A debug task takes `symptom` + `buggy_code` instead of a prompt. An MCQ takes
 `question` / `choices` / `correct_index`.
+
+**MCQs have no reference solution to run**, which is their weak point: a wrong
+keyed answer survives until a human reads it. Four did — eproperty's stub body,
+PYMOUNT's mounted names, where edits live, and what an unsaved local does after a
+scan. Cite the source file (or the command you ran) in `explanation` for anything
+asserting an implementation detail, and re-check those citations after a
+dependency bump.
 
 **Always write the `reference_solution`.** `python -m evalkit.audit` runs every
 one of them through the real runner and asserts it passes, which catches a

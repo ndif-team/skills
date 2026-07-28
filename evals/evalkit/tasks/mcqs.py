@@ -1,405 +1,253 @@
-"""Multiple-choice questions.
+"""Multiple-choice questions about nnsight 0.8.
 
-Ported from nnsight's tests/agent-evals (dev). Questions whose answer changed in
-0.8 were rewritten rather than dropped — the wrong-on-0.8 version of each is a
-good distractor.
+Rewritten from the ported 0.7-era set after measurement showed the questions were
+answerable without reading them:
+
+- the keyed answer was the **longest** choice in 29 of 32 questions
+- the keyed answer was **B** in 29 of 32 questions
+
+Either heuristic alone scored 91%, which is where the no-resources baseline
+landed — so the MCQ half was measuring string length and letter position, not
+knowledge. Every question here is written with choices of comparable length and
+detail, and the correct position is rotated. `evalkit.audit --mcq-bias` enforces
+both, so the property cannot quietly regress.
+
+Four keyed answers were also factually wrong for 0.8 (eproperty's stub body,
+PYMOUNT's mounted names, where edits are stored, and what an unsaved local does
+after a scan). Each was checked against the source or by running it; the
+superseded claim is kept as a distractor, since that is what an agent working
+from stale material will pick.
 """
 
 from ..registry import Difficulty, register_mcq
 
+# --- fundamentals ----------------------------------------------------------
 
 register_mcq(
-    id='mcq_basic_01_save_required',
-    name='01 save required',
+    id="mcq_basic_01_save_required",
+    name="save required",
     difficulty=Difficulty.BASIC,
-    question='Inside `with model.trace(...)`, you assign `hs = model.layer.output`. After the trace exits you reference `hs` -- what happens?',
+    question=(
+        "Inside a function, `with model.trace(...):` assigns `hs = model.transformer.h[0].output` "
+        "with no `.save()`. The next line, after the block, returns `hs`. What happens?"
+    ),
     choices=[
-        '`hs` holds the tensor; nnsight always exposes assigned variables.',
-        '`hs` is undefined / stale: only variables marked with `.save()` (or `nnsight.save(x)`) survive the root-trace exit filter.',
-        '`hs` raises `OutOfOrderError` because the model is no longer running.',
-        '`hs` is a deferred proxy; calling it executes the trace again.',
-    ],
-    correct_index=1,
-    explanation='Root-trace exit filters locals against `Globals.saves` (`src/nnsight/intervention/tracing/base.py:537`); only `.save()`-d objects propagate out.',
-    tags=['save', 'trace', 'basic'],
-)
-
-register_mcq(
-    id='mcq_basic_03_output_vs_input',
-    name='03 output vs input',
-    difficulty=Difficulty.BASIC,
-    question='What is the difference between `module.input` and `module.inputs` on an Envoy?',
-    choices=[
-        '`module.input` returns the first positional (or first kwarg) argument; `module.inputs` returns the full `(args_tuple, kwargs_dict)` pair.',
-        '`module.input` is read-only; `module.inputs` is writable.',
-        "`module.input` is the previous layer's output; `module.inputs` is the input embeddings.",
-        'They are aliases; both return the same value.',
-    ],
-    correct_index=0,
-    explanation="`docs/concepts/envoy-and-eproperty.md` -- both share key='input' but `input` is preprocessed to extract the first positional, while `inputs` returns the full `(args, kwargs)` tuple.",
-    tags=['envoy', 'basic', 'input'],
-)
-
-register_mcq(
-    id='mcq_basic_04_default_invoke',
-    name='04 default invoke',
-    difficulty=Difficulty.BASIC,
-    question='`with model.trace("Hello"):` is equivalent to which form using explicit invokes?',
-    choices=[
-        "`with model.trace() as tracer: tracer.invoke('Hello')` -- only the call, no with-block.",
-        "`with model.trace() as tracer:\\n    with tracer.invoke('Hello'):\\n        ...` (the body becomes the body of an implicit invoke).",
-        "`with model.session('Hello'):` -- session and trace are interchangeable for single inputs.",
-        'There is no equivalent; the implicit form is special-cased and cannot be expressed with explicit invokes.',
-    ],
-    correct_index=1,
-    explanation='`docs/concepts/deferred-execution.md` -- positional args to `.trace(...)` create an implicit `Invoker` whose body is the with-block.',
-    tags=['trace', 'invoke', 'basic'],
-)
-
-register_mcq(
-    id='mcq_intermediate_02_cross_invoke_barrier',
-    name='02 cross invoke barrier',
-    difficulty=Difficulty.INTERMEDIATE,
-    question='Two invokes on the same trace each access `model.transformer.h[5].output`. Invoke 1 captures `clean_hs = ...output[0][:, -1, :]`; invoke 2 writes `...output[0][:, -1, :] = clean_hs`. With no barrier, what happens?',
-    choices=[
-        'Cross-invoke variable propagation handles it transparently; `clean_hs` is always available.',
-        "Invoke 2 sees `NameError` (or a missed value) because invoke 1 hasn't materialized `clean_hs` by the time invoke 2 reaches the same module.",
-        'The two invokes run in true parallel and a race condition produces nondeterministic results.',
-        'nnsight automatically inserts a barrier whenever it detects same-module access.',
-    ],
-    correct_index=1,
-    explanation='`docs/gotchas/cross-invoke.md` -- when both invokes touch the same module path you must call `tracer.barrier(n)` to synchronize at the materialization point.',
-    tags=['barrier', 'cross-invoke', 'intermediate'],
-)
-
-register_mcq(
-    id='mcq_intermediate_03_inplace_vs_replace',
-    name='03 inplace vs replace',
-    difficulty=Difficulty.INTERMEDIATE,
-    question="What's the difference between `module.output[0][:] = 0` and `module.output = (torch.zeros_like(...), ...)`?",
-    choices=[
-        'They are interchangeable; both mutate the tensor the model sees.',
-        '`[:] = 0` mutates the existing storage; bare `=` rebinds and triggers a SWAP event so the batcher substitutes the new value for the rest of the forward pass.',
-        '`[:] = 0` is illegal inside a trace; only bare `=` is supported.',
-        'Bare `=` is silently ignored unless wrapped in `nnsight.swap(...)`.',
-    ],
-    correct_index=1,
-    explanation='`docs/gotchas/modification.md` -- in-place edits storage; bare assignment goes through `eproperty.__set__` which sends a SWAP event.',
-    tags=['modify', 'intermediate', 'swap'],
-)
-
-register_mcq(
-    id='mcq_intermediate_05_clone_before_save',
-    name='05 clone before save',
-    difficulty=Difficulty.INTERMEDIATE,
-    question="""Inside a trace you write:
-    before = model.h[0].output[0].save()
-    model.h[0].output[0][:] = 0
-    after = model.h[0].output[0].save()
-What does `before` contain after the trace exits?""",
-    choices=[
-        'The original (pre-zero) tensor.',
-        'The zeroed tensor -- `before` aliases the same storage that the in-place edit modified.',
-        'A `RuntimeError` because `.save()` was called on the same tensor twice.',
-        '`None` -- only the most recent save survives.',
-    ],
-    correct_index=1,
-    explanation='`docs/gotchas/modification.md` -- `.save()` records id, not a snapshot. Use `.clone().save()` to capture the pre-mutation state.',
-    tags=['save', 'modify', 'intermediate'],
-)
-
-register_mcq(
-    id='mcq_intermediate_07_all_is_iter',
-    name='07 all is iter',
-    difficulty=Difficulty.INTERMEDIATE,
-    question='What is the relationship between `tracer.all()` and `tracer.iter[:]`?',
-    choices=[
-        '`tracer.all()` runs every iteration in parallel; `tracer.iter[:]` is sequential.',
-        '`tracer.all()` is a deprecated alias of `tracer.iter[0]`.',
-        "`tracer.all()` literally returns `self.iter[:]` -- it's the same unbounded iterator with the same trailing-code footgun.",
-        '`tracer.all()` includes the prefill pass; `tracer.iter[:]` does not.',
+        "`hs` holds the tensor; assigned names always survive the block.",
+        "`hs` raises `OutOfOrderError`, since the model is no longer running.",
+        "`hs` is unbound — only marked values are pushed back to the caller.",
+        "`hs` is a proxy that re-runs the trace when it is first read.",
     ],
     correct_index=2,
-    explanation='`docs/gotchas/iteration.md` -- `InterleavingTracer.all` returns `self.iter[:]` (`tracing/tracer.py:457`).',
-    tags=['iter', 'all', 'intermediate'],
+    explanation="The body runs in another frame; push_result returns only saved locals.",
+    tags=["save"],
 )
-
-register_mcq(
-    id='mcq_intermediate_10_grad_reverse_order',
-    name='10 grad reverse order',
-    difficulty=Difficulty.INTERMEDIATE,
-    question='You captured `h3 = model.h[3].output[0]` and `h10 = model.h[10].output[0]` (both with `requires_grad_(True)`). Inside `with logits.sum().backward():`, in what order should you access `.grad`?',
-    choices=[
-        '`h3.grad.save()` then `h10.grad.save()` -- mirror forward order.',
-        '`h10.grad.save()` then `h3.grad.save()` -- gradient hooks fire in reverse of the forward order.',
-        'Either order works; gradients are buffered so order is irrelevant.',
-        "Always wrap in `tracer.barrier(2)` -- there's no inherent order.",
-    ],
-    correct_index=1,
-    explanation="`docs/gotchas/backward.md` -- backward fires hooks in reverse; deeper layers' grads arrive first.",
-    tags=['backward', 'grad', 'intermediate'],
-)
-
-register_mcq(
-    id='mcq_advanced_02_invoke_during_execution',
-    name='02 invoke during execution',
-    difficulty=Difficulty.ADVANCED,
-    question='Which pattern triggers `ValueError: Cannot invoke during an active model execution / interleaving.`?',
-    choices=[
-        'Calling `.trace(...)` twice on the same model with no overlap.',
-        'Opening a `tracer.invoke(...)` block inside another `tracer.invoke(...)` body, OR opening one inside a `for step in tracer.iter[:]:` loop.',
-        'Calling `tracer.barrier(2)` after the model has started.',
-        'Saving the same tensor with `.save()` twice in one trace.',
-    ],
-    correct_index=1,
-    explanation='`docs/errors/invoke-during-execution.md` -- `Invoker.__init__` rejects construction when `tracer.model.interleaving` is true.',
-    tags=['error', 'invoke', 'advanced'],
-)
-
-register_mcq(
-    id='mcq_advanced_05_envoy_call_hook_default',
-    name='05 envoy call hook default',
-    difficulty=Difficulty.ADVANCED,
-    question='Inside a trace, calling `model.sae(hidden)` on an auxiliary module routes through which path by default, and how do you get `.input`/`.output` hooks to fire?',
-    choices=[
-        'Routes through `module.__call__` by default; hooks always fire.',
-        'Routes through `module.forward(...)` by default (bypassing hooks); pass `hook=True` to route through `__call__` so hooks fire.',
-        'Always routes through `__call__`; pass `hook=False` to bypass.',
-        'Auxiliary modules can never have hooks; you must register a custom `eproperty`.',
-    ],
-    correct_index=1,
-    explanation='`docs/gotchas/integrations.md` and `docs/concepts/envoy-and-eproperty.md` -- `Envoy.__call__` defaults to `hook=False` inside a trace; pass `hook=True` to enable hook dispatch.',
-    tags=['envoy', 'hook', 'advanced', 'sae'],
-)
-
-register_mcq(
-    id='mcq_advanced_06_scan_save_required',
-    name='06 scan save required',
-    difficulty=Difficulty.ADVANCED,
-    question="Inside `with model.scan('Hi'):`, you write `dim = model.transformer.h[0].output[0].shape[-1]` (a plain int). Outside, `print(dim)` -- what happens?",
-    choices=[
-        "Prints the int; scan blocks don't filter local variables.",
-        'Raises `NameError` / undefined: scan is a tracing context; non-saved locals are filtered at exit. Use `nnsight.save(...)` for non-tensor values.',
-        'Always prints `0` because FakeTensor shapes are zero.',
-        'Prints a `FakeTensor` symbol; scan never produces ints.',
-    ],
-    correct_index=1,
-    explanation='`docs/usage/scan.md` and `docs/gotchas/save.md` -- scan is a tracing context that goes through the same exit filter; use `nnsight.save(...)` for non-tensor values like ints.',
-    tags=['scan', 'save', 'advanced'],
-)
-
-register_mcq(
-    id='mcq_advanced_08_session_bundling',
-    name='08 session bundling',
-    difficulty=Difficulty.ADVANCED,
-    question='When running multiple traces on a remote model, where should `remote=True` go?',
-    choices=[
-        'On every `model.trace(...)` call so each one queues independently.',
-        'On the outer `model.session(remote=True)`; inner traces inherit the remote backend, the whole session is one request, and variables flow between traces without `.save()`.',
-        'On `model.dispatch(remote=True)` once at the top of the script.',
-        'Both on the session AND every inner trace -- doubling up reduces flakiness.',
-    ],
-    correct_index=1,
-    explanation='`docs/gotchas/remote.md` and `docs/usage/session.md` -- one outer `remote=True` bundles all inner traces into a single NDIF request and a single queue wait.',
-    tags=['remote', 'session', 'advanced'],
-)
-
-register_mcq(
-    id='mcq_advanced_09_remote_save_transmission',
-    name='09 remote save transmission',
-    difficulty=Difficulty.ADVANCED,
-    question='On a remote trace (`remote=True`), why does `local_list = []; with model.trace(..., remote=True): local_list.append(x)` end up empty?',
-    choices=[
-        "Remote traces don't support `.append`.",
-        'The `local_list` lives in the client process; the `.append` runs on the server and is discarded when the request returns. Build the list inside the trace and `.save()` it.',
-        '`.save()` was forgotten on `x`; once saved, the local list would populate.',
-        'vLLM strips list mutations; use a `dict` instead.',
-    ],
-    correct_index=1,
-    explanation="`docs/gotchas/remote.md` -- `.save()` is the only mechanism that ships values back; client-side containers don't travel to the server.",
-    tags=['remote', 'save', 'advanced'],
-)
-
-register_mcq(
-    id='mcq_advanced_10_blocking_false',
-    name='10 blocking false',
-    difficulty=Difficulty.ADVANCED,
-    question="Using `with model.trace('Hi', remote=True, blocking=False) as tracer:`, how do you retrieve the result?",
-    choices=[
-        'The `tracer` object becomes the result tensor automatically once the job finishes.',
-        'Poll `tracer.backend()`; it returns `None` while pending and the dict of saved values once `COMPLETED`. `tracer.backend.job_id` and `tracer.backend.job_status` track the request.',
-        'Re-enter the same `with` block to fetch results.',
-        'Call `model.fetch(tracer.id)` -- backend objects are not exposed.',
-    ],
-    correct_index=1,
-    explanation='`docs/remote/non-blocking-jobs.md` -- the trace exits immediately after submission; poll `backend()` for the result dict.',
-    tags=['remote', 'non-blocking', 'advanced'],
-)
-
-register_mcq(
-    id='mcq_advanced_11_vllm_logits_samples',
-    name='11 vllm logits samples',
-    difficulty=Difficulty.ADVANCED,
-    question='On `nnsight.modeling.vllm.VLLM`, what are `model.logits` and `model.samples`?',
-    choices=[
-        'Methods you call to fetch tensors: `model.logits()`.',
-        "VLLM-specific eproperties on the `VLLM` instance: `model.logits` is the pre-sampling logit tensor (per step), `model.samples` is the sampled token ids (per step). They iterate via `tracer.iter` and don't exist on standard `LanguageModel`.",
-        'Aliases for `model.lm_head.output` and `model.generator.output` respectively.',
-        'Internal vLLM debug flags; not user-accessible.',
-    ],
-    correct_index=1,
-    explanation="`docs/models/vllm.md` -- `vllm.py:102/112` defines `logits` and `samples` as iterating eproperties; they're VLLM-specific.",
-    tags=['vllm', 'advanced', 'eproperty'],
-)
-
-register_mcq(
-    id='mcq_meta_02_barrier_n',
-    name='02 barrier n',
-    difficulty=Difficulty.INTERMEDIATE,
-    question='What is `n` in `tracer.barrier(n)`?',
-    choices=[
-        'The number of generation steps the barrier blocks for.',
-        'The number of mediators (worker threads / invokes) that must hit `barrier()` before any are released.',
-        'The number of attention heads to synchronize.',
-        'The maximum number of seconds to wait before timing out.',
-    ],
-    correct_index=1,
-    explanation='`docs/concepts/threading-and-mediators.md` -- BARRIER event releases all participants once `n` mediators have reached it (`interleaver.py:1123`).',
-    tags=['barrier', 'meta', 'concept'],
-)
-
-register_mcq(
-    id='mcq_meta_04_envoy_call_logitlens',
-    name='04 envoy call logitlens',
-    difficulty=Difficulty.ADVANCED,
-    question='In a logit-lens snippet, `logits = model.lm_head(model.transformer.ln_f(hs))` runs inside a trace WITHOUT triggering `.input`/`.output` hooks on `lm_head` and `ln_f`. Why?',
-    choices=[
-        'Hooks are disabled for any module called via `__call__` inside a trace.',
-        "`Envoy.__call__` defaults to `hook=False` inside an active trace, routing through `module.forward(...)` and bypassing the wrapped `__call__` (so the sentinel hook isn't taken).",
-        'Hooks fire but their results are discarded silently.',
-        '`lm_head` and `ln_f` are special-cased in `LanguageModel`.',
-    ],
-    correct_index=1,
-    explanation='`docs/concepts/envoy-and-eproperty.md` -- `Envoy.__call__` (`envoy.py:239`) routes through `.forward(...)` when hook=False inside a trace.',
-    tags=['envoy', 'logit-lens', 'meta'],
-)
-
-register_mcq(
-    id='mcq_meta_05_debug_mode',
-    name='05 debug mode',
-    difficulty=Difficulty.INTERMEDIATE,
-    question='When you set `CONFIG.APP.DEBUG = True`, what changes?',
-    choices=[
-        'The model runs in `torch.no_grad` mode.',
-        'Exceptions inside a trace include the full nnsight internal stack frames; without it, tracebacks are reconstructed to point at user code only.',
-        'All `.save()` calls also print their values to stderr.',
-        'Remote traces are forced to run locally.',
-    ],
-    correct_index=1,
-    explanation='`docs/reference/config.md` and `docs/errors/debug-mode.md` -- DEBUG controls traceback rewriting; default hides internals.',
-    tags=['config', 'debug', 'meta'],
-)
-
-
-# ---------------------------------------------------------------------------
-# Rewritten for 0.8. Each of these had an answer that was correct on the older
-# API; the superseded answer is kept as a distractor, since it is exactly what
-# an agent working from stale material will pick.
-# ---------------------------------------------------------------------------
 
 register_mcq(
     id="mcq_basic_02_trace_no_input",
     name="trace with no input",
     difficulty=Difficulty.BASIC,
-    question="What happens with `with model.trace():` — no positional input and no inner `tracer.invoke(...)` block?",
+    question="What happens with `with model.trace():` — no positional input and no inner invoke?",
     choices=[
-        "It runs the model once on an empty string.",
-        "It raises `ValueError: trace() needs an input, or at least one `with tracer.invoke(...)` block`.",
-        "It raises a `MissedProviderError` when the dangling mediator is collected.",
-        "It silently does nothing and returns None.",
+        "A `ValueError` saying trace needs an input or at least one invoke block.",
+        "The model runs once on an empty string and returns its logits.",
+        "A `MissedProviderError`, raised once the dangling mediator is finally collected.",
+        "Nothing at all — the block is skipped and `None` is returned.",
     ],
-    correct_index=1,
-    explanation="0.8 validates up front. The MissedProviderError path no longer exists.",
+    correct_index=0,
+    explanation="0.8 validates up front; the MissedProviderError path no longer exists.",
     tags=["trace", "errors"],
 )
 
 register_mcq(
-    id="mcq_basic_05_generate_multi_token",
-    name="capture across generated tokens",
+    id="mcq_basic_03_output_vs_input",
+    name="input vs inputs",
     difficulty=Difficulty.BASIC,
-    question="You want a hidden state from each of 5 generated tokens, and you also need the final generated ids afterwards. Which is correct?",
+    question="How do `module.input` and `module.inputs` differ on an Envoy?",
     choices=[
-        "`for step in tracer.iter[:]:` — the unbounded loop covers every step and trailing code still runs.",
-        "`for step in tracer.iter[:5]:` — bound the loop to the number of steps, so code after it still runs.",
-        "`with tracer.all():` — the block form applies to all steps.",
-        "`tracer.next()` between accesses to advance to the next step.",
+        "`input` is read-only; `inputs` is the writable form of the same value.",
+        "`input` is the previous layer's output; `inputs` is the embedding matrix.",
+        "They are aliases kept for backwards compatibility, and both return the same object.",
+        "`input` is the first positional argument; `inputs` is the `(args, kwargs)` pair.",
     ],
-    correct_index=1,
-    explanation="Unbounded iter/all unwinds at the over-run step, dropping everything after the loop. `tracer.next()` was removed.",
+    correct_index=3,
+    explanation="`.input` is a convenience view over `.inputs`, which holds everything.",
+    tags=["access"],
+)
+
+register_mcq(
+    id="mcq_basic_04_default_invoke",
+    name="implicit invoke",
+    difficulty=Difficulty.BASIC,
+    question="`with model.trace('Hello'):` is equivalent to which explicit form?",
+    choices=[
+        "`with model.trace() as t:` then `with t.invoke('Hello'):` around the same body.",
+        "`with model.trace() as t:` then a bare `t.invoke('Hello')` call, no block.",
+        "`with model.session('Hello'):` — a session and a trace are interchangeable here.",
+        "Nothing — the implicit form is special-cased and has no explicit equivalent.",
+    ],
+    correct_index=0,
+    explanation="A positional input creates one implicit invoke wrapping the whole body.",
+    tags=["trace", "invoke"],
+)
+
+register_mcq(
+    id="mcq_basic_05_generate_multi_token",
+    name="per-step capture plus result",
+    difficulty=Difficulty.BASIC,
+    question=(
+        "You need a hidden state from each of 5 generated tokens AND the final ids "
+        "afterwards. Which loop form works?"
+    ),
+    choices=[
+        "`with tracer.all():` — the block form covers every step and keeps trailing code.",
+        "`tracer.next()` between reads, advancing one step at a time.",
+        "`for step in tracer.iter[:]:` — unbounded, and trailing code still runs.",
+        "`for step in tracer.iter[:5]:` — bounded, so the line after the loop runs.",
+    ],
+    correct_index=3,
+    explanation="Unbounded iter/all unwinds at the over-run step and drops trailing code.",
     tags=["generation", "iteration"],
 )
+
+# --- ordering, batching, modification ---------------------------------------
 
 register_mcq(
     id="mcq_intermediate_01_out_of_order",
     name="out of order access",
     difficulty=Difficulty.INTERMEDIATE,
-    question="In one trace you read `model.transformer.h[8].output` and then `model.transformer.h[2].output`. What happens?",
+    question="One trace reads `h[8].output` and then `h[2].output`. What happens?",
     choices=[
-        "Both succeed; nnsight reorders requests automatically.",
-        "It raises `OutOfOrderError` — the model already ran past layer 2 when you asked for it.",
-        "It raises `OutOfOrderError`, which is a subclass of `MissedProviderError`.",
-        "It deadlocks and hangs forever.",
+        "Both succeed — nnsight quietly reorders the requests to match the forward order.",
+        "`OutOfOrderError`: the model had already run past layer 2 when it was asked for.",
+        "`OutOfOrderError`, which in 0.8 is a subclass of `MissedProviderError`.",
+        "The trace deadlocks and hangs until the process is killed.",
     ],
     correct_index=1,
-    explanation="0.8 collapsed the two error classes into `OutOfOrderError` alone, and it is raised at the end of the run rather than hanging.",
+    explanation="One class covers both cases in 0.8, and it raises rather than hanging.",
     tags=["ordering", "errors"],
+)
+
+register_mcq(
+    id="mcq_intermediate_02_cross_invoke_barrier",
+    name="cross-invoke without a barrier",
+    difficulty=Difficulty.INTERMEDIATE,
+    question=(
+        "Invoke 1 captures `donor = model.transformer.h[5].output`; invoke 2 writes that "
+        "same location from `donor`. With no barrier, what happens?"
+    ),
+    choices=[
+        "nnsight inserts a barrier automatically when it sees same-module access.",
+        "The invokes run in parallel and the result is nondeterministic.",
+        "Invoke 2 raises `NameError` — invoke 1 has not bound `donor` yet.",
+        "It works: values propagate across invokes transparently.",
+    ],
+    correct_index=2,
+    explanation="All invoke workers start together; ordering needs tracer.barrier(n).",
+    tags=["batching", "barrier"],
+)
+
+register_mcq(
+    id="mcq_intermediate_03_inplace_vs_replace",
+    name="in-place vs replacement",
+    difficulty=Difficulty.INTERMEDIATE,
+    question="How does `module.output[:] = 0` differ from `module.output = new_tensor`?",
+    choices=[
+        "Slice assignment is illegal inside a trace, so only whole-value assignment works.",
+        "They are identical; both mutate the tensor the model is holding.",
+        "Whole-value assignment is ignored unless wrapped in a swap helper.",
+        "Slice assignment mutates the existing storage; assignment swaps in a new object.",
+    ],
+    correct_index=3,
+    explanation="Both take effect. Only replacement preserves the autograd graph.",
+    tags=["modification"],
 )
 
 register_mcq(
     id="mcq_intermediate_04_tuple_output",
     name="writing into a tuple output",
     difficulty=Difficulty.INTERMEDIATE,
-    question="`model.transformer.h[0].attn.output` is a tuple `(attn_out, ...)`. You want to zero the first element. Which works?",
+    question=(
+        "`model.transformer.h[0].attn.output` is a tuple. Which statement zeroes its "
+        "first element?"
+    ),
     choices=[
-        "`model.transformer.h[0].attn.output[0] = torch.zeros_like(attn_out)`",
-        "`model.transformer.h[0].attn.output[0][:] = 0`",
-        "`model.transformer.h[0].attn.output = 0`",
-        "`model.transformer.h[0].attn.output.zero_()`",
+        "`attn.output[0] = torch.zeros_like(x)`",
+        "`attn.output[0][:] = 0.0`",
+        "`attn.output = torch.zeros_like(x)`",
+        "`attn.output.zero_(x.shape)`",
     ],
     correct_index=1,
-    explanation="Item assignment on a tuple raises TypeError. Mutate through the element in place, or rebuild the tuple and assign the whole thing.",
-    tags=["modification", "tuples"],
+    explanation="Item assignment on a tuple raises TypeError; mutate through the element.",
+    tags=["modification", "types"],
+)
+
+register_mcq(
+    id="mcq_intermediate_05_clone_before_save",
+    name="saving before an in-place edit",
+    difficulty=Difficulty.INTERMEDIATE,
+    question=(
+        "You save `before = h[0].output.save()`, then zero that output in place, then save "
+        "`after`. What does `before` hold after the trace?"
+    ),
+    choices=[
+        "The original values, because `.save()` snapshots at the moment it is called.",
+        "`None`, because only the most recent save of a location survives.",
+        "A `RuntimeError`, because the same location was saved twice.",
+        "The zeroed values, because it aliases the storage the edit mutated.",
+    ],
+    correct_index=3,
+    explanation="save() marks an object, it does not copy. Use .clone() for a snapshot.",
+    tags=["save", "modification"],
 )
 
 register_mcq(
     id="mcq_intermediate_06_unbounded_iter",
-    name="code after an unbounded iter",
+    name="code after an unbounded loop",
     difficulty=Difficulty.INTERMEDIATE,
-    question="Inside `model.generate(..., max_new_tokens=3)` you loop `for step in tracer.all():` and then, after the loop, call `tracer.result.save()`. What happens to `result`?",
+    question=(
+        "Under `generate(max_new_tokens=3)` you loop `for step in tracer.all():` and then, "
+        "after the loop, call `tracer.result.save()`. What happens?"
+    ),
     choices=[
-        "It is saved normally once generation ends.",
-        "It is never assigned — the unbounded loop unwinds at the over-run step and drops every line after it.",
-        "It raises `MissedProviderError` immediately.",
-        "It contains only the last generated token.",
+        "`result` is saved normally once generation finishes.",
+        "`result` is never assigned; the loop unwound and dropped the trailing line.",
+        "A `MissedProviderError` is raised as soon as the loop starts.",
+        "`result` holds only the very last generated token rather than the whole sequence.",
     ],
     correct_index=1,
-    explanation="Bound the loop (`tracer.iter[:3]`) if you need trailing code to run. Old nnsight bounded `all()` internally; 0.8 does not.",
+    explanation="Bound the loop if you need trailing code. Old nnsight bounded all() itself.",
     tags=["generation", "iteration", "gotcha"],
+)
+
+register_mcq(
+    id="mcq_intermediate_07_all_is_iter",
+    name="all versus iter",
+    difficulty=Difficulty.INTERMEDIATE,
+    question="What is the relationship between `tracer.all()` and `tracer.iter[:]`?",
+    choices=[
+        "`all()` runs the iterations in parallel, whereas `iter[:]` runs them in sequence.",
+        "`all()` is a deprecated alias that now resolves to `tracer.iter[0]`.",
+        "`all()` returns `iter[:]` — the same unbounded iterator, same trailing-code trap.",
+        "`all()` includes the prefill pass, whereas `iter[:]` starts after it.",
+    ],
+    correct_index=2,
+    explanation="They are the same object, and share the same failure mode.",
+    tags=["iteration"],
 )
 
 register_mcq(
     id="mcq_intermediate_08_generated_ids",
     name="reading generated ids",
     difficulty=Difficulty.INTERMEDIATE,
-    question="Inside `with model.generate('Hi', max_new_tokens=5) as tracer:`, what is the supported way to get the generated token ids?",
+    question="Inside `model.generate('Hi', max_new_tokens=5)`, how do you get the generated ids?",
     choices=[
-        "`model.generator.output.save()` — the canonical accessor.",
-        "`tracer.result.save()` — `model.generator.output` still works but is deprecated.",
-        "`model.output.logits.save()` — generate returns logits.",
-        "`tracer.iter[-1].output.save()`.",
+        "`model.output.logits.save()` — generate hands back logits rather than token ids.",
+        "`model.generator.output.save()` — the supported accessor in 0.8.",
+        "`tracer.iter[-1].output.save()` — index the final step.",
+        "`tracer.result.save()` — `model.generator.output` works but is deprecated.",
     ],
-    correct_index=1,
-    explanation="0.8 splits generate (token ids on tracer.result) from pipe (decoded records). generator.output remains only for per-step streamer access.",
+    correct_index=3,
+    explanation="0.8 splits generate (ids on tracer.result) from pipe (decoded records).",
     tags=["generation"],
 )
 
@@ -407,48 +255,282 @@ register_mcq(
     id="mcq_intermediate_09_backward_access",
     name="module access inside backward",
     difficulty=Difficulty.INTERMEDIATE,
-    question="Inside `with metric.backward():` you try to read `model.transformer.h[-1].output`. What happens?",
+    question="Inside `with metric.backward():` you read `model.transformer.h[-1].output`. What happens?",
     choices=[
-        "It returns the forward activation, cached from earlier in the trace.",
-        "It raises `OutOfOrderError` — the forward pass is over, so capture activations before the backward block.",
-        "It returns the gradient of that module.",
-        "It silently returns None.",
+        "It returns the forward activation, which was cached earlier in the same trace.",
+        "It returns that module's gradient, the same as reading `.grad`.",
+        "It raises `OutOfOrderError` — the forward is over; capture before the block.",
+        "It returns `None` silently, and the backward pass continues.",
     ],
-    correct_index=1,
-    explanation="Only `.grad` on tensors captured during the forward is meaningful inside a backward context.",
+    correct_index=2,
+    explanation="Only .grad on tensors captured in the forward is meaningful there.",
     tags=["gradients", "ordering"],
 )
+
+register_mcq(
+    id="mcq_intermediate_10_grad_reverse_order",
+    name="gradient access order",
+    difficulty=Difficulty.INTERMEDIATE,
+    question=(
+        "You captured `h3` from layer 3 and `h10` from layer 10 during the forward. In what "
+        "order must you read their `.grad` inside the backward block?"
+    ),
+    choices=[
+        "`h3` then `h10`, mirroring the order they were produced in.",
+        "`h10` then `h3`, because gradients arrive in reverse of the forward.",
+        "Either order — gradients are buffered until the block exits.",
+        "Neither; wrap both in `tracer.barrier(2)` since there is no inherent order.",
+    ],
+    correct_index=1,
+    explanation="Reads park on the autograd hook, so they follow the backward order.",
+    tags=["gradients"],
+)
+
+# --- advanced --------------------------------------------------------------
 
 register_mcq(
     id="mcq_advanced_01_error_classes",
     name="error class for missed values",
     difficulty=Difficulty.ADVANCED,
-    question="A worker is still waiting on a location when the run ends (for example after `tracer.stop()` skipped it). Which exception does 0.8 raise?",
+    question=(
+        "A worker still waits on a location when the run ends — for instance after "
+        "`tracer.stop()` skipped it. What does 0.8 raise?"
+    ),
     choices=[
-        "`MissedProviderError`, the parent class of `OutOfOrderError`.",
-        "`OutOfOrderError` — 0.8 uses one class for both the asked-too-late and never-delivered cases.",
-        "`ValueError: value was not provided`.",
-        "No exception; the value is silently None.",
+        "`MissedProviderError`, the parent class from which `OutOfOrderError` derives.",
+        "`ValueError` reporting that the value was never provided.",
+        "`OutOfOrderError` — one class covers asked-too-late and never-delivered.",
+        "Nothing; the value is left as `None` and the run completes.",
+    ],
+    correct_index=2,
+    explanation="The class split was removed in the 0.8 rewrite.",
+    tags=["errors"],
+)
+
+register_mcq(
+    id="mcq_advanced_02_invoke_during_execution",
+    name="invoking while running",
+    difficulty=Difficulty.ADVANCED,
+    question="Which pattern raises `Cannot invoke while the model is already running.`?",
+    choices=[
+        "Calling `model.trace(...)` twice in a row, with no overlap between the two runs.",
+        "Opening a `tracer.invoke(...)` block nested inside another invoke or an iter loop.",
+        "Calling `tracer.barrier(2)` after the model has started executing.",
+        "Marking the same tensor with `.save()` more than once in a single trace.",
     ],
     correct_index=1,
-    explanation="`MissedProviderError` and the class split were removed in the 0.8 rewrite.",
-    tags=["errors"],
+    explanation="Invokes define the batch up front; they cannot be opened mid-run.",
+    tags=["batching", "errors"],
 )
 
 register_mcq(
     id="mcq_advanced_03_source_submodule",
     name="recursive source into a submodule",
     difficulty=Difficulty.ADVANCED,
-    question="You call `.source` on a source operation whose callee is a `torch.nn.Module` submodule. What happens?",
+    question="You call `.source` on a source operation whose callee is a `torch.nn.Module`. What happens?",
     choices=[
-        "It transparently drills into the submodule's forward.",
-        "It raises `SourceNotAvailable` — call `.source` on that submodule's own envoy instead.",
-        "It raises `ValueError: Don't call .source on a module`.",
-        "It works, but only outside a trace.",
+        "`SourceNotAvailable` — use that submodule's own envoy and its `.source`.",
+        "It drills into the submodule's forward and exposes each of its operations.",
+        "`ValueError` telling you not to call `.source` on a module.",
+        "It succeeds, but only when called outside an active trace.",
+    ],
+    correct_index=0,
+    explanation="Recursive .source handles plain functions; submodules have their own envoy.",
+    tags=["source"],
+)
+
+register_mcq(
+    id="mcq_advanced_04_eproperty",
+    name="eproperty stub semantics",
+    difficulty=Difficulty.ADVANCED,
+    question="At runtime, what does the body of a method decorated with `@eproperty` do?",
+    choices=[
+        "Nothing — it is never run; it only carries decorators and donates `__name__`.",
+        "It runs once and the result is memoized on the class for the model's lifetime.",
+        "It is scheduled as a coroutine on the interleaver's event loop.",
+        "It preprocesses: `__get__` parks for the value, calls the body, returns its result.",
+    ],
+    correct_index=3,
+    explanation=(
+        "eproperty.py __get__: value = Mediator.value(location); "
+        "if self._preprocess is not None: value = self._preprocess(obj, value). "
+        "Option A describes the pre-0.8 descriptor."
+    ),
+    tags=["internals", "eproperty"],
+)
+
+register_mcq(
+    id="mcq_advanced_05_envoy_call_hook_default",
+    name="calling a module inside a trace",
+    difficulty=Difficulty.ADVANCED,
+    question=(
+        "Inside a trace, `model.sae(hidden)` on an attached module runs which path, and how "
+        "do its own hooks fire?"
+    ),
+    choices=[
+        "Through `__call__`, with hooks always firing; there is no supported way to bypass.",
+        "Through `forward(...)`, bypassing hooks; pass `hook=True` to route through `__call__`.",
+        "Through `__call__` by default; pass `hook=False` to bypass the hooks.",
+        "Attached modules cannot fire hooks at all without a custom eproperty.",
     ],
     correct_index=1,
-    explanation="Recursive .source handles plain Python functions; submodules have their own envoy and their own .source.",
-    tags=["source"],
+    explanation="Envoy.__call__ signature: `def __call__(self, *args, hook: bool = False, **kwargs)`.",
+    tags=["modules"],
+)
+
+register_mcq(
+    id="mcq_advanced_06_scan_save_required",
+    name="unsaved values after scan",
+    difficulty=Difficulty.ADVANCED,
+    question=(
+        "Inside a function, `with model.scan('Hi'):` assigns `dim = h[0].output.shape[-1]` "
+        "with no save. The function then returns `dim`. What happens?"
+    ),
+    choices=[
+        "It returns the int; scan is exempt from the save filter since nothing executes.",
+        "It returns `0`, because fake tensors report zero-length shapes.",
+        "It raises `UnboundLocalError`; scan filters unsaved locals like any trace.",
+        "It returns a symbolic shape object rather than a Python int.",
+    ],
+    correct_index=2,
+    explanation=(
+        "scan is a tracing context and gates saves the same way. Note the scope: at module "
+        "level the name may survive, which is why this asks about a function."
+    ),
+    tags=["scan", "save"],
+)
+
+register_mcq(
+    id="mcq_advanced_07_edit_inplace",
+    name="persistent edits",
+    difficulty=Difficulty.ADVANCED,
+    question="Where does `model.edit(inplace=True)` store the intervention, and how is it undone?",
+    choices=[
+        "It rewrites the module's forward in place; only reloading the model undoes it.",
+        "It appends to `_default_mediators`, which `model.reset()` clears.",
+        "It registers a hook handle that you must keep in order to remove it.",
+        "It appends a Mediator to `envoy._edits`, which `model.clear_edits()` empties.",
+    ],
+    correct_index=3,
+    explanation="envoy.py: `self._edits: list[Mediator] = []`; clear_edits() resets it.",
+    tags=["internals", "edit"],
+)
+
+register_mcq(
+    id="mcq_advanced_08_session_bundling",
+    name="where remote=True goes",
+    difficulty=Difficulty.ADVANCED,
+    question="Running several traces against a remote model, where does `remote=True` belong?",
+    choices=[
+        "On `model.session(...)`; the inner traces inherit it as one request.",
+        "On each `model.trace(...)` so every one queues as its own request.",
+        "On a `model.dispatch(remote=True)` call once at the top of the script.",
+        "On both the session and each inner trace, which makes the job more reliable.",
+    ],
+    correct_index=0,
+    explanation="One session is one job; values also flow between traces without downloads.",
+    tags=["remote", "session"],
+)
+
+register_mcq(
+    id="mcq_advanced_09_remote_save_transmission",
+    name="client lists on a remote trace",
+    difficulty=Difficulty.ADVANCED,
+    question=(
+        "On a remote trace, a list created in client code and appended to inside the trace "
+        "comes back empty. Why?"
+    ),
+    choices=[
+        "Remote traces do not implement `.append` on transmitted objects.",
+        "The list lives client-side; the appends happen on the server and are discarded.",
+        "The appended value was not `.save()`d, so the list received nothing.",
+        "List mutations are stripped during serialization; a dict would have worked here.",
+    ],
+    correct_index=1,
+    explanation="Build the container inside the trace and save the container itself.",
+    tags=["remote", "save"],
+)
+
+register_mcq(
+    id="mcq_advanced_10_blocking_false",
+    name="non-blocking remote jobs",
+    difficulty=Difficulty.ADVANCED,
+    question="With `model.trace('Hi', remote=True, blocking=False)`, how do you get the result?",
+    choices=[
+        "Re-enter the same `with` block later; it resumes and yields the values.",
+        "The tracer object turns into the result tensor once the job completes.",
+        "Call `model.fetch(tracer.id)`; the backend object is not exposed to calling code.",
+        "Poll `tracer.backend()`: `None` while pending, then the dict of saved values.",
+    ],
+    correct_index=3,
+    explanation="Saves are not pushed into your locals here — read them from the dict.",
+    tags=["remote"],
+)
+
+register_mcq(
+    id="mcq_advanced_11_vllm_logits_samples",
+    name="vLLM logits and samples",
+    difficulty=Difficulty.ADVANCED,
+    question="On `nnsight.modeling.vllm.VLLM`, what are `model.logits` and `model.samples`?",
+    choices=[
+        "Methods that you call to fetch the current tensors, as in `model.logits()`.",
+        "Aliases for `model.lm_head.output` and `model.generator.output`.",
+        "Hookable values: this step's pre-sampling logits, and the ids the sampler drew.",
+        "Internal engine flags used for debugging, not intended for user code.",
+    ],
+    correct_index=2,
+    explanation="Both are readable and assignable; tracer.result is not served on vLLM.",
+    tags=["vllm"],
+)
+
+register_mcq(
+    id="mcq_advanced_12_vllm_unsupported",
+    name="what vLLM cannot do",
+    difficulty=Difficulty.ADVANCED,
+    question="Which of these is NOT supported on nnsight's vLLM path?",
+    choices=[
+        "Reading `model.logits` at each generated decode step.",
+        "Gradients through a `with tensor.backward():` block.",
+        "Tensor parallelism sharded across several GPUs.",
+        "Per-request sampling parameters on `tracer.invoke(...)`.",
+    ],
+    correct_index=1,
+    explanation="No backward, no scan, no source on fused kernels. TP is transparent.",
+    tags=["vllm"],
+)
+
+# --- internals and configuration -------------------------------------------
+
+register_mcq(
+    id="mcq_meta_01_pymount_config",
+    name="PYMOUNT",
+    difficulty=Difficulty.ADVANCED,
+    question="What does `CONFIG.APP.PYMOUNT` (default `True`) control?",
+    choices=[
+        "Whether the C extension mounts `.save()` onto every object, builtins included.",
+        "Whether the extension injects both `.save()` and `.stop()` onto every object type.",
+        "Whether model weights are memory-mapped instead of copied into host RAM.",
+        "Whether the interleaver installs its forward hooks eagerly at model load.",
+    ],
+    correct_index=0,
+    explanation="__init__.py: `mount(save, 'save')` — one name. nnsight.save() always works.",
+    tags=["internals", "config"],
+)
+
+register_mcq(
+    id="mcq_meta_02_barrier_n",
+    name="barrier count",
+    difficulty=Difficulty.ADVANCED,
+    question="What does `n` mean in `tracer.barrier(n)`?",
+    choices=[
+        "The number of generation steps that the barrier holds execution open for.",
+        "The number of attention heads whose values are synchronized.",
+        "The number of seconds to wait before the barrier times out.",
+        "The number of blocks that must call it before any of them proceed.",
+    ],
+    correct_index=3,
+    explanation="Set it wrong and the run ends with 'a barrier was never reached'.",
+    tags=["barrier"],
 )
 
 register_mcq(
@@ -463,96 +545,41 @@ register_mcq(
         "FORWARD, BACKWARD, GENERATE, CACHE.",
     ],
     correct_index=1,
-    explanation="END and EXCEPTION were removed in the greenlet rewrite; workers are greenlets, not threads.",
+    explanation="END and EXCEPTION went away with the greenlet rewrite.",
     tags=["internals"],
 )
 
 register_mcq(
-    id="mcq_advanced_12_vllm_unsupported",
-    name="what vLLM cannot do",
+    id="mcq_meta_04_envoy_call_logitlens",
+    name="why logit lens skips hooks",
     difficulty=Difficulty.ADVANCED,
-    question="Which of these is NOT supported on nnsight's vLLM path?",
-    choices=[
-        "Reading `model.logits` during generation.",
-        "Gradients via `with tensor.backward():`.",
-        "Tensor parallelism across several GPUs.",
-        "Per-request sampling parameters on `tracer.invoke(...)`.",
-    ],
-    correct_index=1,
-    explanation="No backward through the engine, and no scan or source-tracing on fused kernels. Tensor parallelism is supported and transparent.",
-    tags=["vllm"],
-)
-
-
-# ---------------------------------------------------------------------------
-# Corrected against the 0.8 source. These three were ported from the 0.7-era
-# suite with their old answers intact — the sort of drift this testbed exists to
-# catch, found by a reader rather than by the harness. Each keeps the superseded
-# description as a distractor.
-# ---------------------------------------------------------------------------
-
-register_mcq(
-    id="mcq_advanced_04_eproperty",
-    name="eproperty stub semantics",
-    difficulty=Difficulty.ADVANCED,
-    question="What does the body of a method decorated with `@eproperty` do at runtime in nnsight 0.8?",
-    choices=[
-        "Nothing — the body is never executed for its return value; it exists to carry "
-        "pre-setup decorators and donate `__name__`/`__doc__` to the descriptor.",
-        "It is the preprocess step: `__get__` parks on the interleaver for the served "
-        "value, then calls the body with it and returns whatever the body returns.",
-        "It runs once and the result is memoized on the class for the lifetime of the model.",
-        "It is scheduled as a coroutine on the worker's event loop.",
-    ],
-    correct_index=1,
-    explanation=(
-        "src/nnsight/intervention/eproperty.py __get__: value = Mediator.value(location); "
-        "if self._preprocess is not None: value = self._preprocess(obj, value). The module "
-        "docstring states 'The decorated stub *is* the preprocess'. `.postprocess` handles "
-        "writes and `.transform` maps an edited view back to the model's layout. Option A "
-        "describes the pre-0.8 descriptor."
+    question=(
+        "In `logits = model.lm_head(model.transformer.ln_f(hs))` inside a trace, why do "
+        "`lm_head` and `ln_f` not trigger their own hooks?"
     ),
-    tags=["internals", "eproperty"],
+    choices=[
+        "Hooks are disabled for every module that is invoked from inside an active trace.",
+        "The hooks do fire, but their results are discarded without being served.",
+        "`Envoy.__call__` defaults to `hook=False`, so it runs `forward` directly.",
+        "Those two modules are special-cased by the transformers model wrapper.",
+    ],
+    correct_index=2,
+    explanation="That is what lets you apply a module out of order without deadlocking.",
+    tags=["modules"],
 )
 
 register_mcq(
-    id="mcq_meta_01_pymount_config",
-    name="PYMOUNT",
+    id="mcq_meta_05_debug_mode",
+    name="debug mode",
     difficulty=Difficulty.ADVANCED,
-    question="What does `CONFIG.APP.PYMOUNT` (default True) control?",
+    question="What changes when you set `CONFIG.APP.DEBUG = True`?",
     choices=[
-        "Whether the C extension mounts `.save()` onto every Python object, so `value.save()` "
-        "works on builtins; with it off, use `nnsight.save(value)`.",
-        "Whether the C extension injects both `.save()` and `.stop()` onto every Python object.",
-        "Whether model weights are memory-mapped rather than copied into RAM.",
-        "Whether the interleaver mounts its hooks eagerly at model load.",
-    ],
-    correct_index=0,
-    explanation=(
-        "src/nnsight/__init__.py: `if CONFIG.APP.PYMOUNT: from ._c import mount; "
-        "mount(save, 'save')` — one name, `save`. The mount is optional and wrapped in a "
-        "try/except, so `nnsight.save(value)` always works regardless."
-    ),
-    tags=["internals", "config"],
-)
-
-register_mcq(
-    id="mcq_advanced_07_edit_inplace",
-    name="persistent edits",
-    difficulty=Difficulty.ADVANCED,
-    question="Where does `with model.edit(inplace=True):` put the intervention, and how is it undone?",
-    choices=[
-        "It rewrites the module's forward; undo by reloading the model.",
-        "It appends a compiled Mediator to `envoy._edits`, which is prepended to the "
-        "mediators of every later run; `model.clear_edits()` empties that list.",
-        "It appends to `_default_mediators`; `model.reset()` clears it.",
-        "It stores a hook handle on the interleaver; removing it requires the handle.",
+        "The model runs under `torch.no_grad`, so any backward context is disabled.",
+        "Tracebacks keep nnsight's internal frames instead of being filtered to your code.",
+        "Every `.save()` also prints the value it marked to stderr.",
+        "Remote traces are redirected to run locally for easier stepping.",
     ],
     correct_index=1,
-    explanation=(
-        "src/nnsight/intervention/envoy.py: `self._edits: list[Mediator] = []`, and "
-        "`clear_edits()` sets `self._edits = []`. Non-inplace `edit()` stores on a shallow "
-        "copy instead, so the original envoy stays clean."
-    ),
-    tags=["internals", "edit"],
+    explanation="It also makes remote runs log payload sizes and every status transition.",
+    tags=["config", "debugging"],
 )
