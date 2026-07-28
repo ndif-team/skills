@@ -180,7 +180,27 @@ class ClaudeCodeProvider:
         if probe.returncode != 0:
             raise RuntimeError(probe.stderr.strip() or "claude --version failed")
 
-    def ask(self, prompt: str, condition: Condition) -> AgentResponse:
+    def ask(self, prompt: str, condition: Condition, attempts: int = 2) -> AgentResponse:
+        """Ask once, retrying an empty answer.
+
+        The CLI intermittently completes successfully with no text at all — no
+        `result`, no assistant text block, just tool calls and a stop. Scoring
+        that as a wrong answer would penalise whichever condition happened to
+        flake, so give it one more go before recording anything.
+        """
+        response = self._ask_once(prompt, condition)
+        for _ in range(attempts - 1):
+            if not response.ok or response.text.strip():
+                break
+            response = self._ask_once(prompt, condition)
+            response.raw_meta["retried_empty"] = True
+        if response.ok and not response.text.strip():
+            response.ok = False
+            response.error = "agent returned no text after retry"
+            response.error_kind = "task"
+        return response
+
+    def _ask_once(self, prompt: str, condition: Condition) -> AgentResponse:
         system, replace = build_system_prompt(condition)
 
         with tempfile.TemporaryDirectory(prefix="nnsight-eval-agent-") as workdir:
@@ -253,6 +273,11 @@ class ClaudeCodeProvider:
 
 def _parse_stream_json(stdout: str) -> AgentResponse:
     response = AgentResponse(text="", ok=False)
+    # The CLI occasionally finishes successfully with an empty `result` — the
+    # answer was in an assistant message but never made it into the summary
+    # field. Keep the streamed text so we can fall back to it rather than
+    # scoring a real answer as unparseable.
+    streamed: list[str] = []
     for line in stdout.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -264,6 +289,10 @@ def _parse_stream_json(stdout: str) -> AgentResponse:
 
         if event.get("type") == "assistant":
             for block in event.get("message", {}).get("content", []):
+                if block.get("type") == "text":
+                    text = block.get("text", "")
+                    if text.strip():
+                        streamed.append(text)
                 if block.get("type") != "tool_use":
                     continue
                 name = block.get("name", "")
@@ -296,6 +325,9 @@ def _parse_stream_json(stdout: str) -> AgentResponse:
             }
             if not response.ok:
                 response.error = str(event.get("result", ""))[:500]
+
+    if response.ok and not response.text.strip() and streamed:
+        response.text = streamed[-1]
     return response
 
 
