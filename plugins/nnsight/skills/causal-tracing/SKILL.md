@@ -1,226 +1,216 @@
 ---
 name: causal-tracing
-description: Causal mediation analysis to identify which model components mediate specific behaviors. Use when investigating how information flows through the network and which neurons or layers are causally responsible for outputs.
+description: Localize where a model stores and retrieves a fact using the ROME protocol — corrupt the subject tokens with noise, restore individual hidden states from the clean run, and measure how much of the correct answer's probability comes back. Use for factual-recall localization, for producing the classic two-site causal trace (early subject site, late last-token site), for windowed and component-severed traces, and when there is no natural corrupt prompt to pair against. Distinct from activation-patching, which transplants between two real prompts.
 ---
 
 # Causal Tracing
 
-Causal tracing (causal mediation analysis) identifies which intermediate computations causally mediate the relationship between inputs and outputs. It reveals not just what correlates with behavior, but what causes it.
+Causal tracing (Meng et al., ROME) localizes a fact without needing a second
+prompt. The protocol is three runs:
 
-## Core Concepts
+1. **Clean** — run the prompt, record every hidden state and the answer's
+   probability.
+2. **Corrupted** — add noise to the *subject token embeddings*. The answer
+   collapses.
+3. **Restored** — re-run corrupted, but paste one clean hidden state back in.
+   Whatever restores the answer was carrying the fact.
 
-### Three Types of Causal Effects
+The output is a (layer × position) map of recovered probability. Compared to the
+`activation-patching` skill: patching transplants between two real prompts and is
+the right tool when you have a natural minimal pair; causal tracing corrupts with
+noise and works on any single prompt.
 
-1. **Total Effect**: Change in output when modifying input
-2. **Direct Effect**: Effect of restoring a component from clean to corrupted run
-3. **Indirect Effect**: Effect of corrupting a component in an otherwise clean run
-
-### The Interchange Intervention
-
-Swap activations between two runs to test causal relationships:
-
-- **Source run**: Produces the activation value
-- **Base run**: Receives the swapped activation
-
-## Setup
-
+<!-- test: setup -->
 ```python
-from nnsight import LanguageModel
 import torch
+import nnsight
+from nnsight import TransformersModel
 
-model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
-# Factual recall task
-base_prompt = "The Eiffel Tower is located in"    # Expects: Paris
-source_prompt = "The Colosseum is located in"      # Expects: Rome
+prompt = "The Eiffel Tower is in the city of"
+answer = model.tokenizer.encode(" Paris")[0]
+token_ids = model.tokenizer(prompt).input_ids
+tokens = [model.tokenizer.decode([i]) for i in token_ids]
+print(tokens)
+# ['The', ' E', 'iff', 'el', ' Tower', ' is', ' in', ' the', ' city', ' of']
 
-# Get target tokens
-paris_token = model.tokenizer(" Paris")["input_ids"][0]
-rome_token = model.tokenizer(" Rome")["input_ids"][0]
-```
-
-## Computing Total Effect
-
-```python
-with model.trace() as tracer:
-    with tracer.invoke(base_prompt):
-        base_logits = model.lm_head.output.save()
-
-    with tracer.invoke(source_prompt):
-        source_logits = model.lm_head.output.save()
-
-base_prob = torch.softmax(base_logits.value[0, -1], dim=-1)[paris_token]
-source_prob = torch.softmax(source_logits.value[0, -1], dim=-1)[rome_token]
-
-total_effect = base_prob - source_prob  # How much does changing input change output?
-```
-
-## Direct Effect (Restoration)
-
-Does restoring a component from source restore source behavior?
-
-```python
+SUBJECT = slice(1, 5)          # ' E','iff','el',' Tower' — the whole subject span
 n_layers = len(model.transformer.h)
-direct_effects = torch.zeros(n_layers)
-
-# Get source activations
-with model.trace(source_prompt):
-    source_hiddens = [layer.output[0].save() for layer in model.transformer.h]
-
-# Patch each layer: run base, inject source activation
-for layer_idx in range(n_layers):
-    with model.trace(base_prompt):
-        model.transformer.h[layer_idx].output[0][:] = source_hiddens[layer_idx]
-        patched_logits = model.lm_head.output.save()
-
-    prob = torch.softmax(patched_logits.value[0, -1], dim=-1)[rome_token]
-    direct_effects[layer_idx] = prob.item()
 ```
 
-## Indirect Effect (Corruption)
+Getting `SUBJECT` right matters: it must cover every token of the subject,
+including the pieces a BPE tokenizer splits it into. Print the tokens and index
+them; never assume word boundaries.
 
-Does corrupting a component in source disrupt source behavior?
+## Steps 1 and 2: clean states and calibrated noise
+
+Noise is scaled to the embedding distribution — ROME uses 3σ of the embedding
+matrix. Generate it **once**, outside the traces, so every restoration run is
+corrupted identically:
 
 ```python
-indirect_effects = torch.zeros(n_layers)
+sigma = model.transformer.wte.weight.std().item()
+generator = torch.Generator().manual_seed(0)
+noise = (torch.randn(1, SUBJECT.stop - SUBJECT.start, model.config.n_embd,
+                     generator=generator) * 3 * sigma).to(model.device)
 
-# Get base activations (for corruption)
-with model.trace(base_prompt):
-    base_hiddens = [layer.output[0].save() for layer in model.transformer.h]
+with model.trace(prompt):
+    clean_states = nnsight.save([block.output.detach() for block in model.transformer.h])
+    clean_prob = model.output.logits[0, -1].softmax(-1)[answer].detach().save()
 
-# For each layer: run source, inject base (corrupted) activation
-for layer_idx in range(n_layers):
-    with model.trace(source_prompt):
-        model.transformer.h[layer_idx].output[0][:] = base_hiddens[layer_idx]
-        corrupted_logits = model.lm_head.output.save()
+with model.trace(prompt):
+    model.transformer.wte.output[:, SUBJECT, :] += noise
+    corrupt_prob = model.output.logits[0, -1].softmax(-1)[answer].detach().save()
 
-    prob = torch.softmax(corrupted_logits.value[0, -1], dim=-1)[rome_token]
-    indirect_effects[layer_idx] = source_prob - prob.item()  # Drop from source baseline
+print(f"clean P(answer)     = {float(clean_prob):.4f}")
+print(f"corrupted P(answer) = {float(corrupt_prob):.4f}")
 ```
 
-## Position-Specific Causal Tracing
+```
+clean P(answer)     = 0.0700
+corrupted P(answer) = 0.0008
+```
 
-Identify which token positions carry causal information:
+Those two numbers are the scale for everything that follows: restoration is
+reported as the fraction of the gap between them that comes back. If corruption
+does not collapse the answer, raise the noise or check that `SUBJECT` really
+covers the subject — with no gap to recover, the trace is meaningless.
+
+## Step 3: single-state restoration
+
+One clean state at a time, every (layer, position) cell — batched so each layer
+costs one forward pass:
 
 ```python
-seq_len = len(model.tokenizer.encode(source_prompt))
-position_effects = torch.zeros(n_layers, seq_len)
+grid = []
+for layer in range(n_layers):
+    with model.trace() as tracer:
+        row = nnsight.save([])
+        for pos in range(len(token_ids)):
+            with tracer.invoke(prompt):
+                model.transformer.wte.output[:, SUBJECT, :] += noise
+                model.transformer.h[layer].output[:, pos, :] = clean_states[layer][:, pos, :]
+                row.append(model.output.logits[0, -1].softmax(-1)[answer].detach())
+    grid.append([float(x) for x in row])
 
-# Get source activations
-with model.trace(source_prompt):
-    source_hiddens = [layer.output[0].save() for layer in model.transformer.h]
-
-# Patch each layer x position
-for layer_idx in range(n_layers):
-    for pos_idx in range(seq_len):
-        with model.trace(base_prompt):
-            # Only patch this specific position
-            model.transformer.h[layer_idx].output[0][:, pos_idx, :] = \
-                source_hiddens[layer_idx][:, pos_idx, :]
-            patched_logits = model.lm_head.output.save()
-
-        prob = torch.softmax(patched_logits.value[0, -1], dim=-1)[rome_token]
-        position_effects[layer_idx, pos_idx] = prob.item()
+print(f"{'token':>10} " + "".join(f"L{l:<5}" for l in range(0, n_layers, 2)))
+for pos, token in enumerate(tokens):
+    print(f"{token!r:>10} " + "".join(f"{grid[l][pos]:.3f} " for l in range(0, n_layers, 2)))
 ```
 
-## Noising-Based Causal Tracing
+```
+     token L0    L2    L4    L6    L8    L10
+     'The' 0.001 0.001 0.001 0.001 0.001 0.001
+      ' E' 0.002 0.002 0.002 0.001 0.001 0.001
+   ' Tower'0.001 0.001 0.001 0.002 0.001 0.001
+     ' of' 0.001 0.002 0.003 0.004 0.010 0.044
+```
 
-Add noise to corrupt, then restore specific components:
+Only the **last position at late layers** recovers anything. That is the honest
+result of single-state restoration on a small model — a single hidden state is
+rarely enough, because the corrupted signal keeps flowing through every other
+path. This is why ROME restores a *window*.
+
+## Windowed restoration — where the two sites appear
+
+Restore a run of consecutive layers (ROME uses ~10 on GPT-2 XL; 5 works on small)
+at a fixed position group:
 
 ```python
-def add_noise(activation, noise_level=0.1):
-    return activation + noise_level * torch.randn_like(activation)
+WINDOW = 5
 
-window_size = 3  # Restore window of layers around target
-restoration_effects = torch.zeros(n_layers)
+def trace_sites(positions):
+    with model.trace() as tracer:
+        out = nnsight.save([])
+        for layer in range(n_layers):
+            with tracer.invoke(prompt):
+                model.transformer.wte.output[:, SUBJECT, :] += noise
+                for w in range(layer, min(layer + WINDOW, n_layers)):
+                    model.transformer.h[w].output[:, positions, :] = clean_states[w][:, positions, :]
+                out.append(model.output.logits[0, -1].softmax(-1)[answer].detach())
+    return [float(x) for x in out]
 
-# Clean run - save activations
-with model.trace(source_prompt):
-    clean_hiddens = [layer.output[0].save() for layer in model.transformer.h]
+subject_site = trace_sites(SUBJECT)
+last_site = trace_sites(slice(-1, None))
 
-# For each layer: noise everything, restore window around this layer
-for center_layer in range(n_layers):
-    with model.trace(source_prompt):
-        for layer_idx, layer in enumerate(model.transformer.h):
-            if abs(layer_idx - center_layer) <= window_size // 2:
-                # Restore clean
-                layer.output[0][:] = clean_hiddens[layer_idx]
-            else:
-                # Add noise
-                layer.output[0][:] = add_noise(layer.output[0])
-
-        restored_logits = model.lm_head.output.save()
-
-    prob = torch.softmax(restored_logits.value[0, -1], dim=-1)[rome_token]
-    restoration_effects[center_layer] = prob.item()
+print("window start:  " + " ".join(f"{l:5d}" for l in range(n_layers)))
+print("subject pos:   " + " ".join(f"{v:.3f}" for v in subject_site))
+print("last pos:      " + " ".join(f"{v:.3f}" for v in last_site))
 ```
 
-## MLP vs Attention Decomposition
+```
+window start:      0     1     2     3     4     5     6     7     8     9    10    11
+subject pos:   0.032 0.027 0.033 0.036 0.032 0.027 0.015 0.008 0.005 0.002 0.001 0.001
+last pos:      0.003 0.003 0.004 0.005 0.009 0.028 0.041 0.070 0.070 0.070 0.070 0.070
+```
 
-Separate contributions of MLP and attention:
+This is the classic **two-site** structure, reproduced on GPT-2 small:
+
+- an **early site** at the *subject* tokens in layers 0–5, recovering ~46% of the
+  clean probability — where the fact is looked up
+- a **late site** at the *last* token from layer 7 on, recovering 100% — where the
+  retrieved fact has arrived and determines the output
+
+The early site is the interesting one: it is the claim that a specific range of
+layers at the subject position performs factual recall, and it is what ROME
+targets when editing a fact.
+
+## Component-severed traces
+
+To ask which sublayer does the work, restore only that sublayer's output:
 
 ```python
-mlp_effects = torch.zeros(n_layers)
-attn_effects = torch.zeros(n_layers)
+with model.trace(prompt):
+    clean_mlp = nnsight.save([block.mlp.output.detach() for block in model.transformer.h])
 
-# Get source MLP and attention outputs
-with model.trace(source_prompt):
-    source_mlp = [layer.mlp.output[0].save() for layer in model.transformer.h]
-    source_attn = [layer.attn.output[0].save() for layer in model.transformer.h]
+with model.trace() as tracer:
+    mlp_only = nnsight.save([])
+    for layer in range(n_layers):
+        with tracer.invoke(prompt):
+            model.transformer.wte.output[:, SUBJECT, :] += noise
+            for w in range(layer, min(layer + WINDOW, n_layers)):
+                model.transformer.h[w].mlp.output[:, SUBJECT, :] = clean_mlp[w][:, SUBJECT, :]
+            mlp_only.append(model.output.logits[0, -1].softmax(-1)[answer].detach())
 
-# Test MLP contributions
-for layer_idx in range(n_layers):
-    with model.trace(base_prompt):
-        model.transformer.h[layer_idx].mlp.output[0][:] = source_mlp[layer_idx]
-        mlp_logits = model.lm_head.output.save()
-    mlp_effects[layer_idx] = torch.softmax(mlp_logits.value[0, -1], dim=-1)[rome_token]
-
-# Test attention contributions
-for layer_idx in range(n_layers):
-    with model.trace(base_prompt):
-        model.transformer.h[layer_idx].attn.output[0][:] = source_attn[layer_idx]
-        attn_logits = model.lm_head.output.save()
-    attn_effects[layer_idx] = torch.softmax(attn_logits.value[0, -1], dim=-1)[rome_token]
+print("mlp-only restore:", " ".join(f"{float(v):.3f}" for v in mlp_only))
 ```
 
-## Visualization
-
-```python
-import matplotlib.pyplot as plt
-import seaborn as sns
-
-fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-# Layer-wise effects
-axes[0].bar(range(n_layers), direct_effects, alpha=0.7, label='Direct')
-axes[0].bar(range(n_layers), indirect_effects, alpha=0.7, label='Indirect')
-axes[0].set_xlabel('Layer')
-axes[0].set_ylabel('Causal Effect')
-axes[0].legend()
-axes[0].set_title('Causal Effects by Layer')
-
-# Position x Layer heatmap
-input_tokens = model.tokenizer.encode(source_prompt)
-token_labels = [model.tokenizer.decode(t) for t in input_tokens]
-
-sns.heatmap(
-    position_effects.numpy(),
-    ax=axes[1],
-    xticklabels=token_labels,
-    yticklabels=[f'L{i}' for i in range(n_layers)],
-    cmap='viridis'
-)
-axes[1].set_title('Causal Effect by Position and Layer')
-axes[1].set_xlabel('Token Position')
-axes[1].set_ylabel('Layer')
-
-plt.tight_layout()
+```
+mlp-only restore: 0.006 0.000 0.000 0.001 0.001 0.001 ...
 ```
 
-## Interpretation Guidelines
+Near zero — and that is informative rather than a failure. Restoring a sublayer's
+*output* does not repair the residual stream it was added to, so the corrupted
+signal still dominates. The meaningful severed design is the reverse: restore the
+residual window and **sever** one component (freeze attention, or zero the MLP's
+contribution) to see how much of the recovery depends on it. Interpret any
+sublayer trace by asking which paths are still carrying corruption.
 
-- **Early layers + subject position**: Often store entity information
-- **Middle layers + last subject token**: Information extraction/lookup
-- **Late layers + final position**: Prediction formation
-- **High indirect effect**: Component is necessary for behavior
-- **High direct effect**: Component is sufficient to cause behavior
+## Reading a causal trace
+
+**Report recovery, not raw probability.** `(restored − corrupt) / (clean − corrupt)`
+is comparable across prompts; raw probability is not.
+
+**Average over noise seeds.** One noise draw is one sample of a random
+perturbation. ROME averages ~10. If a peak moves when you change the seed, it
+isn't a peak.
+
+**Model size changes the picture.** The early site is sharper in larger models.
+Weak or absent structure on a small model is not evidence that the fact is
+distributed.
+
+**Corruption must be at the embeddings.** Corrupting later layers conflates "the
+subject was unreadable" with "the computation was disturbed".
+
+**A trace is a localization, not a mechanism.** It says restoring these states
+suffices. To claim a component *computes* the fact, follow with editing (does
+changing those weights change the fact?) — see the `model-editing-and-lora`
+skill — or with the `activation-patching` skill on a minimal pair.
+
+## Related skills
+
+- `activation-patching` — paired-prompt transplants, head- and MLP-level patching
+- `attribution-patching` — a cheap first pass when the grid is too large
+- `model-editing-and-lora` — acting on what a trace localizes
+- `nnsight` — batching sweeps into single forward passes

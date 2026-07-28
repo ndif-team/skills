@@ -1,7 +1,7 @@
 {
   "name": "nnsight",
-  "version": "1.0.0",
-  "description": "Neural network interpretability with nnsight - tracing, patching, steering, and analysis",
+  "version": "2.0.0",
+  "description": "Neural network interpretability with nnsight 0.8 - tracing, intervening, patching, steering, debugging, and remote execution on NDIF",
   "author": {
     "name": "NDIF Team"
   }
