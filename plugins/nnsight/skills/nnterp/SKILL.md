@@ -104,32 +104,46 @@ print(skipped.shape)
 
 ## Attention probabilities
 
-nnterp exposes `model.attention_probabilities[i]`, which finds the softmax inside
-whatever attention implementation the model uses. Enable it at construction — it
-also forces `attn_implementation="eager"`:
+nnterp exposes `model.attention_probabilities[i]`, which finds the probability
+matrix inside whatever attention implementation the model uses. Enable it at
+construction — it also forces `attn_implementation="eager"`:
 
-<!-- test: skip -->
 ```python
-model = StandardizedTransformer("meta-llama/Llama-3.2-1B", enable_attention_probs=True)
+with_probs = StandardizedTransformer("openai-community/gpt2", enable_attention_probs=True)
 
-with model.trace(prompt):
-    pattern = model.attention_probabilities[7].save()
+with with_probs.trace(prompt):
+    pattern = with_probs.attention_probabilities[5].save()
 
-print(pattern.shape)        # [batch, heads, query, key]
+print(pattern.shape)                          # [batch, heads, query, key]
+print(pattern[0, 0].sum(-1)[:3])               # rows sum to 1
 ```
 
-**Known incompatibility (verified):** on GPT-2 with `transformers` 5.15,
-`enable_attention_probs=True` fails at load with
+They are assignable too, which is the portable way to intervene on attention:
 
-```
-AttributeError: 'model.transformer.h.0.attn.source.attention_interface_0.source'
-has no operation 'module_attn_dropout_0'; available: ..., nn_functional_dropout_0, ...
+```python
+with with_probs.trace(prompt):
+    uniform = torch.ones_like(with_probs.attention_probabilities[5])
+    with_probs.attention_probabilities[5] = uniform / uniform.shape[-1]
+    flattened = with_probs.logits.save()
+
+print(f"attention flattened at layer 5 -> {with_probs.tokenizer.decode(flattened[0, -1].argmax())!r}")
 ```
 
-nnterp is looking for an operation name that this `transformers` version renamed.
-Until that is fixed, get GPT-2 attention patterns through plain nnsight `.source`
-— see the `attention-analysis` skill — and check `model.attn_probs_available`
-before relying on the accessor for any model.
+Construction validates the accessor (shape, rows summing to 1, and that editing
+the probabilities changes the logits), so a model where it does not work fails at
+load rather than returning something wrong. Check `model.attn_probs_available`
+when handling arbitrary architectures.
+
+**Version note.** nnterp locates this value by the *name of the operation* in the
+model's attention forward, and those names follow whatever transformers writes.
+GPT-2's dropout call changed from `module.attn_dropout(...)` (transformers ≤ 4.57)
+to `nn.functional.dropout(...)` (transformers ≥ 5), which broke the accessor on
+GPT-2 until nnterp learned both spellings. If `enable_attention_probs=True` raises
+`AttributeError: ... has no operation ...` on some other architecture, that is the
+same class of problem: run `model.attention_probabilities.print_source()` to see
+the real operation names and pass the right one via
+`RenameConfig(attn_prob_source=...)`. Plain nnsight `.source` is the fallback —
+see the `attention-analysis` skill.
 
 ## Choosing between nnterp and plain nnsight
 
