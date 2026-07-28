@@ -30,10 +30,15 @@ print(resid.shape, mlp_in.shape, logits.shape)
 
 ## Know what a module actually returns
 
-**Do not assume `.output[0]`.** In current `transformers`, a GPT-2 *block* returns
-a plain tensor, while the *attention* submodule returns a tuple. Older nnsight
-examples on the internet write `h[i].output[0]` everywhere; on 0.8 that silently
-indexes the batch dimension instead of unpacking a tuple.
+**Do not assume `.output[0]`.** In `transformers` 5, a GPT-2 *block* returns a
+plain tensor, while the *attention* submodule returns a tuple. Older nnsight
+examples on the internet write `h[i].output[0]` everywhere, which silently indexes
+the batch dimension instead of unpacking a tuple.
+
+This is a `transformers` fact, not an nnsight one, and it moved recently: in
+`transformers` 4.x the same block returned `(hidden_states,)`, so `.output[0]` was
+correct there. Check the version before porting either way — and check the model,
+since the answer differs per architecture.
 
 ```python
 with model.trace(prompt):

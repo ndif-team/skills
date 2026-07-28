@@ -6,8 +6,13 @@ and [NDIF](https://ndif.us/).
 Compatible with both **Claude Code** and **OpenAI Codex** via the
 [Agent Skills Specification](https://agentskills.io/).
 
-These skills target **nnsight 0.8**. Every code example is executed by the test
-suite against a real model, so what an agent reads is what actually runs.
+These skills target **nnsight 0.8** and **transformers ≥ 5**. Every code example is
+executed by the test suite against a real model, so what an agent reads is what
+actually runs.
+
+The transformers floor is not cosmetic: in 4.x a GPT-2 block returns
+`(hidden_states,)` and its attention dropout is `module.attn_dropout(...)`, so the
+`.output` and `.source` examples throughout these skills are wrong on 4.x.
 
 ## Installation
 

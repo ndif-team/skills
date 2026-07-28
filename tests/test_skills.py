@@ -22,7 +22,7 @@ def _files_with_code() -> list[Path]:
 
 def _skip_reason(block: Block, run_slow: bool) -> str | None:
     if "remote" in block.flags and not conftest.ndif_host():
-        return "needs NDIF_HOST (e.g. NDIF_HOST=http://localhost:8001)"
+        return "needs a reachable NDIF_HOST (e.g. NDIF_HOST=http://localhost:8001)"
     if "gpu" in block.flags and not conftest.cuda_available():
         return "needs CUDA"
     if "slow" in block.flags and not run_slow:

@@ -14,6 +14,13 @@ the test suite rejects them in runnable examples. When in doubt about current
 behavior, check the nnsight source and docs rather than memory, then verify by
 running the code.
 
+**They also require transformers >= 5.** Model internals moved between 4.x and 5:
+a GPT-2 block returns `(hidden_states,)` in 4.x and a plain tensor in 5, and its
+attention dropout went from `module.attn_dropout(...)` (source op
+`module_attn_dropout_0`) to `nn.functional.dropout(...)`
+(`nn_functional_dropout_0`). Anything that indexes `.output` or names a `.source`
+operation is version-bound — say which version a claim was verified on.
+
 ## Layout
 
 ```

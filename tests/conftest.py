@@ -35,8 +35,33 @@ def cuda_available() -> bool:
     return torch.cuda.is_available()
 
 
+_ndif_reachable: bool | None = None
+
+
 def ndif_host() -> str | None:
-    return os.environ.get("NDIF_HOST") or None
+    """The NDIF host to run `remote` blocks against, if one is actually up.
+
+    The Makefile sets NDIF_HOST by default, so a configured-but-unreachable host
+    has to skip rather than fail — otherwise `make test` breaks for anyone who
+    isn't running a local deployment.
+    """
+    global _ndif_reachable
+
+    host = os.environ.get("NDIF_HOST") or None
+    if host is None:
+        return None
+
+    if _ndif_reachable is None:
+        import urllib.error
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(f"{host.rstrip('/')}/ping", timeout=3):
+                _ndif_reachable = True
+        except (urllib.error.URLError, OSError, ValueError):
+            _ndif_reachable = False
+
+    return host if _ndif_reachable else None
 
 
 def pytest_sessionfinish(session, exitstatus):

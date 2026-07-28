@@ -29,11 +29,21 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}-gpt2
+          key: hf-${{ runner.os }}-v1
       - name: Install
+        # nnsight 0.8 is not on PyPI yet (latest release is 0.7.0), so install the
+        # branch. Switch to `pip install "nnsight>=0.8"` once it ships.
+        #
+        # transformers>=5 is a hard requirement, not a preference: in 4.x a GPT-2
+        # block returns `(hidden_states,)` and its attention dropout is
+        # `module.attn_dropout(...)`, so the `.output` and `.source` examples
+        # throughout these skills are wrong on 4.x.
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install "nnsight>=0.8" pytest
+          pip install "transformers>=5" pytest
+          pip install "nnsight @ git+https://github.com/ndif-team/nnsight@0.8"
+      - name: Report versions
+        run: python plugins/nnsight/skills/nnsight/scripts/check_env.py
       # No CUDA and no NDIF deployment on the runner, so `gpu` and `remote`
-      # blocks are skipped; everything else runs against real gpt2 weights.
+      # blocks skip; everything else runs against real weights.
       - run: pytest -q tests/test_skills.py
