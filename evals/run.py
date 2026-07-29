@@ -54,6 +54,30 @@ COST_HINTS = {"none": 0.005, "static": 0.12, "agentic": 0.11}
 TOKEN_HINTS = {"none": 2_000, "static": 60_000, "agentic": 55_000}
 
 
+def preflight() -> None:
+    """Fail before spending anything if the environment cannot run a task.
+
+    Learned the hard way: nnsight is installed editable from a shared checkout,
+    and a branch switch there (0.8 -> a feature branch with a different public
+    API) turned every code task into an ImportError. MCQs kept passing, so the
+    sweep looked like a catastrophic model regression rather than a broken
+    import. One import check up front distinguishes the two in a second.
+    """
+    try:
+        import nnsight
+        from nnsight import TransformersModel  # noqa: F401
+    except ImportError as exc:
+        source = getattr(__import__("nnsight"), "__file__", "?") if "nnsight" in sys.modules else "?"
+        raise SystemExit(
+            f"preflight failed: {exc}\n"
+            f"nnsight resolves to {source}\n"
+            "Code tasks cannot run. If nnsight is an editable install, check which "
+            "branch that checkout is on — the eval suite targets 0.8."
+        ) from exc
+
+    print(f"nnsight {nnsight.__version__} from {nnsight.__file__}")
+
+
 def cell_key(record: dict) -> tuple:
     return (record["model"], record["condition"], record["task_id"], record["repeat"])
 
@@ -95,6 +119,9 @@ def main(argv=None) -> int:
                         help="stop once this many tokens have been used (the real budget on a subscription)")
     parser.add_argument("--timeout", type=int, default=900, help="per-agent-call timeout")
     args = parser.parse_args(argv)
+
+    if not args.dry_run:
+        preflight()
 
     load_all()
     tasks = select(
