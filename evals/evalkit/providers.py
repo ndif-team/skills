@@ -36,9 +36,15 @@ AGENTIC_TOOLS = ["Read", "Grep", "Glob", "Skill"]
 DENIED_TOOLS = ["Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Task"]
 
 
-# Signals that the account, not the task, is what failed. On a subscription the
-# realistic way a long sweep dies is hitting a usage window — and if those cells
-# were recorded as task failures they would silently corrupt the results.
+# Three kinds of failure, and conflating them is expensive.
+#
+# "limit"     — the account cannot serve this request at all (usage window,
+#               quota, expired login). Stop the sweep; retrying is pointless and
+#               recording the cells as task failures would corrupt the results.
+# "transient" — the server hiccuped (529 Overloaded, 5xx). Retry with backoff;
+#               a two-second blip should not end a two-hour grid. Treating 529 as
+#               a limit is exactly what killed the first Opus run after one cell.
+# "task"      — anything else; the agent genuinely failed to answer.
 LIMIT_MARKERS = (
     "usage limit",
     "rate limit",
@@ -49,14 +55,29 @@ LIMIT_MARKERS = (
     "please run /login",
     "authentication",
     "credit balance",
+)
+
+TRANSIENT_MARKERS = (
     "overloaded",
+    "529",
+    "502",
+    "503",
+    "504",
+    "internal server error",
+    "connection reset",
+    "timed out",
+    "temporarily",
 )
 
 
 def classify_error(text: str) -> str:
-    """'limit' for account/quota problems, 'task' for anything else."""
+    """'limit' | 'transient' | 'task'."""
     lowered = (text or "").lower()
-    return "limit" if any(marker in lowered for marker in LIMIT_MARKERS) else "task"
+    if any(marker in lowered for marker in LIMIT_MARKERS):
+        return "limit"
+    if any(marker in lowered for marker in TRANSIENT_MARKERS):
+        return "transient"
+    return "task"
 
 
 @dataclass
@@ -165,10 +186,12 @@ class ClaudeCodeProvider:
 
     name = "claude-code"
 
-    def __init__(self, model: str = "sonnet", timeout: int = 900, max_turns: int = 30):
+    def __init__(self, model: str = "sonnet", timeout: int = 900, max_turns: int = 30,
+                 transient_retries: int = 4):
         self.model = model
         self.timeout = timeout
         self.max_turns = max_turns
+        self.transient_retries = transient_retries
         try:
             probe = subprocess.run(
                 ["claude", "--version"], capture_output=True, text=True, timeout=30
@@ -181,19 +204,32 @@ class ClaudeCodeProvider:
             raise RuntimeError(probe.stderr.strip() or "claude --version failed")
 
     def ask(self, prompt: str, condition: Condition, attempts: int = 2) -> AgentResponse:
-        """Ask once, retrying an empty answer.
+        """Ask, retrying an empty answer and backing off on transient errors.
 
-        The CLI intermittently completes successfully with no text at all — no
-        `result`, no assistant text block, just tool calls and a stop. Scoring
-        that as a wrong answer would penalise whichever condition happened to
-        flake, so give it one more go before recording anything.
+        Two flakes get absorbed here rather than becoming data points:
+
+        - the CLI intermittently completes with no text at all (tool calls, a
+          stop, nothing else) — retried once
+        - the API returns 529/5xx — retried with backoff, since a momentary
+          overload should not end a multi-hour sweep
         """
         response = self._ask_once(prompt, condition)
+
+        backoff = 10
+        for _ in range(self.transient_retries):
+            if response.error_kind != "transient":
+                break
+            time.sleep(backoff)
+            backoff = min(backoff * 3, 120)
+            response = self._ask_once(prompt, condition)
+            response.raw_meta["retried_transient"] = True
+
         for _ in range(attempts - 1):
             if not response.ok or response.text.strip():
                 break
             response = self._ask_once(prompt, condition)
             response.raw_meta["retried_empty"] = True
+
         if response.ok and not response.text.strip():
             response.ok = False
             response.error = "agent returned no text after retry"

@@ -196,9 +196,13 @@ def main(argv=None) -> int:
             else:
                 error = "" if response.ok else response.error
 
-            if response is not None and getattr(response, "error_kind", "") == "limit":
+            kind = getattr(response, "error_kind", "") if response is not None else ""
+            if kind in ("limit", "transient"):
+                reason = ("the account, not the task, failed"
+                          if kind == "limit" else
+                          "the API stayed unavailable through every retry")
                 print(
-                    f"\nSTOPPING — the account, not the task, failed:\n  {response.error[:300]}\n\n"
+                    f"\nSTOPPING — {reason}:\n  {response.error[:300]}\n\n"
                     "This cell was NOT recorded, so it will be retried. Resume with:\n"
                     f"  python run.py --resume --output {output} ...\n"
                 )
