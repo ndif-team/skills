@@ -1,0 +1,81 @@
+id: "activation-patching-002"
+skill: "activation-patching"
+difficulty: "hard"
+title: "Position-Specific Head Patching"
+query: |
+  Implement position-specific attention head patching for GPT-2 on the IOI task.
+
+  Clean: "After John and Mary went to the store, Mary gave a bottle of milk to"
+  Corrupted: "After John and Mary went to the store, John gave a bottle of milk to"
+
+  For each layer and each attention head, patch only that head's output from
+  the clean run into the corrupted run. Create a 2D results tensor of shape
+  [n_layers, n_heads] showing the importance of each head.
+
+  Access attention head outputs via layer.attn.c_proj.input[0][0] and slice
+  by head dimension.
+
+expected_concepts:
+  - "attention head output access via c_proj.input"
+  - "head dimension slicing"
+  - "nested loop over layers and heads"
+  - "fine-grained patching"
+  - "result aggregation"
+
+validation:
+  must_include:
+    - "model.trace"
+    - "c_proj.input"
+    - "head_dim"
+    - "n_heads"
+    - ".save()"
+  must_not_include:
+    - pattern: "tracer.invoke.*tracer.invoke"
+      reason: "Cross-prompt without barrier"
+  expected_output:
+    type: "tensor"
+    shape: [12, 12]
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  clean_prompt = "After John and Mary went to the store, Mary gave a bottle of milk to"
+  corrupted_prompt = "After John and Mary went to the store, John gave a bottle of milk to"
+
+  correct_token = model.tokenizer(" John")["input_ids"][0]
+  incorrect_token = model.tokenizer(" Mary")["input_ids"][0]
+
+  def logit_diff(logits):
+      return (logits[0, -1, correct_token] - logits[0, -1, incorrect_token]).item()
+
+  n_layers = len(model.transformer.h)
+  n_heads = model.config.n_head
+  head_dim = model.config.n_embd // n_heads
+  results = torch.zeros(n_layers, n_heads)
+
+  # Get clean attention outputs
+  with model.trace(clean_prompt):
+      clean_attn = [layer.attn.c_proj.input[0][0].save()
+                    for layer in model.transformer.h]
+
+  # Patch each layer x head
+  for layer_idx in range(n_layers):
+      for head_idx in range(n_heads):
+          with model.trace(corrupted_prompt):
+              start = head_idx * head_dim
+              end = (head_idx + 1) * head_dim
+              model.transformer.h[layer_idx].attn.c_proj.input[0][0][:, :, start:end] = \
+                  clean_attn[layer_idx][:, :, start:end]
+              patched_logits = model.lm_head.output.save()
+          results[layer_idx, head_idx] = logit_diff(patched_logits.value)
+
+  print(results)
+
+tags:
+  - "activation-patching"
+  - "attention-heads"
+  - "fine-grained"
+  - "ioi-task"

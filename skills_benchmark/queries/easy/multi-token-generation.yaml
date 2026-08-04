@@ -1,0 +1,38 @@
+id: "basics-003"
+skill: "nnsight-basics"
+difficulty: "easy"
+title: "Multi-Token Generation"
+query: |
+  Using NNsight, generate 10 new tokens from GPT-2 starting with the prompt
+  "Once upon a time". Use model.generate() and save the generated output.
+  Decode and print the full generated text.
+
+expected_concepts:
+  - "model.generate context"
+  - "max_new_tokens parameter"
+  - "generator.output access"
+  - "tokenizer.decode"
+
+validation:
+  must_include:
+    - "model.generate"
+    - "max_new_tokens"
+    - "generator.output"
+    - ".save()"
+    - "tokenizer.decode"
+  must_not_include: []
+
+reference_solution: |
+  from nnsight import LanguageModel
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  with model.generate("Once upon a time", max_new_tokens=10) as tracer:
+      output = model.generator.output.save()
+
+  print(model.tokenizer.decode(output[0]))
+
+tags:
+  - "basics"
+  - "generation"
+  - "gpt2"

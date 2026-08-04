@@ -1,0 +1,79 @@
+id: "activation-patching-001"
+skill: "activation-patching"
+difficulty: "medium"
+title: "Layer-wise Activation Patching"
+query: |
+  Implement layer-wise activation patching for GPT-2 to identify which layers
+  are most important for the model predicting "John" in the IOI task.
+
+  Use these prompts:
+  - Clean: "After John and Mary went to the store, Mary gave a bottle of milk to"
+  - Corrupted: "After John and Mary went to the store, John gave a bottle of milk to"
+
+  For each layer, patch the corrupted run with clean activations and measure
+  the logit difference between "John" and "Mary" tokens. Return normalized results.
+
+expected_concepts:
+  - "separate trace contexts"
+  - "saving activations from clean run"
+  - "patching in corrupted run"
+  - "logit difference metric"
+  - "result normalization"
+
+validation:
+  must_include:
+    - "model.trace"
+    - ".save()"
+    - "for layer"
+    - "logit"
+  must_not_include:
+    - pattern: "with tracer.invoke.*\\n.*with tracer.invoke"
+      reason: "Cross-prompt patching without barrier (use separate traces)"
+  expected_output:
+    type: "tensor"
+    shape: [12]
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  clean_prompt = "After John and Mary went to the store, Mary gave a bottle of milk to"
+  corrupted_prompt = "After John and Mary went to the store, John gave a bottle of milk to"
+
+  correct_token = model.tokenizer(" John")["input_ids"][0]
+  incorrect_token = model.tokenizer(" Mary")["input_ids"][0]
+
+  def logit_diff(logits):
+      return (logits[0, -1, correct_token] - logits[0, -1, incorrect_token]).item()
+
+  n_layers = len(model.transformer.h)
+  results = torch.zeros(n_layers)
+
+  # Clean run
+  with model.trace(clean_prompt):
+      clean_hiddens = [layer.output[0].save() for layer in model.transformer.h]
+      clean_logits = model.lm_head.output.save()
+
+  # Corrupted baseline
+  with model.trace(corrupted_prompt):
+      corrupted_logits = model.lm_head.output.save()
+
+  # Patch each layer
+  for layer_idx in range(n_layers):
+      with model.trace(corrupted_prompt):
+          model.transformer.h[layer_idx].output[0][:] = clean_hiddens[layer_idx]
+          patched_logits = model.lm_head.output.save()
+      results[layer_idx] = logit_diff(patched_logits.value)
+
+  # Normalize
+  clean_diff = logit_diff(clean_logits.value)
+  corrupted_diff = logit_diff(corrupted_logits.value)
+  normalized = (results - corrupted_diff) / (clean_diff - corrupted_diff)
+  print(normalized)
+
+tags:
+  - "activation-patching"
+  - "ioi-task"
+  - "causal-intervention"

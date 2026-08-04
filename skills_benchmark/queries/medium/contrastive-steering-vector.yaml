@@ -1,0 +1,72 @@
+id: "steering-002"
+skill: "model-steering"
+difficulty: "medium"
+title: "Contrastive Steering Vector"
+query: |
+  Compute a sentiment steering vector for GPT-2 using contrastive prompts.
+
+  Positive prompts: ["I love this!", "This is amazing!", "I'm so happy!"]
+  Negative prompts: ["I hate this!", "This is terrible!", "I'm so sad!"]
+
+  Extract the last token hidden states from layer 10 for each prompt,
+  compute the mean difference (positive - negative) as the steering vector.
+  Then apply this vector during generation with strength 1.5.
+
+expected_concepts:
+  - "collecting activations from multiple prompts"
+  - "tracer.invoke for batching"
+  - "mean activation computation"
+  - "steering vector application"
+  - "generation with tracer.all()"
+
+validation:
+  must_include:
+    - "model.trace"
+    - "tracer.invoke"
+    - ".save()"
+    - "mean"
+    - "model.generate"
+    - "tracer.all()"
+  must_not_include: []
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  positive_prompts = ["I love this!", "This is amazing!", "I'm so happy!"]
+  negative_prompts = ["I hate this!", "This is terrible!", "I'm so sad!"]
+
+  layer_idx = 10
+  positive_acts = []
+  negative_acts = []
+
+  with model.trace() as tracer:
+      for prompt in positive_prompts:
+          with tracer.invoke(prompt):
+              act = model.transformer.h[layer_idx].output[0][:, -1, :].save()
+              positive_acts.append(act)
+
+      for prompt in negative_prompts:
+          with tracer.invoke(prompt):
+              act = model.transformer.h[layer_idx].output[0][:, -1, :].save()
+              negative_acts.append(act)
+
+  pos_mean = torch.stack([a.value for a in positive_acts]).mean(dim=0)
+  neg_mean = torch.stack([a.value for a in negative_acts]).mean(dim=0)
+  steering_vector = pos_mean - neg_mean
+
+  # Apply during generation
+  with model.generate("The movie was", max_new_tokens=20) as tracer:
+      with tracer.all():
+          model.transformer.h[layer_idx].output[0][:, -1, :] += 1.5 * steering_vector
+      generated = model.generator.output.save()
+
+  print(model.tokenizer.decode(generated[0]))
+
+tags:
+  - "steering"
+  - "contrastive"
+  - "sentiment"
+  - "generation"

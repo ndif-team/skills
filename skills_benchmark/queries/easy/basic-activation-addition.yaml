@@ -1,0 +1,41 @@
+id: "steering-001"
+skill: "model-steering"
+difficulty: "easy"
+title: "Basic Activation Addition"
+query: |
+  Using NNsight with GPT-2, add a random noise vector (scaled by 0.1) to the
+  output of layer 10 at the last token position for the prompt "I think this is".
+  Save the resulting logits.
+
+expected_concepts:
+  - "trace context"
+  - "activation addition"
+  - "position indexing"
+  - "torch.randn_like"
+
+validation:
+  must_include:
+    - "model.trace"
+    - "transformer.h[10]"
+    - "+="
+    - "randn"
+    - ".save()"
+  must_not_include: []
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  with model.trace("I think this is"):
+      noise = 0.1 * torch.randn(768, device="cuda")
+      model.transformer.h[10].output[0][:, -1, :] += noise
+      logits = model.lm_head.output.save()
+
+  print(logits.value.shape)
+
+tags:
+  - "steering"
+  - "activation-addition"
+  - "noise"

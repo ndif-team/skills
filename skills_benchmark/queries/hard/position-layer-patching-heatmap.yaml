@@ -1,0 +1,91 @@
+id: "combined-001"
+skill: "activation-patching"
+difficulty: "hard"
+title: "Position-Layer Patching Heatmap"
+query: |
+  Create a complete position x layer activation patching analysis for GPT-2
+  on the IOI task. This reveals which token positions at which layers are
+  most important for the model's prediction.
+
+  Clean: "After John and Mary went to the store, Mary gave a bottle of milk to"
+  Corrupted: "After John and Mary went to the store, John gave a bottle of milk to"
+
+  For each layer and each token position, patch only that specific position's
+  activation from the clean run. Create a 2D heatmap of shape [n_layers, seq_len].
+
+  This is computationally intensive (12 layers x ~15 positions = 180 patches)
+  but provides rich interpretability insights.
+
+expected_concepts:
+  - "position-specific patching"
+  - "nested iteration over layers and positions"
+  - "selective tensor slicing"
+  - "result aggregation into 2D tensor"
+  - "handling sequence length"
+
+validation:
+  must_include:
+    - "model.trace"
+    - "[:, pos_idx, :]"
+    - "for layer"
+    - "for pos"
+    - ".save()"
+  must_not_include:
+    - pattern: "tracer.invoke.*tracer.invoke"
+      reason: "Cross-prompt without barrier"
+  expected_output:
+    type: "tensor"
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  clean_prompt = "After John and Mary went to the store, Mary gave a bottle of milk to"
+  corrupted_prompt = "After John and Mary went to the store, John gave a bottle of milk to"
+
+  correct_token = model.tokenizer(" John")["input_ids"][0]
+  incorrect_token = model.tokenizer(" Mary")["input_ids"][0]
+
+  def logit_diff(logits):
+      return (logits[0, -1, correct_token] - logits[0, -1, incorrect_token]).item()
+
+  n_layers = len(model.transformer.h)
+  seq_len = len(model.tokenizer.encode(clean_prompt))
+  results = torch.zeros(n_layers, seq_len)
+
+  # Get clean activations
+  with model.trace(clean_prompt):
+      clean_hiddens = [layer.output[0].save() for layer in model.transformer.h]
+      clean_logits = model.lm_head.output.save()
+
+  # Get corrupted baseline
+  with model.trace(corrupted_prompt):
+      corrupted_logits = model.lm_head.output.save()
+
+  # Patch each layer x position
+  for layer_idx in range(n_layers):
+      for pos_idx in range(seq_len):
+          with model.trace(corrupted_prompt):
+              model.transformer.h[layer_idx].output[0][:, pos_idx, :] = \
+                  clean_hiddens[layer_idx][:, pos_idx, :]
+              patched_logits = model.lm_head.output.save()
+          results[layer_idx, pos_idx] = logit_diff(patched_logits.value)
+
+  # Normalize
+  clean_diff = logit_diff(clean_logits.value)
+  corrupted_diff = logit_diff(corrupted_logits.value)
+  normalized = (results - corrupted_diff) / (clean_diff - corrupted_diff)
+
+  # Print summary
+  print(f"Results shape: {normalized.shape}")
+  print(f"Max effect at layer {normalized.max(dim=1).values.argmax()}, "
+        f"position {normalized.max(dim=0).values.argmax()}")
+  print(normalized)
+
+tags:
+  - "activation-patching"
+  - "position-specific"
+  - "heatmap"
+  - "comprehensive"

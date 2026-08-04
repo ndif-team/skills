@@ -1,0 +1,94 @@
+id: "steering-003"
+skill: "model-steering"
+difficulty: "hard"
+title: "Persistent Multi-Layer Steering with Analysis"
+query: |
+  Create a persistently edited GPT-2 model that applies sentiment steering
+  across multiple layers, then analyze what tokens are most affected.
+
+  1. Compute a sentiment steering vector from contrastive prompts (layer 8)
+  2. Create a persistent edit that applies this vector at layers 6, 8, 10
+     with strengths 0.5, 1.0, 0.5 respectively
+  3. Use the edited model to generate text
+  4. Analyze the steering vector by projecting it through the unembedding matrix
+     to find which tokens are most boosted/suppressed
+
+expected_concepts:
+  - "contrastive steering vector"
+  - "model.edit() for persistence"
+  - "multi-layer steering"
+  - "unembedding projection analysis"
+  - "top-k token identification"
+
+validation:
+  must_include:
+    - "model.trace"
+    - "model.edit"
+    - "model.generate"
+    - "lm_head.weight"
+    - "topk"
+    - ".save()"
+  must_not_include: []
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  # Step 1: Compute steering vector
+  positive = ["I love this!", "This is wonderful!", "Amazing experience!"]
+  negative = ["I hate this!", "This is terrible!", "Awful experience!"]
+
+  pos_acts = []
+  neg_acts = []
+
+  with model.trace() as tracer:
+      for p in positive:
+          with tracer.invoke(p):
+              pos_acts.append(model.transformer.h[8].output[0][:, -1, :].save())
+      for n in negative:
+          with tracer.invoke(n):
+              neg_acts.append(model.transformer.h[8].output[0][:, -1, :].save())
+
+  pos_mean = torch.stack([a.value for a in pos_acts]).mean(dim=0)
+  neg_mean = torch.stack([a.value for a in neg_acts]).mean(dim=0)
+  steering_vector = (pos_mean - neg_mean).squeeze()
+
+  # Step 2: Create persistent edit with multi-layer steering
+  layer_strengths = {6: 0.5, 8: 1.0, 10: 0.5}
+
+  with model.edit() as edited_model:
+      for layer_idx, strength in layer_strengths.items():
+          model.transformer.h[layer_idx].output[0][:, -1, :] += strength * steering_vector
+
+  # Step 3: Generate with edited model
+  with edited_model.generate("The restaurant was", max_new_tokens=15) as tracer:
+      generated = model.generator.output.save()
+
+  print("Generated:", model.tokenizer.decode(generated[0]))
+
+  # Step 4: Analyze steering vector through unembedding
+  with model.trace("test"):
+      unembed_weight = model.lm_head.weight.save()
+
+  steering_logits = unembed_weight.value @ steering_vector
+
+  # Top boosted tokens
+  top_k = 10
+  top_vals, top_idx = steering_logits.topk(top_k)
+  print("\nTop boosted tokens:")
+  for val, idx in zip(top_vals, top_idx):
+      print(f"  {model.tokenizer.decode(idx)}: {val:.3f}")
+
+  # Top suppressed tokens
+  bottom_vals, bottom_idx = steering_logits.topk(top_k, largest=False)
+  print("\nTop suppressed tokens:")
+  for val, idx in zip(bottom_vals, bottom_idx):
+      print(f"  {model.tokenizer.decode(idx)}: {val:.3f}")
+
+tags:
+  - "steering"
+  - "persistent-edit"
+  - "multi-layer"
+  - "analysis"

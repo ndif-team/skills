@@ -1,0 +1,56 @@
+id: "basics-005"
+skill: "nnsight-basics"
+difficulty: "medium"
+title: "Cross-Prompt Intervention with Barrier"
+query: |
+  Using NNsight with GPT-2, transfer the token embeddings from the prompt
+  "The Eiffel Tower is in the city of" to a placeholder prompt "_ _ _ _ _ _ _ _".
+  Use proper barrier synchronization for cross-prompt intervention.
+
+  Print the predicted next token for both the original placeholder and
+  the modified version.
+
+expected_concepts:
+  - "tracer.invoke for multiple prompts"
+  - "barrier for synchronization"
+  - "cross-prompt activation transfer"
+  - "embedding access"
+
+validation:
+  must_include:
+    - "model.trace"
+    - "tracer.invoke"
+    - "barrier"
+    - "wte.output"
+    - ".save()"
+  must_not_include: []
+
+reference_solution: |
+  from nnsight import LanguageModel
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  with model.trace() as tracer:
+      barrier = tracer.barrier(2)
+
+      with tracer.invoke("The Eiffel Tower is in the city of"):
+          embeddings = model.transformer.wte.output
+          barrier()
+          original_logits = model.lm_head.output.save()
+
+      with tracer.invoke("_ _ _ _ _ _ _ _"):
+          barrier()
+          model.transformer.wte.output = embeddings
+          modified_logits = model.lm_head.output.save()
+
+  original_token = original_logits.value.argmax(dim=-1)[0, -1]
+  modified_token = modified_logits.value.argmax(dim=-1)[0, -1]
+
+  print(f"Original placeholder predicts: {model.tokenizer.decode(original_token)}")
+  print(f"Modified predicts: {model.tokenizer.decode(modified_token)}")
+
+tags:
+  - "basics"
+  - "barrier"
+  - "cross-prompt"
+  - "embeddings"

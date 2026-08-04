@@ -1,0 +1,44 @@
+id: "logit-lens-001"
+skill: "logit-lens"
+difficulty: "easy"
+title: "Basic Logit Lens"
+query: |
+  Implement a basic logit lens for GPT-2. For the prompt "The capital of France is",
+  decode the prediction at layer 6 by applying the final layer norm and lm_head
+  to the hidden states. Print the top predicted token.
+
+expected_concepts:
+  - "layer output access"
+  - "applying ln_f"
+  - "applying lm_head"
+  - "softmax for probabilities"
+  - "argmax for top token"
+
+validation:
+  must_include:
+    - "model.trace"
+    - "ln_f"
+    - "lm_head"
+    - "softmax"
+    - ".save()"
+  must_not_include: []
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  with model.trace("The capital of France is"):
+      hidden = model.transformer.h[6].output[0]
+      normed = model.transformer.ln_f(hidden)
+      logits = model.lm_head(normed)
+      probs = torch.nn.functional.softmax(logits[:, -1, :], dim=-1).save()
+
+  top_token = probs.value.argmax(dim=-1)
+  print(model.tokenizer.decode(top_token[0]))
+
+tags:
+  - "logit-lens"
+  - "prediction"
+  - "gpt2"

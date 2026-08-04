@@ -1,0 +1,65 @@
+id: "causal-tracing-001"
+skill: "causal-tracing"
+difficulty: "medium"
+title: "Direct Effect Analysis"
+query: |
+  Implement direct effect analysis for GPT-2 on a factual recall task.
+
+  Base prompt: "The Eiffel Tower is located in" (expects: Paris)
+  Source prompt: "The Colosseum is located in" (expects: Rome)
+
+  For each layer, inject the source activation into the base run and measure
+  how much it shifts the prediction toward "Rome". This measures the direct
+  effect of each layer on the output.
+
+expected_concepts:
+  - "separate trace for source activations"
+  - "patching source into base"
+  - "probability measurement"
+  - "layer-wise analysis"
+
+validation:
+  must_include:
+    - "model.trace"
+    - ".save()"
+    - "for layer"
+    - "softmax"
+  must_not_include:
+    - pattern: "tracer.invoke.*tracer.invoke"
+      reason: "Cross-prompt without barrier"
+  expected_output:
+    type: "tensor"
+    shape: [12]
+
+reference_solution: |
+  from nnsight import LanguageModel
+  import torch
+
+  model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+
+  base_prompt = "The Eiffel Tower is located in"
+  source_prompt = "The Colosseum is located in"
+  rome_token = model.tokenizer(" Rome")["input_ids"][0]
+
+  n_layers = len(model.transformer.h)
+  direct_effects = torch.zeros(n_layers)
+
+  # Get source activations
+  with model.trace(source_prompt):
+      source_hiddens = [layer.output[0].save() for layer in model.transformer.h]
+
+  # Patch each layer
+  for layer_idx in range(n_layers):
+      with model.trace(base_prompt):
+          model.transformer.h[layer_idx].output[0][:] = source_hiddens[layer_idx]
+          patched_logits = model.lm_head.output.save()
+
+      prob = torch.softmax(patched_logits.value[0, -1], dim=-1)[rome_token]
+      direct_effects[layer_idx] = prob.item()
+
+  print(direct_effects)
+
+tags:
+  - "causal-tracing"
+  - "direct-effect"
+  - "factual-recall"
