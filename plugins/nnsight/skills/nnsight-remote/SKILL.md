@@ -121,10 +121,30 @@ away. For tensors you genuinely need, `.detach().cpu()` before saving.
 |---|---|
 | `.save()` is the **only** channel back | A client-side list appended to inside a trace stays empty locally — build accumulators inside and save the container |
 | Bind every save to a name | Results come back keyed by variable name; an unbound `.save()` is simply absent |
-| Imports are whitelisted | `builtins`, `torch`, `numpy`, `einops`, `collections`, `math`, `time`, `sympy`, `typing`, `nnterp` |
+| An import must be present on the server | Stdlib is fine; `torch`, `numpy`, `transformers`, `accelerate`, `diffusers`, `einops`, `peft`, `nnsight` are assumed installed (`_SERVER_MODULES`, what `remote="local"` simulates). Anything else, check with `nnsight.compare()` before relying on it |
 | Your own helpers must be shipped | `nnsight.register(my_module)` (cloudpickle by value), or inline the helper |
-| `print()` is your debugger | It comes back as log lines — far cheaper than saving a tensor to look at it |
-| Variables from outside the session are unavailable inside | Build everything within the block |
+| `print()` is your debugger | It comes back as log lines — far cheaper than saving a tensor to look at it (needs `CONFIG.APP.REMOTE_LOGGING`, on by default) |
+| Variables from outside the block **are** captured | Every name the block reads is pickled into the payload. They must be picklable, they arrive on CPU, and edits stay server-side unless you save them |
+| Match the server's device and dtype at runtime | You cannot know either client-side — read them off an activation: `vec.to(hidden.device, hidden.dtype)` |
+| `super()` needs its class named | A shipped class is recompiled outside any class body, so bare `super()` raises `super(): __class__ cell not found`. Write `super(MyClass, self).__init__()` |
+
+An outer variable comes back if you save it *inside* the block — the save pushes
+by name and replaces the client's copy, so it's a fine way to accumulate:
+
+<!-- test: remote -->
+```python
+acc = []                                   # empty on the client
+with model.session(remote=True):
+    for text in ["a", "b", "c"]:
+        with model.trace(text):
+            value = model.transformer.h[0].output.sum().item()
+        acc.append(value)
+    nnsight.save(acc)                      # ships the server's version home
+print(acc)                                 # [61.39, 46.88, 54.30]
+```
+
+Without that `nnsight.save(acc)` the appends happen to the server's copy and the
+client's list stays empty.
 
 <!-- test: remote -->
 ```python

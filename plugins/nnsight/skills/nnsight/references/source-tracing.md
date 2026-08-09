@@ -62,10 +62,11 @@ matrix. The probabilities come from the attention-interface call:
 
 ```python
 with model.trace(prompt):
-    attn_out, attn_weights = (
-        model.transformer.h[0].attn.source.attention_interface_0.output.save()
-    )
+    # Bind the save itself — unpacking inside the block would name the elements,
+    # and a save comes back keyed by the name bound to the saved object.
+    attn = model.transformer.h[0].attn.source.attention_interface_0.output.save()
 
+attn_out, attn_weights = attn
 print(attn_weights.shape)            # [batch, heads, q_seq, k_seq]
 print(attn_weights[0, 0].sum(-1))    # each row sums to 1
 ```
