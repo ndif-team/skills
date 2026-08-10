@@ -75,7 +75,7 @@ with model.trace(prompt):
     with metric.backward():
         attribution = (embeds * embeds.grad).sum(dim=-1).save()
 
-tokens = model.tokenizer.batch_decode(model.tokenizer(prompt).input_ids)
+tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(prompt).input_ids]
 for token, score in zip(tokens, attribution[0].tolist()):
     print(f"{token!r:20} {score:+.3f}")
 ```

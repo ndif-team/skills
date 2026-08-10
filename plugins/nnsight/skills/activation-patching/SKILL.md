@@ -32,7 +32,10 @@ from nnsight import TransformersModel
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 
 clean = "The Eiffel Tower is in the city of"      # → " Paris"
-corrupt = "The Colosseum is in the city of"       # → " Rome"
+corrupt = "The Colosseum is in the city of"       # 10 tokens, same as clean
+# GPT-2 small is near-degenerate here: its top-5 on the corrupt prompt spans 0.3
+# logits and " Rome" is only rank 3. Judge by the logit difference below, not by
+# the top token, or float noise between runs will flip the argmax.
 
 paris = model.tokenizer.encode(" Paris")[0]
 rome = model.tokenizer.encode(" Rome")[0]
@@ -136,7 +139,7 @@ in the grid runs in one forward pass per layer.
 
 ```python
 n_pos = len(model.tokenizer(clean).input_ids)
-tokens = model.tokenizer.batch_decode(model.tokenizer(corrupt).input_ids)
+tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(corrupt).input_ids]
 
 grid = []
 for layer in range(0, 12, 2):

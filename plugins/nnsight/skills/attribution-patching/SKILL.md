@@ -141,7 +141,7 @@ heatmap = torch.stack([
     for i in range(n_layers)
 ])
 
-tokens = model.tokenizer.batch_decode(model.tokenizer(corrupt).input_ids)
+tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(corrupt).input_ids]
 print(f"{'token':<12}" + "".join(f"L{l:<7}" for l in range(0, 12, 3)))
 for pos, token in enumerate(tokens):
     row = "".join(f"{heatmap[l, pos]:+.3f} " for l in range(0, 12, 3))

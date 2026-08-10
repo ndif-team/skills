@@ -129,6 +129,22 @@ skill.
 nnsight's interleaved backward means an adapter inserted at any layer trains with
 ordinary torch. The model's parameters never move; only the adapter's do.
 
+**Training against a *remote* model? This recipe does not work — see the
+`nnsight-remote` skill and `nnsight/docs/patterns/remote-training.md`.** Both of the
+ways it fails are silent:
+
+- The adapter and the optimizer must be built **inside** `model.session(remote=True)`.
+  A client-side optimizer over a shipped module is a no-op: `backward()` fills
+  `.grad` on the server's copy, the client's stays `None`, and every step re-runs an
+  identical forward. No error — the tell is a loss that repeats bit-identically.
+- `.to(model.device)` is wrong on an undispatched model: `model.device` is `meta`,
+  and `.to("meta")` **discards the tensor data**. It pickles fine, the job returns
+  COMPLETED, and the adapter contributes nothing. Read the device off `module.device`
+  *inside* the block, or off a live activation.
+
+Print a parameter norm next to the loss. If `|W|` never moves, one of the two above
+is happening.
+
 ```python
 class LoRA(torch.nn.Module):
     def __init__(self, dim, rank=4):
@@ -296,3 +312,4 @@ broken specificity is a bug you have installed on purpose.
 - `nnsight` — `edit`, attaching modules, gradients
 - `model-steering` — inference-time behavior change without touching weights
 - `nnsight-debugging` — the in-place/autograd error above and others
+- `nnsight-remote` — training against NDIF, where this skill's recipe silently no-ops

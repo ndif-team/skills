@@ -213,5 +213,6 @@ same head can look critical under one and irrelevant under the other.
 - `activation-patching` — the sufficiency direction, and paired-prompt design
 - `attribution-patching` — approximate every ablation at once with gradients
 - `attention-analysis` — deciding which heads are worth ablating
+- `nnsight/docs/patterns/per-head-attention.md` — the three routes to a per-head view, and which one actually ablates a head
 - `circuit-discovery` — ablating sets of components to isolate a circuit
 - `nnsight` — batching, `skip`, `source` for neuron-level access

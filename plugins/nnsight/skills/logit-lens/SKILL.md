@@ -101,7 +101,7 @@ with model.trace(prompt):
         grid.append(torch.stack([best.values, best.indices.float()]).cpu())
 
 stacked = torch.stack(grid)                      # (layers, 2, seq)
-tokens = model.tokenizer.batch_decode(model.tokenizer(prompt).input_ids)
+tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(prompt).input_ids]
 print(f"{'':12}" + "".join(f"L{i:<7}" for i in range(0, 12, 3)))
 for pos, token in enumerate(tokens):
     row = "".join(f"{model.tokenizer.decode(int(stacked[i, 1, pos])):<8}" for i in range(0, 12, 3))

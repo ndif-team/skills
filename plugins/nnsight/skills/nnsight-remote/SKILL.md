@@ -184,8 +184,9 @@ dict and `async for update in backend` for streamed status.
 ## Testing without burning a job
 
 `remote="local"` runs the whole serialize → deserialize → execute path in your own
-process. It catches the mistakes that only bite remotely — unshipped helpers,
-non-whitelisted imports, unsaved containers — with no queue and no GPU:
+process. What it checks is that the block survives the round trip — your helpers
+ship, your saves come back. It runs the model locally, so point it at a small
+stand-in rather than the model you'll actually use:
 
 ```python
 local_model = TransformersModel("openai-community/gpt2", dispatch=True)
@@ -208,6 +209,8 @@ Walk these in order; the first two are usually worth orders of magnitude.
 | `for` loop around `model.trace(..., remote=True)` | wrap in `model.session(remote=True)`, drop the inner `remote=True` |
 | `.save()` on logits/hidden states followed by a client-side reduction | move the reduction into the trace |
 | Client-scope list appended to inside a trace | build it inside, `nnsight.save()` the container |
+| Optimizer or `nn.Module` built outside a remote session | move both inside the session — a client-side optimizer over a shipped module trains nothing, silently |
+| `.to(model.device)` on an undispatched model | that is `meta`, and `.to("meta")` drops the data with no error — read the device off `module.device` or an activation inside the block |
 | Saved CUDA tensor without `.detach().cpu()` | add it |
 | A helper from the user's own file called inside a trace | `nnsight.register(...)` or inline it |
 | Session that could exceed an hour | split into several sessions |

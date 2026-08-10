@@ -30,7 +30,7 @@ prompt = "When Mary and John went to the store, John gave a drink to"
 n_layers = len(model.transformer.h)
 n_heads = model.config.n_head
 head_dim = model.config.n_embd // n_heads
-tokens = model.tokenizer.batch_decode(model.tokenizer(prompt).input_ids)
+tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(prompt).input_ids]
 ```
 
 ## Getting patterns
@@ -221,6 +221,33 @@ single anecdote. Score over a set of prompts and report the distribution.
 **One layer's pattern hides composition.** Induction needs a previous-token head
 in an earlier layer feeding a matching head later. Interpreting either alone
 misses the circuit — see the `circuit-discovery` skill.
+
+## Ablating a head you found
+
+Cut the head **before** `c_proj` — after the projection the hidden dimension no
+longer decomposes per head, so slicing `attn.output` is not head ablation (measured:
+21x smaller effect, no error). Either of these is correct and they agree exactly:
+
+```python
+# by the projection's input
+with model.trace(prompt):
+    lo, hi = HEAD * head_dim, (HEAD + 1) * head_dim
+    model.transformer.h[LAYER].attn.c_proj.input[:, :, lo:hi] = 0
+
+# or by the source op, if you also want to read the per-head tensor
+with model.trace(prompt):
+    op = model.transformer.h[LAYER].attn.source.attention_interface_0
+    per = op.output[0].clone()
+    per[:, :, HEAD, :] = 0
+    op.output = (per,) + tuple(op.output[1:])
+```
+
+Establish a null distribution before believing the number. On GPT-2 at a middle
+layer, ablating the head that attends *most* to a token is often indistinguishable
+from ablating one that attends to it with weight ~0.0006 — per-head zero-ablation
+deltas there are dominated by generic off-distribution shock. Sweep every head at the
+layer, and prefer resample ablation (patch in a donor prompt's head) over zeroing.
+See `nnsight/docs/patterns/per-head-attention.md` and the `ablation` skill.
 
 ## Related skills
 
