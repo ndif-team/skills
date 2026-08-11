@@ -68,7 +68,8 @@ skill-installer install https://github.com/ndif-team/skills.git
 | Skill | Use when... |
 | --- | --- |
 | `nnterp` | Writing one script that runs unchanged across GPT-2, Llama, Qwen, Gemma. |
-| `vllm` | Throughput, continuous batching, tensor parallelism, async streaming. |
+| `vllm` | Throughput, continuous batching, async streaming. |
+| `tensor-parallel` | A model too big for one GPU, sharded across several with `transformers` TP under `torchrun`. |
 | `diffusion-and-multimodal` | VLMs, diffusion pipelines, the diffusion lens, non-text tasks. |
 
 The `nnsight` skill carries a `references/` tree (execution model, batching,
