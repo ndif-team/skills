@@ -1,6 +1,6 @@
 ---
 name: tensor-parallel
-description: Trace a model too big for one GPU by sharding it across several with transformers tensor parallelism — TransformersModel(..., distributed_config=DistributedConfig(tp_size=N)) launched under torchrun. Sharded activations are gathered so interventions read and edit whole tensors exactly as on a single GPU. Use when a checkpoint does not fit on one card, when a user asks about multi-GPU tracing, tp_size, tp_plan, device_map for large models, or hits activation shapes that are a fraction of the expected width (hidden_size/N, intermediate_size/N). Covers the two rules SPMD imposes on intervention code — no rank-dependent control flow, and seed before sampling — and what is not supported (MoE / expert-parallel).
+description: Trace a model too big for one GPU by sharding it across several with transformers tensor parallelism — TransformersModel(..., distributed_config=DistributedConfig(tp_size=N)) launched under torchrun. Sharded activations are gathered so interventions read and edit whole tensors exactly as on a single GPU. Use when a checkpoint does not fit on one card, when a user asks about multi-GPU tracing, tp_size, tp_plan, device_map for large models, or hits activation shapes that are a fraction of the expected width (hidden_size/N, intermediate_size/N). Covers the two rules SPMD imposes on intervention code — no rank-dependent control flow, and seed before sampling — the transformers >= 5.15 requirement, and what is not supported (some expert-parallel sharding).
 ---
 
 # Tensor Parallelism
@@ -123,23 +123,38 @@ if int(os.environ.get("RANK", 0)) == 0:
     print(logits.argmax(-1))
 ```
 
+## Requires transformers >= 5.15
+
+Below that, a checkpoint with `tie_word_embeddings=True` (Llama-3.2, Qwen2.5, most
+small models) has its LM head gathered but never sharded, so logits come back
+`tp_size` times too wide — with a correct argmax inside the first copy, so nothing
+downstream looks wrong. nnsight refuses to shard below this version rather than
+let that through.
+
 ## Not supported
 
-Mixture-of-experts sharding (`grouped_gemm`, `ep_router`, `moe_tp_experts`,
-`megamoe_*`, `moe_identity_expert`) and MLA's split kv projection (`mla_kv_a_proj`)
-slice by *expert* rather than along the feature dimension. Loading such a model
-tensor-parallel raises `UnsupportedParallelStyle` naming the module and style,
-rather than handing back a fragment of a tensor.
+Some expert-parallel styles slice by *expert* rather than along the feature
+dimension, so neither the gather nor the re-split means anything for them:
+`grouped_gemm`, `ep_router`, `megamoe_*`, `moe_identity_expert`, and MLA's split
+kv projection (`mla_kv_a_proj`). Loading such a model tensor-parallel raises
+`UnsupportedParallelStyle` naming the module and style, rather than handing back a
+fragment of a tensor.
+
+**Most MoE checkpoints are fine.** `moe_tp_experts` — what Mixtral, DeepSeek-V3,
+Qwen3-MoE and ~25 other shipped configs use — all-reduces in its forward, so both
+sides arrive whole and nothing needs gathering.
 
 ## Diagnosing
 
 | Symptom | Cause |
 |---|---|
-| Activation width is `hidden_size/N` or `intermediate_size/N` | The gather did not run — check the model really loaded with `distributed_config`, and that `model.interleaver.enabled` is `True` |
+| Activation width is `hidden_size/N` or `intermediate_size/N` | The gather did not run — check the model really loaded with `distributed_config`, and that `model.interleaver.fragments.enabled` is `True` |
 | `TypeError: ... unexpected keyword argument 'tp_plan'` | transformers 5.x — use `distributed_config=DistributedConfig(tp_size=N)` |
 | Run hangs with no error | The ranks diverged — rank-dependent control flow, or an exception on one rank only |
 | Generated text differs per rank | Sampling without an identical seed (see rule 2) |
-| `UnsupportedParallelStyle` | MoE / expert-parallel model; use vLLM (see the `vllm` skill) or a single GPU |
+| `UnsupportedParallelStyle` | A sharding style with no gather rule (see Not supported); use vLLM (see the `vllm` skill) or a single GPU |
+| `UnsupportedTransformersVersion` | transformers < 5.15 — upgrade, or load on one GPU |
+| Logits are `tp_size ×` the vocabulary | transformers < 5.15 with a tied LM head; the version check above catches this |
 | Results differ from single-GPU by ~1e-3 | Expected: an all-reduce sums in a different order than one matmul. Token choices are unaffected |
 
 ## Choosing between this and vLLM
