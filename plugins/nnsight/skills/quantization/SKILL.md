@@ -170,5 +170,10 @@ needs one GPU; **tensor parallelism** (see the `tensor-parallel` skill) is
 numerically faithful but needs N GPUs and `torchrun`, and puts two rules on your
 intervention code. Prefer tensor parallelism when the activations are the result;
 prefer quantization when you are constrained to one card, or when the model is so
-large that N cards is not on offer. They are not mutually exclusive in principle,
-but the combination is untested.
+large that N cards is not on offer.
+
+**They compose**, and for a model that fits neither way alone they have to.
+Verified on Llama-3.3-70B-Instruct at `nf4` across 4 A100s: transformers shards
+the packed weights, and `layers[40].mlp.gate_proj.output` reads at its full 28672
+rather than one rank's 7168 — so the gather works through the quantization. The
+weights took 43.3 GB across the four cards against ~141 GB for bfloat16.
