@@ -237,6 +237,16 @@ Editing is worth it for sweeps (one serialization instead of one per prompt:
 tracing for one-off experiments and when you want values pushed back into your own
 variables.
 
+## vLLM versions
+
+Works on 0.16–0.27. nnsight asks vLLM for the model runner it instruments
+(`VLLM_USE_V2_MODEL_RUNNER=0`) when building the engine, since 0.27 defaults to a
+second runner for non-MoE models; setting that to `1` yourself is refused rather
+than silently leaving the engine uninstrumented. Tensor parallelism on 0.27 also
+needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` (vLLM's own setting — a forked worker
+cannot re-initialize CUDA). MoE expert outputs are **not** gathered on 0.27, where
+the layer was rebuilt and the flags describing its reduce are gone.
+
 ## Choosing between vLLM and TransformersModel
 
 | Situation | Use |
