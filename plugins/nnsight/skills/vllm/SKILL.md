@@ -1,6 +1,6 @@
 ---
 name: vllm
-description: Run nnsight interventions on top of the vLLM inference engine — high-throughput continuous batching, tensor parallelism across GPUs, and async token streaming, with arbitrary Python interventions inline with the forward pass. Use when an experiment needs throughput or many concurrent prompts, when a model must be sharded across GPUs, or when streaming generated tokens with interventions. Covers the ways the vLLM path differs from TransformersModel: model.logits/model.samples for per-step values, one prompt per invoke, sampling kwargs on the trace, per-invoke saved containers, registering a block on the engine so it runs for every request, and what is not supported.
+description: Run nnsight interventions on top of the vLLM inference engine — high-throughput continuous batching, tensor parallelism across GPUs, and async token streaming, with arbitrary Python interventions inline with the forward pass. Use when an experiment needs throughput or many concurrent prompts, when a model must be sharded across GPUs, or when streaming generated tokens with interventions. Covers the ways the vLLM path differs from TransformersModel: model.logits/model.samples for per-step values, one prompt per invoke, sampling kwargs on the trace, per-invoke saved containers, model.edit() to install a block on the engine so it runs for every request, and what is not supported.
 ---
 
 # vLLM
@@ -163,14 +163,15 @@ asyncio.run(main())
 - **`model.scan()`** — shape inference is not available
 - **`.source` on fused kernels** — vLLM's fused CUDA ops have no Python source
 - **Diffusion and multimodal** — the integration is text-only
+- **`tracer.barrier(n)`** — each invoke is its own request, scheduled independently, so the blocks never meet; it raises rather than hanging
 
 If an experiment needs gradients or source tracing, run it on `TransformersModel`
 and move only the throughput-bound part to vLLM.
 
-## Registering a block on the engine
+## Editing the engine
 
 A trace rides one request, so a sweep re-sends the same block per prompt and only
-requests that *are* traces get touched. `model.register()` sends it once; every
+requests that *are* traces get touched. `model.edit()` sends it once; every
 request the engine runs afterwards gets its own copy — including ones submitted by
 something that never heard of nnsight.
 
@@ -178,32 +179,36 @@ something that never heard of nnsight.
 ```python
 model = VLLM("meta-llama/Llama-3.1-8B", dispatch=True, enable_prefix_caching=False)
 
-with model.register() as (tracer, registration):
+with model.edit() as (tracer, edit):
     hidden = model.model.layers[16].output[0].save()
 
 outputs = model.generate(prompts, max_tokens=5)   # plain requests, not traces
 outputs[3].saves["hidden"]                        # on the output that produced it
 
-registration.clear()
+edit.clear()
 ```
 
 The block is written like a trace body, but belongs to no request — there is **no
 `tracer.invoke(...)`**. The tracer is bound so `tracer.all()` can follow a request
 across its generated tokens; without it the block sees only the prefill. Values
 arrive on `output.saves` and are dropped as they go, so nothing accumulates; for a
-traced request, reach them through `tracer.result.saves`.
+traced request, reach them through `tracer.result.saves` — where a name the trace
+also saved wins, with the edit's own still on `output.nnsight_saves`.
+
+`model.clear_edits()` drops every edit still installed. `model.edit(serve=url)`
+installs one on an nnsight-serve engine from a GPU-less client.
 
 **`enable_prefix_caching=False` is required.** A cached token is served without a
 forward pass, so no hook fires and the block sees fewer rows than the prompt has,
-silently. A trace forces its own recompute; a registration rides requests it did
-not create and cannot.
+silently. A trace forces its own recompute; an edit rides requests it did not create
+and cannot.
 
 On `mode="async"`, installing the block has to be awaited from inside the loop —
-use `async with model.register()` and `await registration.aclear()`. A plain `with`
+use `async with model.edit()` and `await edit.aclear()`. A plain `with`
 there raises rather than silently not installing it.
 
-Registering is worth it for sweeps (one serialization instead of one per prompt:
-1024 prompts capturing one layer went 2.04 s traced → 1.43 s registered, against
+Editing is worth it for sweeps (one serialization instead of one per prompt:
+1024 prompts capturing one layer went 2.04 s traced → 1.43 s edited, against
 0.87 s for bare vLLM) and for instrumenting traffic you do not control. Keep
 tracing for one-off experiments and when you want values pushed back into your own
 variables.
@@ -218,7 +223,7 @@ variables.
 | model larger than one GPU, locally | `VLLM` with `tensor_parallel_size` |
 | model larger than your whole machine | NDIF — see the `nnsight-remote` skill |
 | token-by-token streaming to a client | `VLLM` with `mode="async"` |
-| instrumenting requests you did not write | `VLLM` with `model.register()` |
+| instrumenting requests you did not write | `VLLM` with `model.edit()` |
 
 ## Related skills
 
