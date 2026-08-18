@@ -37,7 +37,7 @@ internally, because CUDA graphs would freeze the ops hooks need to fire inside.
 | read the output | `tracer.result` | `tracer.result` is the finished `RequestOutput`; **`model.logits` / `model.samples`** give per-step values |
 | several prompts | a list, or several invokes | **one prompt per invoke**; a list is rejected. One invoke takes a string, token ids, a tokenizer's output, or a vLLM `TokensPrompt`/`TextPrompt` |
 | sampling settings | on `generate(...)` | on `trace(...)` / `invoke(...)`, becoming `SamplingParams` |
-| collecting per-prompt values | one shared saved container works | **each invoke needs its own saved container** |
+| collecting per-prompt values | one shared saved container works | one name saved in each invoke comes back as a **list**, one entry per invoke (and per sampled sequence when `n>1`) |
 | `generate` vs `trace` | different methods | `generate` traces in a `with` block, and just runs (returning `RequestOutput`s) without one; driven by `max_tokens` |
 
 ## Canonical pattern
@@ -76,9 +76,15 @@ generation.
 
 ## Continuous batching
 
-Each invoke is one vLLM request; the engine batches them. **Give each invoke its
-own saved container** — unlike the in-process path, each invoke's intervention is
-serialized into its own request, so a shared container does not merge:
+Each invoke is one vLLM request; the engine batches them. Your block runs once per
+request, so **a name saved in every invoke comes back as a list** — one entry per
+invoke, in order — and a name saved once stays that value. A container bound *and
+saved above* the invokes is one object and merges element-wise instead. Under
+`n>1` the same rule applies per sampled sequence, and where you hold outputs
+rather than variables (async, serve, `generate`) each sequence's values ride
+`output.outputs[i].saves`.
+
+Distinct names per invoke work as well, and read as they always did:
 
 <!-- test: skip -->
 ```python
@@ -96,9 +102,22 @@ with model.trace(max_tokens=3) as tracer:
 print(model.tokenizer.decode(paris), model.tokenizer.decode(tokyo))
 ```
 
-For a **dynamic** number of prompts you cannot name a container per invoke. Fire
-each prompt as its own async trace with `asyncio.gather` — the engine still batches
-the concurrent requests and each one's saves arrive with its own output.
+For a **dynamic** number of prompts, save one name in every invoke and read the
+list:
+
+<!-- test: skip -->
+```python
+with model.trace(temperature=0.0, max_tokens=1) as tracer:
+    for prompt in prompts:
+        with tracer.invoke(prompt):
+            hidden = model.transformer.h[5].output.save()
+
+len(hidden) == len(prompts)      # one entry per invoke, in order
+```
+
+Firing each prompt as its own async trace with `asyncio.gather` also works — the
+engine still batches the concurrent requests and each one's saves arrive with its
+own output.
 
 ## Sampling parameters
 
