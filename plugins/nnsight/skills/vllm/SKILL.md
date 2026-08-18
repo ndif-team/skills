@@ -244,8 +244,9 @@ Works on 0.16–0.27. nnsight asks vLLM for the model runner it instruments
 second runner for non-MoE models; setting that to `1` yourself is refused rather
 than silently leaving the engine uninstrumented. Tensor parallelism on 0.27 also
 needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` (vLLM's own setting — a forked worker
-cannot re-initialize CUDA). MoE expert outputs are **not** gathered on 0.27, where
-the layer was rebuilt and the flags describing its reduce are gone.
+cannot re-initialize CUDA). MoE expert outputs need no gathering on 0.27 — that release moved the
+all-reduce inside the layer, so the value is already whole (verified: both ranks
+return the identical tensor). Through 0.26 nnsight gathers the partial itself.
 
 ## Choosing between vLLM and TransformersModel
 
