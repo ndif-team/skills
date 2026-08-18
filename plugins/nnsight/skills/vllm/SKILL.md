@@ -121,7 +121,9 @@ own output.
 
 ## Sampling parameters
 
-Root-level kwargs apply to every invoke; per-invoke kwargs override them:
+Trace-level kwargs fill in whatever an invoke did not name; anything an invoke
+names is that invoke's, **including a value that happens to be vLLM's own default**
+(`temperature=1.0`, `max_tokens=16`, `n=1`):
 
 <!-- test: skip -->
 ```python
@@ -136,8 +138,9 @@ Anything `vllm.SamplingParams` accepts works: `temperature`, `top_p`, `top_k`,
 `min_p`, `max_tokens`, `stop`, `stop_token_ids`, `seed`, `repetition_penalty`,
 `presence_penalty`, `frequency_penalty`, `logprobs`, `lora_request`.
 
-Per-invoke input must be a **single** prompt: a string, a list of token ids, or a
-tokenizer dict.
+Per-invoke input must be a **single** prompt: a string, a list of token ids, a
+tokenizer's output, or one of vLLM's own prompt dicts (`TokensPrompt`,
+`TextPrompt`).
 
 ## Tensor parallelism is transparent
 
