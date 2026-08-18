@@ -192,8 +192,10 @@ The block is written like a trace body, but belongs to no request — there is *
 `tracer.invoke(...)`**. The tracer is bound so `tracer.all()` can follow a request
 across its generated tokens; without it the block sees only the prefill. Values
 arrive on `output.saves` and are dropped as they go, so nothing accumulates; for a
-traced request, reach them through `tracer.result.saves` — where a name the trace
-also saved wins, with the edit's own still on `output.nnsight_saves`.
+traced request, reach them through `tracer.result.saves`, which carries the edit's
+values only — your trace's own come back as your variables. (An output from
+`model.generate(...)` is a different object: it carries both, the trace's winning a
+name collision, with the trace's own also on `output.nnsight_saves`.)
 
 `model.clear_edits()` drops every edit still installed (`await model.aclear_edits()` on an async engine). `model.edit(serve=url)`
 installs one on an nnsight-serve engine from a GPU-less client.
