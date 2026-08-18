@@ -35,7 +35,7 @@ internally, because CUDA graphs would freeze the ops hooks need to fire inside.
 | | `TransformersModel` | `VLLM` |
 |---|---|---|
 | read the output | `tracer.result` | `tracer.result` is the finished `RequestOutput`; **`model.logits` / `model.samples`** give per-step values |
-| several prompts | a list, or several invokes | **one prompt per invoke**; a list is rejected |
+| several prompts | a list, or several invokes | **one prompt per invoke**; a list is rejected. One invoke takes a string, token ids, a tokenizer's output, or a vLLM `TokensPrompt`/`TextPrompt` |
 | sampling settings | on `generate(...)` | on `trace(...)` / `invoke(...)`, becoming `SamplingParams` |
 | collecting per-prompt values | one shared saved container works | **each invoke needs its own saved container** |
 | `generate` vs `trace` | different methods | `generate` traces in a `with` block, and just runs (returning `RequestOutput`s) without one; driven by `max_tokens` |
@@ -195,7 +195,7 @@ arrive on `output.saves` and are dropped as they go, so nothing accumulates; for
 traced request, reach them through `tracer.result.saves` — where a name the trace
 also saved wins, with the edit's own still on `output.nnsight_saves`.
 
-`model.clear_edits()` drops every edit still installed. `model.edit(serve=url)`
+`model.clear_edits()` drops every edit still installed (`await model.aclear_edits()` on an async engine). `model.edit(serve=url)`
 installs one on an nnsight-serve engine from a GPU-less client.
 
 **`enable_prefix_caching=False` is required.** A cached token is served without a
