@@ -113,21 +113,46 @@ print(len(seen))                             # 3 — the loop's own values survi
 print("after_the_loop" in globals())         # False — the trailing line was dropped
 ```
 
-Fix by bounding the loop to the number of steps you asked for:
+**Bounding the loop is not a reliable fix.** `max_new_tokens` is a cap, not a
+promise: if the model emits EOS (or hits a stop string) before step `N`, a bounded
+`tracer.iter[:N]` parks on a step that never runs and drops the trailing code
+exactly as the unbounded form does — it warns `'...' was never reached` and
+carries on. Since you cannot know in advance how many steps a generation takes,
+no bound can guarantee the loop completes.
+
+The reliable fix is to put the trailing code in a **separate empty invoke**:
 
 ```python
 with model.generate(prompt, max_new_tokens=3) as tracer:
     seen = nnsight.save([])
-    for step in tracer.iter[:3]:
+    for step in tracer.iter[:]:
         seen.append(model.output.logits[0, -1].argmax(dim=-1))
-    ids = tracer.result.save()        # runs — the loop was bounded
+
+    with tracer.invoke():             # a separate invoke always runs
+        ids = tracer.result.save()
 
 print(len(seen), ids.shape)
 ```
 
-`max_new_tokens` is a cap, not a promise: if the model emits EOS early, the
-unreached steps warn rather than error, and values from the steps that did happen
-are kept.
+Values from the steps that did happen are kept either way — only trailing code in
+the *same* invoke is lost.
+
+### Step 0 is the prefill
+
+`tracer.iter` counts forward passes, not generated tokens, and the first pass is
+the prefill over the whole prompt:
+
+```python
+with model.generate("The Eiffel Tower is in the city of", max_new_tokens=3) as tracer:
+    shapes = nnsight.save([])
+    for step in tracer.iter[:]:
+        shapes.append(model.transformer.h[0].output.shape)
+# [(1, 10, 768), (1, 1, 768), (1, 1, 768)]  <- 10 prompt tokens, then one per step
+```
+
+So an intervention inside the loop applies to **every prompt position** on step 0
+and to a single token afterwards. Skip it with `tracer.iter[1:]` if you only mean
+the generated tokens.
 
 Other iteration forms: `tracer.iter[2]` (one step), `tracer.iter[1:3]` (a range),
 `tracer.iter[[0, 2, 4]]` (explicit list). Negative indices raise — there is no
@@ -187,7 +212,7 @@ not the 3rd word); and a chat model's layers are at `chat.model.layers[i]`, not
 
 ```python
 with chat.trace(text):
-    resid = chat.model.layers[10].output[0].save()
+    resid = chat.model.layers[10].output.save()   # a tensor on transformers 5.x
 
 print(resid.shape)
 ```

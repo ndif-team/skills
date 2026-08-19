@@ -94,7 +94,7 @@ that ran are kept. See the `nnsight` skill → generation.)
 |---|---|
 | **Layer** | Middle layers (⅓–⅔ depth) usually work best. Early layers get overwritten; late layers only nudge the surface form. Sweep it like α. |
 | **Positions** | `[:, -1, :]` steers only the token being predicted; `[:, :, :]` steers every position and is stronger but blunter. |
-| **Every step vs first step** | Inside a `tracer.iter[...]` loop the vector is re-added at each generated token — that is usually what you want. Applied once, the effect decays. |
+| **Every step vs first step** | Inside a `tracer.iter[...]` loop the vector is re-added on every forward **pass**. Pass 0 is the *prefill*, so the vector lands on every prompt position at once; passes 1+ are one generated token each. Use `tracer.iter[1:]` to steer only the generated tokens. Applied once, the effect decays. |
 
 ## Persistent steering
 

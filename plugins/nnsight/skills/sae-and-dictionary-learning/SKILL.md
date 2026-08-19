@@ -118,12 +118,22 @@ corpus = [
     "He played guitar in a band during college.",
 ]
 
-with model.trace(corpus):
-    collected = model.transformer.h[LAYER].output.detach().save()
+with torch.no_grad():                     # collection only — see note
+    with model.trace(corpus):
+        collected = model.transformer.h[LAYER].output.detach().save()
 
 data = collected.reshape(-1, d_model).float()
 data = data / data.norm(dim=-1, keepdim=True).mean()
 print("activation vectors:", data.shape)
+```
+
+**Collect under `torch.no_grad()`.** A trace runs with autograd on, so saved
+activations arrive with a live `grad_fn` pinning the forward graph — measured at
+**3.6x peak memory** for a pure capture. `.detach()` on the saved tensor is too
+late; the graph was already built. Dictionary *training* below still needs
+gradients, but only through the SAE, not through the frozen model.
+
+```python
 
 optimizer = torch.optim.Adam(sae.parameters(), lr=1e-3)
 for step in range(800):

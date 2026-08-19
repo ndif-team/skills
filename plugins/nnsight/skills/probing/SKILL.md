@@ -50,13 +50,20 @@ print(f"{len(texts)} examples")
 The whole dataset and every layer come from a single batched trace:
 
 ```python
-with model.trace(texts):
-    activations = nnsight.save([
-        block.output[:, -1, :].detach().cpu().float() for block in model.transformer.h
-    ])
+with torch.no_grad():                              # see the note below — not optional
+    with model.trace(texts):
+        activations = nnsight.save([
+            block.output[:, -1, :].detach().cpu().float() for block in model.transformer.h
+        ])
 
 print(len(activations), activations[0].shape)      # 12 layers, [128, 768]
 ```
+
+**Wrap collection in `torch.no_grad()`.** A trace runs with autograd on, so a saved
+activation comes back with `requires_grad=True` and a live `grad_fn` that pins the
+whole forward graph — measured at **3.6x peak memory** for a pure capture, and up
+to ~18x on longer runs. The values are bit-identical either way. `.detach()` on the
+saved tensor does not help: the graph is already built by then.
 
 For datasets too large for one batch, chunk the texts and concatenate — still one
 pass per chunk, never one pass per layer. `tracer.cache()` is the alternative when
