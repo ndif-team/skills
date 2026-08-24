@@ -27,8 +27,9 @@ model = VLLM("gpt2", gpu_memory_utilization=0.1, dispatch=True)
 `VLLM(repo_id, *, mode="sync"|"async", dispatch=False, tensor_parallel_size=1,
 gpu_memory_utilization=0.9, **vllm_kwargs)`. With `dispatch=False` only a
 meta-tensor tree is built — no GPU memory until the first trace. `mode` is fixed at
-construction; you cannot switch per trace. `enforce_eager=True` is forced
-internally, because CUDA graphs would freeze the ops hooks need to fire inside.
+construction; you cannot switch per trace. The engine runs eagerly (every location
+served) unless you declare `taps=[...]`, which keeps CUDA-graph replay and serves the
+declared locations from it — see *Graph taps* below.
 
 ## The five differences from TransformersModel
 
@@ -142,6 +143,41 @@ Per-invoke input must be a **single** prompt: a string, a list of token ids, a
 tokenizer's output, or one of vLLM's own prompt dicts (`TokensPrompt`,
 `TextPrompt`).
 
+## Graph taps
+
+vLLM's decode throughput comes from replaying CUDA graphs, and a replayed graph runs
+no Python — so the eager engine gives up that speed to serve every location. `taps=`
+names the locations to record *into* the graph and serve on every replay; everything
+else is vanilla vLLM with graphs on.
+
+<!-- test: skip -->
+```python
+model = VLLM("meta-llama/Llama-3.1-8B", dispatch=True,
+             taps=["model.layers.*.output", "model.layers.16.self_attn.o_proj.input"])
+
+with model.trace("Hello", temperature=0.0, max_tokens=16) as tracer:
+    hs = nnsight.save([])
+    for _ in tracer.iter[:16]:
+        model.model.layers[16].output[0][:] += 4 * vector          # in place
+        hs.append(sum(model.model.layers[20].output)[-1].clone())  # clone: graph memory
+```
+
+- `*` matches one path segment; the `model.` prefix is implied; a tap naming no
+  module is refused at construction.
+- **Only taps are served.** A read of any other module location errors when the
+  request ends, naming the location; `model.logits`, `model.samples` and
+  `tracer.result` always work.
+- **Edit in place.** A replacement (`layer.output = t`) is copied back into the
+  graph's memory and must keep its shape.
+- **Clone what you keep.** The value served *is* the graph's memory, rewritten
+  next step.
+- Passing `enforce_eager` yourself is refused if it contradicts `taps`.
+
+Measured on Llama-3.1-8B (A100, one GPU): plain generate 92 tok/s on vanilla vLLM,
+89 with taps, 86 eager; capturing one layer every step 89 with taps, 79 eager. Under
+tensor parallelism the gap widens — at `tp=4` taps hold 213 tok/s against the eager
+engine's 67 — so declare taps whenever the GPUs outnumber one.
+
 ## Tensor parallelism is transparent
 
 <!-- test: skip -->
@@ -152,9 +188,14 @@ with model.trace("Hello", temperature=0.0):
     hidden = model.model.layers[16].output.save()      # full, unsharded tensor
 ```
 
-nnsight's vLLM batcher gathers a column/row-parallel shard into the full tensor
-before your code reads it and re-splits on write, so every rank runs identical
-intervention code against the complete tensor. You do not handle sharding.
+nnsight gathers a column-parallel output or a row-parallel input into the whole
+tensor before your code reads it (all-reduces a deferred partial sum), and re-splits
+what you write, so every rank runs identical intervention code against the complete
+tensor. Two caveats: a *fused* projection (`qkv_proj`, `gate_up_proj`) gathers in
+rank order — `[q₀ k₀ v₀ | q₁ k₁ v₁]` — so slice it by head rather than by `[:q_size]`;
+and every rank runs your block, so no rank-dependent control flow, and sample greedily
+or seeded. Decode-context parallelism on MLA models (`decode_context_parallel_size`)
+is handled too.
 
 ## Async streaming
 
@@ -186,6 +227,7 @@ asyncio.run(main())
 - **`.source` on fused kernels** — vLLM's fused CUDA ops have no Python source
 - **Diffusion and multimodal** — the integration is text-only
 - **`tracer.barrier(n)`** — each invoke is its own request, scheduled independently, so the blocks never meet; it raises rather than hanging
+- **Pipeline parallelism and speculative decoding** — shard with `tensor_parallel_size` instead; do not pass `pipeline_parallel_size > 1` or `speculative_config`
 
 If an experiment needs gradients or source tracing, run it on `TransformersModel`
 and move only the throughput-bound part to vLLM.
@@ -223,8 +265,8 @@ name collision, with the trace's own also on `output.nnsight_saves`.)
 installs one on an nnsight-serve engine from a GPU-less client.
 
 **`enable_prefix_caching=False` is required.** A cached token is served without a
-forward pass, so no hook fires and the block sees fewer rows than the prompt has,
-silently. A trace forces its own recompute; an edit rides requests it did not create
+forward pass, so nothing runs for it and the block sees fewer rows than the prompt
+has, silently. A trace forces its own recompute; an edit rides requests it did not create
 and cannot.
 
 On `mode="async"`, installing the block has to be awaited from inside the loop —
@@ -241,12 +283,19 @@ variables.
 
 Works on 0.16–0.27. nnsight asks vLLM for the model runner it instruments
 (`VLLM_USE_V2_MODEL_RUNNER=0`) when building the engine, since 0.27 defaults to a
-second runner for non-MoE models; setting that to `1` yourself is refused rather
-than silently leaving the engine uninstrumented. Tensor parallelism on 0.27 also
-needs `VLLM_WORKER_MULTIPROC_METHOD=spawn` (vLLM's own setting — a forked worker
-cannot re-initialize CUDA). MoE expert outputs need no gathering on 0.27 — that release moved the
-all-reduce inside the layer, so the value is already whole (verified: both ranks
-return the identical tensor). Through 0.26 nnsight gathers the partial itself.
+second runner for non-MoE models; setting that to `1` yourself is refused, and the
+worker refuses any other runner rather than coming up uninstrumented. Graph taps need
+a vLLM with breakable CUDA graphs (`vllm.compilation.breakable_cudagraph`). MoE expert
+outputs need no gathering on 0.27 — that release moved the all-reduce inside the
+layer, so the value is already whole (verified: both ranks return the identical
+tensor); through 0.26 nnsight all-reduces the partial itself.
+
+Two engine settings nnsight chooses for you: **chunked prefill is off** unless you
+pass `enable_chunked_prefill=True` — a block must see its prompt whole, so a prompt
+that does not fit a step's token budget waits a step instead of being split (and
+if you turn chunking on, a request whose prompt got chunked comes back with an
+error rather than a slice); and a **traced request skips the prefix cache** so its
+prompt is recomputed. Tracing needs no `VLLM_ALLOW_INSECURE_SERIALIZATION`.
 
 ## Choosing between vLLM and TransformersModel
 

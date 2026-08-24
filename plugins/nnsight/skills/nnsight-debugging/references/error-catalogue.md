@@ -68,6 +68,17 @@ code to run.
 | `RuntimeError` | ``The expanded size of the tensor (10) must match the existing size (3) at non-singleton dimension 1.`` | a replacement tensor whose shape doesn't match the activation → build it from the activation (`torch.zeros_like(x)`, `x.shape`, `x.device`, `x.dtype`) |
 | `GuardOnDataDependentSymNode` | ``Could not guard on data-dependent expression ...`` | branching on **values** inside `model.scan(...)` — fake tensors have no data → branch on shapes only, or use a real trace |
 
+## vLLM engine refusals
+
+Raised at the client as a `RuntimeError` carrying the message, once the request ends
+(or at construction for the last two):
+
+| Message | Cause → fix |
+|---|---|
+| ``'<location>' is not a tap on this engine, so a replayed CUDA graph never reaches it`` | reading a module location on a `taps=` engine that was not declared → add it to `taps`, or build the engine without `taps` (eager, every location served) |
+| ``... prompt was split across steps by chunked prefill`` | `enable_chunked_prefill=True` was passed and this prompt exceeded the step's token budget → drop the flag (off by default), or raise `max_num_batched_tokens` |
+| ``enforce_eager=... contradicts taps=...`` | `ValueError` at construction: the engine mode follows from `taps` → drop `enforce_eager` |
+
 ## Remote
 
 `RemoteError` on a failed submission or a server-side `ERROR` status. A worker-side

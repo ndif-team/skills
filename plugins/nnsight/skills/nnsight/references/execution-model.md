@@ -30,10 +30,10 @@ Three consequences you feel immediately:
 ## Interleaving: your code and the model take turns
 
 The block runs in a **greenlet** (a cooperative worker, not a thread) called a
-*Mediator*. Every module gets a forward hook. When your code asks for a value the
-model has not produced yet, the worker parks; when the model's hook fires for
-that location, the worker wakes with the real tensor, runs until its next request,
-and hands control back.
+*Mediator*. Every module's `forward` is a controller that hands the module's input
+and output to the interleaver. When your code asks for a value the model has not
+produced yet, the worker parks; when the model reaches that location, the worker
+wakes with the real tensor, runs until its next request, and hands control back.
 
 So inside a trace you hold **real `torch.Tensor`s**, not proxies or futures:
 

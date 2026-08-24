@@ -15,8 +15,8 @@ re-splits what you leave behind, so **the trace you write is the trace you would
 write against one GPU**. Nothing to install, import, or enable.
 
 > **Not executed by the repo's test suite in CI** — these examples need ≥2 GPUs.
-> They are drawn from `nnsight/modeling/tp/` and
-> `tests/test_transformers_tensor_parallel.py`, which run on multi-GPU machines.
+> They are drawn from `nnsight/modeling/tp/` and `tests/tp/`, which run on
+> multi-GPU machines (the real-model tests need four).
 
 ## Loading
 
@@ -87,6 +87,11 @@ The gather only fires when an intervention is parked on that location, so readin
 a few locations does not pay for the hundreds you ignore. `tracer.cache()` gathers
 only the modules it selects.
 
+`.source` values *inside* a forward are handed over as-is: between two ops the
+split axis can move, so they are not gathered. Anything past the layer that
+all-reduces is whole; a value between a column-parallel layer and it is this rank's
+shard. Compare against a single-GPU run if it matters, and never branch on one.
+
 ## The two rules for intervention code
 
 Every rank runs your block — that is what keeps the collectives lined up.
@@ -141,8 +146,10 @@ kv projection (`mla_kv_a_proj`). Loading such a model tensor-parallel raises
 fragment of a tensor.
 
 **Most MoE checkpoints are fine.** `moe_tp_experts` — what Mixtral, DeepSeek-V3,
-Qwen3-MoE and ~25 other shipped configs use — all-reduces in its forward, so both
-sides arrive whole and nothing needs gathering.
+Qwen3-MoE and ~25 other shipped configs use — is a partial sum at the handoff that
+its own post-hook all-reduces; nnsight all-reduces it for a waiting worker and hands
+back the whole on rank 0 and zeros elsewhere, so the read is whole and the model's
+reduce still lands exactly once.
 
 ## Diagnosing
 

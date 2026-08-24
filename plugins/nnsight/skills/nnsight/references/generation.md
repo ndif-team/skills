@@ -44,7 +44,7 @@ with model.pipe(prompt, max_new_tokens=5, do_sample=False) as tracer:
 print(records[0]["generated_text"])
 ```
 
-`pipe` is what old nnsight's `generate` used to return. Note `do_sample=False`:
+Note `do_sample=False`:
 gpt2's pipeline config asks for sampling, so pipe output is non-deterministic
 unless you turn it off.
 
@@ -156,8 +156,8 @@ the generated tokens.
 
 Other iteration forms: `tracer.iter[2]` (one step), `tracer.iter[1:3]` (a range),
 `tracer.iter[[0, 2, 4]]` (explicit list). Negative indices raise — there is no
-"last step" shorthand. The old `with tracer.iter[...]:` form is deprecated in
-favour of the `for` loop, and `tracer.next()` no longer exists.
+"last step" shorthand. A `with tracer.iter[...]:` block is deprecated in
+favour of the `for` loop.
 
 ## Streaming tokens as they are produced
 
