@@ -68,3 +68,6 @@ edit.clear()
 Other clients of the same server — anything that submits a trace — get the
 edit's values on their outputs too, which is the way to instrument traffic you do
 not control.
+Install with `client.edit(serve=URL, name="probe")` and a served trace picks
+edits with `trace(..., serve=URL, edits=["probe"])`; an unknown name comes back
+as the request's error (`RuntimeError: ValueError: edits=...`).

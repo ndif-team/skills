@@ -244,6 +244,34 @@ assert torch.allclose(feats, torch.stack(feat), rtol=2e-2, atol=0.5)   # bf16, b
 assert getattr(outputs[0], "saves", None) is not None
 ```
 
+### Named edits, chosen per request
+
+`model.edit(name=...)` tags an edit; `edits=[...]` on `trace`/`invoke`/plain
+`generate` (and over serve) picks which installed edits run: the named ones
+listed **plus every unnamed edit**. No `edits=` runs them all; `edits=[]` the
+unnamed only. An unknown name is refused (`ValueError` locally; the request's
+error over serve). nnsight `0.8` branch, after 0.8.0.
+
+<!-- test: gpu -->
+```python
+with model.edit(name="probe") as (tracer, probe):
+    score = layer.output[1][-1].norm().item().save()
+with model.edit() as (tracer, always):
+    seen = nnsight.save(True)
+
+both = model.generate("Fact:", max_tokens=1, temperature=0.0)[0]
+only_unnamed = model.generate("Fact:", max_tokens=1, temperature=0.0, edits=[])[0]
+with model.trace("Fact:", max_tokens=1, temperature=0.0, edits=["probe"]) as tracer:
+    result = tracer.result.save()
+print(sorted(both.saves), sorted(only_unnamed.saves), sorted(result.saves))
+assert "score" in both.saves and "score" not in only_unnamed.saves and "score" in result.saves
+try:
+    model.generate("Fact:", max_tokens=1, edits=["nope"])
+except ValueError as e:
+    print("refused:", str(e)[:40])
+model.clear_edits()
+```
+
 - Measured on Qwen3-8B, 500 prompts: **0.5 s edited** (bare vLLM 0.45 s), 0.8 s
   traced with the layer envoy bound outside — and **5.2 s traced** once the block
   also reads `model.logits`, `model.samples` or `tracer.result`. A reference to
