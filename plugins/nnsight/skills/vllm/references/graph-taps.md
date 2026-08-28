@@ -48,6 +48,10 @@ assert steered.outputs[0].text != plain.outputs[0].text
 
 What changes under graphs:
 
+- **A tap can be a `.source` op** — `"model.layers.10.self_attn.source.qkv_split_0.output"`:
+  the worker instruments that forward before recording, and the op is served on
+  replay (reads equal eager exactly; in-place edits land). Ops inside fused kernels
+  are still not locations. nnsight `0.8` branch, after 0.8.0.
 - **Only taps are served.** A read of any other module location fails when the
   request ends with `'...' is not a tap on this engine`. `model.logits`,
   `model.samples` and `tracer.result` always work.

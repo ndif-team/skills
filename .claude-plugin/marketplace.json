@@ -1,5 +1,5 @@
 {
-  "name": "nnsight-skills",
+  "name": "ndif-team-skills",
   "owner": {
     "name": "NDIF Team",
     "email": "info@ndif.us"
@@ -8,7 +8,7 @@
     {
       "name": "nnsight",
       "source": "./plugins/nnsight",
-      "description": "Neural network interpretability with nnsight 0.8 and NDIF - tracing and intervening on model internals, debugging, remote execution, logit lens, activation patching, attribution patching, causal tracing, and steering"
+      "description": "Neural network interpretability with nnsight and NDIF - tracing and intervening on model internals, debugging, remote execution, logit lens, activation patching, attribution patching, causal tracing, and steering"
     }
   ]
 }
