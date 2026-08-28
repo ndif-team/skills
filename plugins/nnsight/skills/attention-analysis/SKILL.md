@@ -37,7 +37,7 @@ tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(prompt).input_ids
 
 ```python
 with model.trace(prompt):
-    attn_out, weights = model.transformer.h[0].attn.source.attention_interface_0.output
+    attn_out, weights = model.transformer.h[0].attn.source.attention_interface_1.output
     first_layer = weights.detach().save()
 
 print(first_layer.shape)              # [batch, heads, query, key]
@@ -45,7 +45,7 @@ print(first_layer[0, 0].sum(-1))      # each row sums to 1
 ```
 
 If `weights` is `None`, the model was not loaded with `attn_implementation="eager"`.
-The operation name (`attention_interface_0`) is version-dependent — confirm with
+The operation name (`attention_interface_1`) is version-dependent — confirm with
 `print(model.transformer.h[0].attn.source)` rather than assuming. See the `nnsight`
 skill → source tracing.
 
@@ -55,7 +55,7 @@ All layers in one pass:
 with model.trace(prompt):
     patterns = nnsight.save([])
     for block in model.transformer.h:
-        _, weights = block.attn.source.attention_interface_0.output
+        _, weights = block.attn.source.attention_interface_1.output
         patterns.append(weights.detach())
 
 print(len(patterns), patterns[0].shape)
@@ -110,7 +110,7 @@ repeated = torch.cat([random_seq, random_seq]).unsqueeze(0).to(model.device)
 with model.trace(repeated):
     repeat_patterns = nnsight.save([])
     for block in model.transformer.h:
-        _, weights = block.attn.source.attention_interface_0.output
+        _, weights = block.attn.source.attention_interface_1.output
         repeat_patterns.append(weights.detach())
 
 # In the second copy, position length+i should attend to position i+1
@@ -147,7 +147,7 @@ For a specific head, print the strongest source position for each destination:
 LAYER, HEAD = 5, 5
 
 with model.trace(prompt):
-    _, weights = model.transformer.h[LAYER].attn.source.attention_interface_0.output
+    _, weights = model.transformer.h[LAYER].attn.source.attention_interface_1.output
     head_pattern = weights[0, HEAD].detach().save()
 
 for position, token in enumerate(tokens):
@@ -186,7 +186,7 @@ Patterns change every step as the sequence grows:
 with model.generate(prompt, max_new_tokens=3) as tracer:
     per_step = nnsight.save([])
     for step in tracer.iter[:3]:
-        _, weights = model.transformer.h[5].attn.source.attention_interface_0.output
+        _, weights = model.transformer.h[5].attn.source.attention_interface_1.output
         per_step.append(weights.shape[-1])
 
 print("key length per step:", per_step)
@@ -236,7 +236,7 @@ with model.trace(prompt):
 
 # or by the source op, if you also want to read the per-head tensor
 with model.trace(prompt):
-    op = model.transformer.h[LAYER].attn.source.attention_interface_0
+    op = model.transformer.h[LAYER].attn.source.attention_interface_1
     per = op.output[0].clone()
     per[:, :, HEAD, :] = 0
     op.output = (per,) + tuple(op.output[1:])

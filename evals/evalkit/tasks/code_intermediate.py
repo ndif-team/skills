@@ -303,7 +303,7 @@ attn_implementation="eager".""",
     ["source", "attention"],
     """
 with model.trace("The cat sat on the"):
-    _, attn_probs = model.transformer.h[0].attn.source.attention_interface_0.output
+    _, attn_probs = model.transformer.h[0].attn.source.attention_interface_1.output
     attn_probs = attn_probs.save()
 """,
     setup=GPT2_EAGER_SETUP,

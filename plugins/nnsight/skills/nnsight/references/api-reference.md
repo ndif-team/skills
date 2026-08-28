@@ -137,7 +137,7 @@ environment.
 |---|---|
 | `OutOfOrderError` | a location was requested after the model ran past it |
 | `EarlyStopException` | `tracer.stop()` — a clean exit, swallowed by the interleaver |
-| `SourceNotAvailable` | `.source` can't instrument that callable |
+| `SourceNotAvailable` | no Python source to instrument (builtin/C), a submodule call, or an assignment op |
 | `WithBlockNotFoundError` | the trace body's source could not be read |
 | `NotImplementedError` (batching) | this model can't batch multiple input invokes |
 | `ValueError: save() was called outside a trace` | move the save inside |

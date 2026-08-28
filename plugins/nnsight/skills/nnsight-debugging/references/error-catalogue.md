@@ -96,7 +96,7 @@ between your machine and the server. `python scripts/check_env.py --remote` (in 
 | Exception | Meaning |
 |---|---|
 | `EarlyStopException` | `tracer.stop()` — a clean early exit, swallowed by the interleaver. Don't catch it; do `.save()` before calling `stop()`, since nothing after it in that block runs. |
-| `SourceNotAvailable` | `.source` can't instrument that callable: it calls a submodule (use that submodule's own `.source`), it's a builtin/C function, the forward is decorated, or you used recursive `.source` outside a trace. |
+| `SourceNotAvailable` | `.source` can't instrument that callable: it calls a submodule (use that submodule's own `.source`), it's a builtin/C function, it's an assignment op (no callee), or you used recursive `.source` outside a trace. Decorated forwards are fine. |
 
 ## Reading a traceback
 
