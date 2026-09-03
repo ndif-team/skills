@@ -40,7 +40,38 @@ Four rules, and every gradient bug is one of them:
    shortcut that skips capturing the tensor first.
 
 No `requires_grad_(True)` is needed for activations — they are non-leaf tensors
-already in the graph.
+already in the graph. The call is a no-op on them: a captured `.output` is already
+`requires_grad=True, is_leaf=False`, and calling it changes nothing. Only a leaf
+you build yourself needs it — an integrated-gradients baseline, a steering vector
+under an optimizer.
+
+A gradient is readable only while the block is open. Afterwards `t.grad` is `None`
+again, with nothing but PyTorch's non-leaf warning to say so, so `.save()` what you
+want inside.
+
+### When not to use the block
+
+Rules 2 and 3 exist because the block runs interleaved. If you only want to *read*
+gradients, `retain_grad()` plus a plain `loss.backward()` after the trace gets
+byte-identical numbers under no ordering rule at all:
+
+```python
+with model.trace(prompt):
+    refs = nnsight.save([])
+    for i in range(len(model.transformer.h)):
+        hidden = model.transformer.h[i].output
+        hidden.retain_grad()                  # forward order, any order
+        refs.append(hidden)
+    loss = model.output.logits.sum().save()
+
+loss.backward()                               # outside the trace, plain PyTorch
+retained = [r.grad[:, -1, :].norm().item() for r in refs]
+assert all(x > 0 for x in retained)
+```
+
+It materializes and holds every `.grad`, which the interleaved block does not. Use
+`with metric.backward():` when you want to edit a gradient mid-pass, or when you
+want only a few of them.
 
 ## Per-layer saliency
 
@@ -59,8 +90,10 @@ with model.trace(prompt):
         for i in reversed(range(n_layers)):                            # reverse order
             grads.append(resid[i].grad[:, -1, :].norm())
 
-for i, g in enumerate(reversed(grads)):
-    print(f"layer {i:2d}  ||grad|| = {g.item():.4f}")
+norms = [g.item() for g in reversed(grads)]
+assert len(norms) == n_layers and min(norms) > 0
+for i, g in enumerate(norms):
+    print(f"layer {i:2d}  ||grad|| = {g:.4f}")
 ```
 
 ## Input × gradient
@@ -95,7 +128,8 @@ with model.trace(prompt):
         late.grad = late.grad * 0        # cut the gradient path at layer 9
         blocked = early.grad.norm().save()
 
-print(blocked.item())                    # 0.0 — nothing flows past the cut
+assert blocked.item() == 0.0             # nothing flows past the cut
+print(blocked.item())
 ```
 
 ## Several backward passes
@@ -112,7 +146,7 @@ with model.trace(prompt):
     with (logits[0, -1, paris] * 3).backward():
         g2 = hidden.grad.clone().save()
 
-print(torch.allclose(g2, g1 * 3, atol=1e-4))
+assert torch.allclose(g2, g1 * 3, atol=1e-4)
 ```
 
 ## Gradients per invoke
@@ -170,18 +204,64 @@ for _ in range(3):
 
 The model's own parameters are untouched — only `direction` receives updates.
 
-**When gradients must flow through an intervention, replace instead of writing
-in place.** `module.output = new_tensor` hands the model a new object and leaves
-the autograd graph intact; `module.output[:] = new_tensor` mutates the tensor
-autograd recorded and raises:
+**Edit at the point you intercept.** Form does not matter: at the module you just
+read, `module.output = new_tensor`, `module.output[:] = new_tensor` and
+`module.output += delta` all differentiate, and the loop above uses the in-place
+form on purpose. Position matters. Reading a *later* module's output advances the
+forward past the earlier one, and an in-place write after that point lands on a
+value the model has already consumed:
 
-```
-RuntimeError: one of the variables needed for gradient computation has been
-modified by an inplace operation
+```python
+with model.trace(prompt):
+    hidden = model.transformer.h[6].output
+    later = model.transformer.h[8].output    # the forward is now past layer 6
+    hidden *= 2                              # too late
+    logits_late = model.output.logits.save()
+
+with model.trace(prompt):
+    logits_plain = model.output.logits.save()
+
+assert torch.equal(logits_late, logits_plain)   # the late write did nothing
 ```
 
-In-place is fine for interventions you are not differentiating through — it is
-only a problem on the path to a `backward()`.
+On a forward-only trace it is a silent no-op — no error, no effect. Add a backward
+and the same code raises instead:
+
+<!-- test: expect-error RuntimeError -->
+```python
+with model.trace(prompt):
+    hidden = model.transformer.h[6].output
+    later = model.transformer.h[8].output
+    hidden *= 2
+    with model.output.logits.sum().backward():
+        grad = later.grad.norm().save()
+# RuntimeError: one of the variables needed for gradient computation has been
+# modified by an inplace operation: [torch.cuda.FloatTensor [1, 10, 768]], which
+# is output 0 of Mul, is at version 1; expected version 0 instead.
+```
+
+Moving `hidden *= 2` above the `h[8]` read fixes both.
+
+## Where gradients are unavailable
+
+**Inside `model.generate()`.** HuggingFace decorates `GenerationMixin.generate`
+with `@torch.no_grad()`, so activations captured in a generation trace come back
+with `requires_grad=False` and opening a backward block raises
+`NotImplementedError: This tensor does not require grad, so a backward session
+cannot produce gradients`. `torch.enable_grad()` around the call does not override
+the decorator. Drive the decoding yourself instead — a `model.trace` per step over
+the growing prefix, with the backward inside each.
+
+**On a frozen model.** After `model.requires_grad_(False)` the same
+`NotImplementedError` appears, because no parameter is in the graph. Inject a
+tensor that does require grad — a steering vector, an adapter — and gradients exist
+from that point downstream; reading `.grad` on an activation *upstream* of the
+injection raises `RuntimeError: cannot register a hook on a tensor that doesn't
+require gradient`.
+
+**After the metric's path ends.** Asking for the `.grad` of a tensor autograd never
+reaches, such as a branch computed off to the side, raises `OutOfOrderError` at the
+end of the run rather than hanging.
 
 ## Where this leads
 
