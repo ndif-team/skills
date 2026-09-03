@@ -88,6 +88,10 @@ Fixes, in order of preference:
 | You need "everything", order unknown | `tracer.cache()` (see [caching-and-scan.md](caching-and-scan.md)) |
 | You need a value from a later module *before* an earlier one, same input | Two traces, or cache the first pass |
 
+`tracer.result` is the last thing anything can ask for — it is served after the
+forward returns. Reading it before `model.output` puts `model.output` out of
+order.
+
 Order is per-module-execution, not per-line: inside one block, `h[0].attn` comes
 before `h[0].mlp` comes before `h[0].output` comes before `h[1]`.
 
@@ -126,7 +130,7 @@ mounted onto every Python object by a C extension; prefer `nnsight.save(...)` fo
 plain builtins (lists, dicts, ints) and for code that must not depend on that
 mount.
 
-**`.save()` outside a trace raises** — it is not a silent no-op:
+**`.save()` outside a trace raises.** There is no trace to return the value from:
 
 <!-- test: expect-error ValueError -->
 ```python
@@ -163,7 +167,7 @@ execution the body is serialized and shipped, so locals from your file need
 
 | Symptom | Almost always |
 |---|---|
-| `UnboundLocalError` after the block | forgot `.save()` |
+| `NameError` / `UnboundLocalError` after the block | forgot `.save()` (`NameError` in a script, `UnboundLocalError` in a function) |
 | Saved list is empty | saved the elements, not the container |
 | `OutOfOrderError` | modules touched out of forward order |
 | `ValueError: Cannot access ... outside of interleaving` | `.output` read outside a trace body |

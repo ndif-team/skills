@@ -98,6 +98,20 @@ Use in-place (`[:] =`, `[..., idx] =`) for surgical edits to part of a tensor; u
 replacement when you are producing a new tensor wholesale. Replacement is also the
 only option when the value is not a tensor (a tuple, a dataclass output).
 
+**A replacement has to descend from the value it replaces if you want gradients.**
+`output = torch.zeros_like(output)` hands the model a tensor autograd has never
+seen and cuts the graph there, so a later `.grad` read on anything captured
+upstream fails with an object id for a location:
+
+```
+OutOfOrderError: '139932764543792.grad.i0' was requested but the model already ran past it
+```
+
+`output[:] = 0` writes through the existing tensor and keeps the graph; so does
+any replacement built from the old value (`output * 0`, `output + steering`). If a
+location in an error message is a long number rather than a module path, this is
+what happened.
+
 **Mutating a tuple element by assignment fails** — `output[0] = x` is
 `tuple.__setitem__`. Either mutate in place through the element, or rebuild:
 
@@ -188,20 +202,28 @@ with model.trace(prompt):
     out = model.output.logits.save()
 ```
 
-For anything beyond the first argument, go through `.inputs`:
+For anything beyond the first argument, go through `.inputs`, which is assignable
+as the whole `(args, kwargs)` pair:
 
 ```python
 with model.trace(prompt):
     args, kwargs = model.transformer.h[3].inputs
+    model.transformer.h[3].inputs = ((args[0] * 0.5, *args[1:]), kwargs)
     keys = nnsight.save(sorted(kwargs.keys()))
+    halved = model.output.logits.save()
 
-print(keys)
+print(keys, halved.shape)
 ```
+
+That is what `.input = value` does for you when the value is the first argument.
 
 ## Applying a module to a value
 
-Calling an envoy inside a trace runs its `forward` directly — no hooks, no
-ordering constraints. This is how logit lens is written:
+Calling an envoy inside a trace runs the module with this trace stood down: it
+serves no value and spends no occurrence, so it is not bound by the ordering rule
+and it does not consume the module's real place in the forward pass. (The
+module's own PyTorch hooks still fire — `hook=` names whether *nnsight* watches
+the call.) This is how logit lens is written:
 
 ```python
 with model.trace(prompt):
