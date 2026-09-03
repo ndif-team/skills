@@ -79,8 +79,8 @@ with model.trace(prompt, temperature=0.0, max_tokens=1):
 ## Measured
 
 Llama-3.1-8B, bf16, A100, 512-token prompt, 128 new tokens, greedy, capturing one
-layer every step. Vanilla and taps in tokens per second; each engine's share of
-vanilla in parentheses:
+layer every step. Vanilla and taps in tokens per second, taps with its share of
+vanilla in parentheses; the eager column is a share only:
 
 | | vanilla | eager | taps |
 |---|---:|---:|---:|
