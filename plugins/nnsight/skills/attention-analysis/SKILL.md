@@ -1,6 +1,6 @@
 ---
 name: attention-analysis
-description: Extract and analyze attention patterns and per-head behavior — attention probability matrices via .source, per-head metrics (entropy, previous-token, attention-sink, induction), automatic head-type detection, per-head reading and editing of the output. Use to find out what a head attends to, to identify induction/copy/previous-token heads, to visualize where information moves, or to pick candidate heads before patching or ablating them. Requires attn_implementation="eager"; covers grouped-query attention and the head-slicing convention.
+description: Extract and analyze attention patterns and per-head behavior — attention probability matrices from attn.output[1] or .source, the anchors that check they really are probabilities, per-head metrics (entropy, previous-token, attention-sink, induction), automatic head-type detection, per-head reading and editing of the output. Use to find out what a head attends to, to identify induction/copy/previous-token heads, to visualize where information moves, or to pick candidate heads before patching or ablating them. Requires attn_implementation="eager"; covers grouped-query attention and the head-slicing convention.
 ---
 
 # Attention Analysis
@@ -8,8 +8,8 @@ description: Extract and analyze attention patterns and per-head behavior — at
 Two different objects get called "attention", and you need both:
 
 - **The pattern** — `softmax(QK^T/√d)`, a `[batch, heads, query, key]` matrix
-  saying *where each head looks*. Not returned by the attention module; reach it
-  with `.source`.
+  saying *where each head looks*. Under `eager` the attention module hands it
+  back as `attn.output[1]`; `.source` reaches the raw softmax inside.
 - **The per-head output** — what each head *writes* into the residual stream. A
   slice of the output projection's input.
 
@@ -29,37 +29,61 @@ model = TransformersModel("openai-community/gpt2", dispatch=True,
 prompt = "When Mary and John went to the store, John gave a drink to"
 n_layers = len(model.transformer.h)
 n_heads = model.config.n_head
-head_dim = model.config.n_embd // n_heads
+head_dim = model.transformer.h[0].attn._module.head_dim   # not n_embd // n_heads
 tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(prompt).input_ids]
 ```
 
 ## Getting patterns
 
 ```python
-with model.trace(prompt):
-    attn_out, weights = model.transformer.h[0].attn.source.attention_interface_1.output
-    first_layer = weights.detach().save()
+with torch.no_grad():                     # a trace runs with autograd on
+    with model.trace(prompt):
+        first_layer = model.transformer.h[0].attn.output[1].save()
 
 print(first_layer.shape)              # [batch, heads, query, key]
 print(first_layer[0, 0].sum(-1))      # each row sums to 1
 ```
 
-If `weights` is `None`, the model was not loaded with `attn_implementation="eager"`.
-The operation name (`attention_interface_1`) is version-dependent — confirm with
-`print(model.transformer.h[0].attn.source)` rather than assuming. See the `nnsight`
-skill → source tracing.
+If the weights are `None`, the model was not loaded with
+`attn_implementation="eager"` — `sdpa` and `flash_attention_2` never materialize
+the matrix, and `model.output.attentions` is the empty tuple rather than an error.
 
-All layers in one pass:
+**Anchor before you score.** Two properties are cheap and both must hold, or you
+are holding something that is not a probability matrix:
 
 ```python
-with model.trace(prompt):
-    patterns = nnsight.save([])
-    for block in model.transformer.h:
-        _, weights = block.attn.source.attention_interface_1.output
-        patterns.append(weights.detach())
+seq = first_layer.shape[-1]
+upper = torch.triu(torch.ones(seq, seq, dtype=torch.bool), diagonal=1)
+
+assert torch.allclose(first_layer.sum(-1), torch.ones_like(first_layer.sum(-1)))
+assert (first_layer[..., upper] == 0).all()      # causal mask: exactly zero, not small
+```
+
+Exactly zero rather than merely small is the tell: the eager path adds `-inf`
+before the softmax. A `1e-5` up there means pre-softmax scores, or a
+bidirectional model.
+
+All layers in one pass — `model.output.attentions` needs
+`output_attentions=True` and gives every layer; the loop lets you pick:
+
+```python
+with torch.no_grad():
+    with model.trace(prompt):
+        patterns = nnsight.save([])
+        for block in model.transformer.h:
+            patterns.append(block.attn.output[1])
 
 print(len(patterns), patterns[0].shape)
 ```
+
+The raw `softmax(QK^T/√d)`, before the dtype cast and dropout, is one level in:
+`block.attn.source.attention_interface_1.source.nn_functional_softmax_0.output`.
+On a float32 model it is the same tensor as `attn.output[1]`; on bf16 the two
+differ by the cast (`2e-3` on Qwen2.5-0.5B). Those operation names are
+`transformers` 5.15 — confirm with `print(model.transformer.h[0].attn.source)`,
+and note that the listing includes operations on branches this model never runs
+(22 of GPT-2 attention's 50), which raise `OutOfOrderError` if you ask for them.
+See the `nnsight` skill → source tracing.
 
 ## Per-head metrics
 
@@ -75,7 +99,7 @@ def head_metrics(pattern):
     entropy = -(pattern * (pattern + eps).log()).sum(-1).mean(-1)
     previous = pattern.diagonal(offset=-1, dim1=-2, dim2=-1).mean(-1)
     self_attn = pattern.diagonal(dim1=-2, dim2=-1).mean(-1)
-    to_first = pattern[..., 0].mean(-1)                  # attention sink / BOS
+    to_first = pattern[..., 1:, 0].mean(-1)              # attention sink / BOS
     return entropy, previous, self_attn, to_first
 
 print(f"{'head':<8}{'entropy':>9}{'prev-tok':>10}{'self':>8}{'->pos0':>9}")
@@ -94,6 +118,10 @@ Reading them:
   induction circuit.
 - **High attention to position 0** — an attention sink, the "do nothing" state.
   Very common and rarely meaningful; exclude it before ranking heads by anything.
+  Score it over queries `q >= 1` only: `A[0, 0]` is 1 by construction, so
+  including it inflates every head — over GPT-2's 144 heads on this 14-token
+  prompt the mean is 0.642 with `q = 0` and 0.615 without, and the gap grows as
+  `1/seq`.
 
 ## Finding induction heads
 
@@ -104,40 +132,60 @@ well by using semantics, but random tokens can only be matched by position.
 ```python
 generator = torch.Generator().manual_seed(0)
 length = 20
+bos = model.config.eos_token_id                  # gpt2 has no dedicated BOS
+
 random_seq = torch.randint(1000, 10000, (length,), generator=generator)
-repeated = torch.cat([random_seq, random_seq]).unsqueeze(0).to(model.device)
+repeated = torch.cat([torch.tensor([bos]), random_seq, random_seq]).unsqueeze(0)
 
-with model.trace(repeated):
-    repeat_patterns = nnsight.save([])
-    for block in model.transformer.h:
-        _, weights = block.attn.source.attention_interface_1.output
-        repeat_patterns.append(weights.detach())
+# control: same length, same distribution, no repeat
+flat = torch.randint(1000, 10000, (2 * length,), generator=generator)
+control_seq = torch.cat([torch.tensor([bos]), flat]).unsqueeze(0)
 
-# In the second copy, position length+i should attend to position i+1
-query_positions = torch.arange(length, 2 * length - 1)
-key_positions = query_positions - length + 1
+def induction_scores(sequence):
+    with torch.no_grad():
+        with model.trace(sequence.to(model.device)):
+            captured = nnsight.save([b.attn.output[1] for b in model.transformer.h])
 
-scores = {}
-for layer, weights in enumerate(repeat_patterns):
-    per_head = weights[0, :, query_positions, key_positions].mean(-1)
-    for head in range(n_heads):
-        scores[(layer, head)] = float(per_head[head])
+    # in the second copy, position 1+length+i attends to position 1+i+1
+    query_positions = torch.arange(length, 2 * length - 1) + 1
+    key_positions = query_positions - length + 1
+    return {
+        (layer, head): float(w[0, head, query_positions, key_positions].mean())
+        for layer, w in enumerate(captured)
+        for head in range(n_heads)
+    }
 
-for (layer, head), score in sorted(scores.items(), key=lambda kv: -kv[1])[:5]:
-    print(f"L{layer}H{head:<2} induction score {score:.3f}")
+scores = induction_scores(repeated)
+control = induction_scores(control_seq)
+
+top = sorted(scores.items(), key=lambda kv: -kv[1])[:5]
+for (layer, head), score in top:
+    print(f"L{layer}H{head:<2} induction {score:.3f}   control {control[(layer, head)]:.3f}")
+
+assert {head for head, _ in top} == {(5, 1), (5, 5), (6, 9), (7, 2), (7, 10)}
+assert max(control[head] for head, _ in top) < 0.01
 ```
 
 ```
-L7H10 induction score 0.902
-L5H5  induction score 0.901
-L5H1  induction score 0.880
-L6H9  induction score 0.833
-L7H2  induction score 0.801
+L5H5  induction 0.884   control 0.003
+L7H10 induction 0.860   control 0.004
+L5H1  induction 0.839   control 0.000
+L6H9  induction 0.815   control 0.001
+L7H2  induction 0.753   control 0.004
 ```
 
-Those are GPT-2 small's known induction heads, recovered from scratch. Use the
-same shape of detector for any hypothesis: construct an input where only the
-behavior you care about can produce a high score.
+The **control column is what turns the number into a claim.** The same heads, the
+same positions, on a sequence that does not repeat, score at nothing — so the
+behavior is caused by the repetition and not by the position. A detector without
+one measures nothing.
+
+Those five are GPT-2 small's induction heads as ARENA's induction sweep reports
+them (5.1, 5.5, 6.9, 7.2, 7.10), recovered from scratch. Use the same shape of
+detector for any hypothesis: construct an input where only the behavior you care
+about can produce a high score. A different published list circulates — the IOI
+paper's 5.5, 5.8, 5.9, 6.9 — because it scores behavior on natural prompts rather
+than on repeated random tokens. A head is an induction head relative to a probe;
+report the probe with the score.
 
 ## Where a head looks, in text
 
@@ -146,9 +194,9 @@ For a specific head, print the strongest source position for each destination:
 ```python
 LAYER, HEAD = 5, 5
 
-with model.trace(prompt):
-    _, weights = model.transformer.h[LAYER].attn.source.attention_interface_1.output
-    head_pattern = weights[0, HEAD].detach().save()
+with torch.no_grad():
+    with model.trace(prompt):
+        head_pattern = model.transformer.h[LAYER].attn.output[1][0, HEAD].save()
 
 for position, token in enumerate(tokens):
     best = head_pattern[position].argmax().item()
@@ -164,8 +212,9 @@ occupies columns `[h*head_dim : (h+1)*head_dim]` of the output projection's inpu
 ```python
 LAYER = 9
 
-with model.trace(prompt):
-    proj_in = model.transformer.h[LAYER].attn.c_proj.input.detach().save()
+with torch.no_grad():
+    with model.trace(prompt):
+        proj_in = model.transformer.h[LAYER].attn.c_proj.input.save()
 
 norms = torch.stack([
     proj_in[0, -1, head * head_dim:(head + 1) * head_dim].norm()
@@ -186,8 +235,7 @@ Patterns change every step as the sequence grows:
 with model.generate(prompt, max_new_tokens=3) as tracer:
     per_step = nnsight.save([])
     for step in tracer.iter[:3]:
-        _, weights = model.transformer.h[5].attn.source.attention_interface_1.output
-        per_step.append(weights.shape[-1])
+        per_step.append(model.transformer.h[5].attn.output[1].shape[-1])
 
 print("key length per step:", per_step)
 ```
@@ -196,15 +244,30 @@ print("key length per step:", per_step)
 
 The recipe is the same; the names are not.
 
-- The `.source` operation name differs by model class and `transformers` version —
-  always `print(block.attn.source)` first.
+- The module path changes (`model.model.layers[i].self_attn`), the pattern handle
+  does not: `self_attn.output[1]` under eager, on every family tested. Source
+  operation names differ by model class and `transformers` version — always
+  `print(block.attn.source)` first.
 - **Grouped-query attention** (Llama-3, Qwen, Gemma): `num_key_value_heads` is
   smaller than `num_attention_heads`, so several query heads share one KV head.
-  The pattern still has one row per *query* head, but head slices of the KV
-  projections do not line up one-to-one. Check both counts —
-  `scripts/inspect_model.py` in the `nnsight` skill prints them.
+  The pattern still has one row per *query* head, and per-head slicing of the
+  output projection's input still works unchanged —
+  `o_proj.input.view(B, S, num_attention_heads, head_dim)` is `torch.equal` to the
+  attention implementation's per-head output on Qwen2.5-0.5B (14 query / 2 KV) and
+  gemma-2-2b (8 / 4). Only slices of `k_proj` / `v_proj` are indexed by
+  `num_key_value_heads`. Check both counts — `scripts/inspect_model.py` in the
+  `nnsight` skill prints them.
+- **`head_dim` is not `hidden_size // num_attention_heads`.** Read
+  `attn._module.head_dim`. On gemma-2-2b the arithmetic gives 288 and the true
+  value is 256, and the wrong `.view()` succeeds.
 - Some models have no accessible probability matrix at all under their default
   attention kernel; `attn_implementation="eager"` is required everywhere.
+- **Gemma-2's eager attention is not plain softmax attention.** It softcaps the
+  attention logits (`attn_logit_softcapping = 50.0`) between the matmul and the
+  softmax, visible as `torch_tanh_0` in the implementation's operation list.
+- `nnterp`'s `StandardizedTransformer(..., enable_attention_probs=True)` gives
+  `model.attention_probabilities[i]` with no per-architecture names at all — see
+  the `nnterp` skill.
 
 ## Cautions
 
@@ -233,6 +296,7 @@ longer decomposes per head, so slicing `attn.output` is not head ablation (measu
 with model.trace(prompt):
     lo, hi = HEAD * head_dim, (HEAD + 1) * head_dim
     model.transformer.h[LAYER].attn.c_proj.input[:, :, lo:hi] = 0
+    by_projection = model.output.logits[0, -1].save()
 
 # or by the source op, if you also want to read the per-head tensor
 with model.trace(prompt):
@@ -240,7 +304,15 @@ with model.trace(prompt):
     per = op.output[0].clone()
     per[:, :, HEAD, :] = 0
     op.output = (per,) + tuple(op.output[1:])
+    by_source = model.output.logits[0, -1].save()
+
+assert torch.equal(by_projection, by_source)
 ```
+
+For a `.heads` accessor you can read and write like any other activation, see
+`nnsight/docs/patterns/per-head-attention.md` — an `eproperty` on `c_proj`'s
+input reproduces the ablation exactly, and one on the attention module's output
+does not.
 
 Establish a null distribution before believing the number. On GPT-2 at a middle
 layer, ablating the head that attends *most* to a token is often indistinguishable
