@@ -70,9 +70,13 @@ vLLM's engine args (`max_model_len`, `enable_prefix_caching`, `seed`, ...). The
 engine runs eagerly, serving every location, unless you declare `taps=` — see
 [graph taps](references/graph-taps.md).
 
-Scripts need an `if __name__ == "__main__":` guard (vLLM spawns its engine core
-and re-imports the main module); set `VLLM_WORKER_MULTIPROC_METHOD=spawn`.
-`enable_prefix_caching=False` whenever you will `model.edit()`.
+Scripts need an `if __name__ == "__main__":` guard. Dispatching initializes CUDA in
+your process, so vLLM starts its EngineCore with `spawn` (it sets
+`VLLM_WORKER_MULTIPROC_METHOD` itself, logging `Reasons: CUDA is initialized`), spawn
+re-imports the main module, and a `VLLM(...)` at the top level of that module dies
+with `An attempt has been made to start a new process before the current process has
+finished its bootstrapping phase`. One GPU and `mode="sync"` included; notebooks are
+exempt. `enable_prefix_caching=False` whenever you will `model.edit()`.
 
 ## Per-step values and generation
 
@@ -290,9 +294,9 @@ model.clear_edits()
 ## Graph taps, serving, parallelism, architectures
 
 - **[Graph taps](references/graph-taps.md)** — `taps=[...]` keeps CUDA-graph replay
-  and serves the named locations from it: 89 vs 86 tok/s on one GPU, 284 vs 64 at
-  tp=8. Only taps are served, edits land in place, clone what you keep, hybrid
-  trunks pin decode-only graphs.
+  and serves the named locations from it: 96% of vanilla vLLM on one GPU against the
+  eager engine's 85%, and 91% against 20% at tp=8. Only taps are served, edits land
+  in place, clone what you keep, hybrid trunks pin decode-only graphs.
 - **[Serving](references/serving.md)** — `nnsight-serve`, GPU-less clients with
   `trace(..., serve=url)` and `edit(serve=url)`, the CLI's forwarded flags, and
   what the server is not (an OpenAI endpoint).
@@ -307,7 +311,9 @@ model.clear_edits()
   decoder is at `model.language_model.model.layers`.
 - **Cross-invoke values and `tracer.barrier`** — two traces (above).
 - **Pipeline parallelism and speculative decoding** — shard with
-  `tensor_parallel_size`.
+  `tensor_parallel_size`. A `pipeline_parallel_size=2` engine builds and then fails
+  every trace with `RuntimeError: UnknownPersistentIdError:
+  Module:model.model.layers.12.self_attn`, naming a layer on the other stage.
 - **`model.lm_head(h)`** — raises; the unembed is
   `model.logits_processor(model.lm_head, model.model.norm(h))`.
 
