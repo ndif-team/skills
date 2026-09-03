@@ -229,13 +229,13 @@ and warns that the probabilities are unverified for the architecture. Leave it o
 
 ### When the accessor cannot resolve
 
-nnterp reaches the probabilities by drilling into the attention forward with
-`.source` (`nnterp/rename_utils.py`, `default_attention_prob_source` and
-`first_drillable_op`), and the
-operation names there follow whatever transformers writes. If a transformers
-release rewrites that line, construction fails with a `RenamingError` naming the
-operations it tried. `.source` on the model prints the real names, and works
-outside a trace:
+nnterp reaches the probabilities through the attention forward's
+`attention_interface_1` operation (`nnterp/rename_utils.py`,
+`default_attention_prob_source` and `attention_interface_source`), and that
+name follows whatever transformers writes. If a transformers release rewrites
+the line, construction fails with a `RenamingError` naming the operation it
+looked for. `.source` on the model prints the real names, and works outside a
+trace:
 
 ```python
 print(with_probs.layers[0].self_attn.source)      # the forward, with operation labels

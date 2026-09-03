@@ -42,9 +42,9 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install "transformers>=5" pytest
           pip install "nnsight @ git+https://github.com/ndif-team/nnsight@0.8"
-          # nnterp's attention-probability accessor needs the version that resolves
-          # the interface by drilling (rename_utils.first_drillable_op); the PyPI
-          # release predates it. Switch to `pip install nnterp` once that ships.
+          # nnterp's attention-probability accessor needs the version that reads
+          # nnsight 0.8's attention_interface_1 label; the PyPI release predates
+          # it. Switch to `pip install nnterp` once that ships.
           pip install "nnterp @ git+https://github.com/ndif-team/nnterp@nnsight-0.8"
       - name: Report versions
         run: python plugins/nnsight/skills/nnsight/scripts/check_env.py
