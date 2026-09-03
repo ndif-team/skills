@@ -48,8 +48,11 @@ sharded (the block above sees an 896-wide `o_proj` input against a 448-wide weig
   shards: `model.logits_processor(model.lm_head, model.model.norm(h))`.
   `model.lm_head(h)` raises `LMHead's weights should be used in the sampler`.
   `norm(h)` returns a tensor; `norm(h, residual)` is the fused add and returns a pair.
-- `VLLM_WORKER_MULTIPROC_METHOD=spawn` is required on 0.27 (a forked worker cannot
-  re-initialize CUDA). Decode-context parallelism on MLA models is handled.
+- vLLM sets `VLLM_WORKER_MULTIPROC_METHOD=spawn` itself once CUDA is initialized,
+  which dispatching an engine does, and logs `Reasons: CUDA is initialized`. What
+  that costs you is the `if __name__ == "__main__":` guard in the main SKILL — spawn
+  re-imports the main module, at any `tensor_parallel_size`, including 1.
+- Decode-context parallelism on MLA models is handled.
 
 Throughput under TP is where `taps=` matters most — see
 [graph taps](graph-taps.md).
@@ -99,7 +102,7 @@ print([i for i, k in kinds.items() if k == "attention"])
 ```
 
 The recurrent state lives in vLLM's state cache, not in any module output, so it
-is not hookable; the layer outputs are. A tapped engine on these models pins
+is not a location; the layer outputs are. A tapped engine on these models pins
 decode-only graphs and matches eager exactly — [graph taps](graph-taps.md).
 Vision-language checkpoints load and trace on text prompts; image inputs are
 not accepted.

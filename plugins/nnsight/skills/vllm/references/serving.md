@@ -13,6 +13,13 @@ nnsight-serve Qwen/Qwen3-8B --port 8000 --enable-prefix-caching False \
   is forwarded to vLLM's `EngineArgs` as `flag=value`. Booleans take a literal:
   `--enable-prefix-caching False`, **not** vLLM's `--no-enable-prefix-caching`
   (that crashes the engine with an unexpected keyword).
+- **Short flags are dropped silently.** `-tp 2` prints `Ignoring unknown argument:
+  -tp` to stderr and the server comes up at `tensor_parallel_size=1`. Spell every
+  flag long.
+- **`taps=` has no CLI spelling.** A value is always parsed as a scalar, so
+  `--taps model.layers.*.output` reaches the engine as a string, which it iterates
+  per character and refuses with `ValueError: Tap 'm' names no module`. A tapped
+  engine has to be built in Python.
 - Start with prefix caching off if any client will `edit(serve=url)`.
 - Poll `GET /health` for `{"status": "ok"}`; the engine takes a minute or two.
 - The routes are `/health`, `POST /v1/nnsight/generate`,
@@ -71,3 +78,35 @@ not control.
 Install with `client.edit(serve=URL, name="probe")` and a served trace picks
 edits with `trace(..., serve=URL, edits=["probe"])`; an unknown name comes back
 as the request's error (`RuntimeError: ValueError: edits=...`).
+
+## The async engine
+
+`VLLM(repo, dispatch=True, mode="async")` builds vLLM's `AsyncLLM`. The block is
+written the same way; on exit the request is submitted and `tracer.backend` is the
+stream. `async for output in tracer.backend` yields cumulative `RequestOutput`s;
+`last = await tracer.backend` drains it and returns the finished one.
+
+<!-- test: skip -->
+```python
+async def main():
+    model = VLLM("Qwen/Qwen3-8B", dispatch=True, mode="async")   # build it on the loop you await from
+    with model.trace("The capital of France is", temperature=0.0, max_tokens=8) as tracer:
+        resid = sum(model.model.layers[10].output).save()
+    last = await tracer.backend
+    print(last.saves["resid"].shape)      # NOT `resid`: unbound on this path
+```
+
+- **Saved names are not pushed into your frame.** A sync trace and a `serve=` trace
+  both push them back; the async path does not. `resid` above is unbound after the
+  await and the tensor is `last.saves["resid"]`.
+- Only the finished output carries `.saves`; intermediate yields carry none.
+  Accumulate per-step values inside `tracer.iter[:]`.
+- **The stream is consumed once.** A second `await tracer.backend` returns `None`
+  rather than raising, so it fails later as an `AttributeError` on `.outputs`.
+- `model.generate(...)` on an async engine returns a coroutine to await.
+- One prompt per async trace; several invokes raise `NotImplementedError`. Fire many
+  traces with `asyncio.gather` and vLLM batches them.
+- **One engine, one event loop.** `AsyncLLM` binds to the loop that built it, so two
+  `asyncio.run()` calls over the same model hang on the second with no error. Build
+  the model inside the coroutine, or in a server's startup hook.
+- On `mode="async"`: `async with model.edit()` and `await edit.aclear()`.

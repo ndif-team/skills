@@ -40,10 +40,10 @@ batch with `tracer.invoke(...)` blocks.
 | Member | Signature | Does |
 |---|---|---|
 | `tracer.invoke` | `invoke(*args, **kwargs)` | add one batched input group; empty = whole batch |
-| `tracer.result` | — | the traced call's return value |
+| `tracer.result` | — | the traced call's return value; served after the forward, so read it *after* `model.output` |
 | `tracer.iter` | `iter[slice｜int｜list]` | target occurrences; loop `for step in tracer.iter[:3]:` |
 | `tracer.all` | `all()` | `tracer.iter[:]` — every occurrence (unbounded; drops trailing code) |
-| `tracer.cache` | `cache(modules=None, device=cpu, dtype=None, detach=True, include_output=True, include_inputs=False, non_blocking=True)` | record many modules at once |
+| `tracer.cache` | `cache(modules=None, device=cpu, dtype=None, detach=True, include_output=True, include_inputs=False, non_blocking=False)` | record many modules at once |
 | `tracer.barrier` | `barrier(n) -> Barrier` | cross-invoke meeting point; call it, don't enter it |
 | `tracer.stop` | `stop()` | end the forward pass now |
 
@@ -55,7 +55,7 @@ batch with `tracer.invoke(...)` blocks.
 |---|---|
 | `.output` | the module's forward return value (read/assign) |
 | `.input` | first positional arg, or first kwarg (read/assign) |
-| `.inputs` | `(args, kwargs)` (read/assign) |
+| `.inputs` | `(args, kwargs)` (read/assign — the only way to edit past the first argument) |
 | `.source` | operation-level handle into the forward |
 | `.device` / `.devices` | device(s) of its parameters |
 | `.path` | its dotted path in the tree |
@@ -68,7 +68,7 @@ If a child module shadows one of these names, the property moves to `.nns_output
 | Member | Signature | Does |
 |---|---|---|
 | `envoy.skip` | `skip(replacement)` | bypass this module's forward |
-| `envoy(...)` | `envoy(*args, hook=False, **kwargs)` | apply the module to a value; `hook=True` fires its own hooks |
+| `envoy(...)` | `envoy(*args, hook=False, **kwargs)` | apply the module to a value; `hook=True` lets *nnsight* watch the call, so its submodules become addressable (the module's own PyTorch hooks fire either way) |
 | `envoy.get` | `get("transformer.h.0.mlp")` | fetch a descendant by dotted path |
 | `envoy.modules` | `modules(include_fn=None, names=False)` | list descendants |
 | `envoy.named_modules` | `named_modules(include_fn=None)` | `(path, envoy)` pairs (**absolute** paths) |
@@ -141,6 +141,6 @@ environment.
 | `WithBlockNotFoundError` | the trace body's source could not be read |
 | `NotImplementedError` (batching) | this model can't batch multiple input invokes |
 | `ValueError: save() was called outside a trace` | move the save inside |
-| `ValueError: Cannot access ... outside of interleaving` | `.output` read outside a trace |
+| `ValueError: Cannot access ... outside of interleaving` | `.output` read outside a trace — also what an input-less `trace()` with no `invoke` says |
 
 Full diagnosis: the `nnsight-debugging` skill.

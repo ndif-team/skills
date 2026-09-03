@@ -75,6 +75,12 @@ corpus = [
 with model.trace(corpus):
     means = nnsight.save([block.output[:, -1, :].mean(0).detach() for block in model.transformer.h])
 
+# the corpus is ragged (10, 9, 7 and 9 tokens), so every row is padded to 10 — and
+# GPT-2 pads on the left, which is why `[:, -1, :]` still lands on each prompt's own
+# last token. An absolute index like `[:, 4, :]`, or a right-padding tokenizer, would
+# average pad activations here instead. Check `tokenizer.padding_side` before
+# indexing a ragged batch by position.
+
 with model.trace() as tracer:
     mean_scores = nnsight.save([])
     for layer in range(n_layers):

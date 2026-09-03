@@ -102,6 +102,40 @@ with model.trace(clean):
 print(f"layer zeroed: {float(destroyed):+.3f}  (should be far from {float(clean_metric):+.3f})")
 ```
 
+Make the extreme value zero or a real tensor, never a large constant. Every block
+reads the residual stream through a LayerNorm, which subtracts the mean and divides
+by the standard deviation, so a constant added to every channel is removed before
+anything sees it:
+
+```python
+with model.trace() as tracer:
+    probes = nnsight.save([])
+    for value in (0, 10000):
+        with tracer.invoke(clean):
+            model.transformer.h[6].output[:] += value
+            probes.append(model.output.logits[0, -1].log_softmax(-1)[paris].detach())
+    with tracer.invoke(clean):
+        model.transformer.h[6].output[..., 0] += 100
+        probes.append(model.output.logits[0, -1].log_softmax(-1)[paris].detach())
+
+added_zero, added_huge, one_channel = (float(p) for p in probes)
+print(f"+0 -> {added_zero:.5f}   +10000 -> {added_huge:.5f}   "
+      f"+100 on one channel -> {one_channel:.5f}")
+assert abs(added_huge - added_zero) < 1e-2        # the constant never arrives
+assert abs(one_channel - added_zero) > 1.0        # one channel does
+```
+
+```
++0 -> -2.65971   +10000 -> -2.65883   +100 on one channel -> -8.26438
+```
+
+Adding ten thousand to every channel moves the answer's log-probability by less
+than `1e-3`, and what little movement there is comes from float32 losing precision
+while the normalisation subtracts the constant back off.
+The same trick makes `mlp.output[:] = 1000` indistinguishable from zero-ablating
+it, so a check built on a large constant is blind to an intervention that never
+landed.
+
 **The unmodified baseline must reproduce the known behavior.** Run it in the same
 trace as the intervention, not from memory of a previous session.
 
@@ -114,7 +148,7 @@ the claim:
 |---|---|
 | this component matters | the same intervention on a random component |
 | this direction encodes X | a random direction of the same norm |
-| this circuit is the mechanism | a random subgraph of the same size |
+| this circuit is the mechanism | a random subgraph of the same size, **and the empty circuit** |
 | this probe found a representation | shuffled labels; a probe at layer 0 |
 | this steering vector works | the negated vector; a random vector |
 
@@ -140,6 +174,14 @@ print(f"random direction moved the metric by "
 ```
 
 Whatever a random direction achieves is the floor your real direction must clear.
+
+**Find the floor before you normalise to it.** A score of the form
+`(value − baseline) / (clean − baseline)` is only meaningful if the intervention can
+actually reach `baseline`. Ablating attention heads cannot reach a corrupt prompt's
+metric, because the MLPs and the residual stream are untouched, so the empty
+circuit — every candidate component ablated — is the real zero. Measuring it is one
+extra run, and without it a circuit of ten deliberately irrelevant heads can score
+85% (see the `circuit-discovery` skill, which measures exactly that).
 
 ## 5. Prompts: one is an anecdote
 

@@ -51,16 +51,22 @@ What changes under graphs:
 - **A tap can be a `.source` op** — `"model.layers.10.self_attn.source.qkv_split_0.output"`:
   the worker instruments that forward before recording, and the op is served on
   replay (reads equal eager exactly; in-place edits land). Ops inside fused kernels
-  are still not locations. nnsight `0.8` branch, after 0.8.0.
+  are still not locations. An op name the forward does not have is refused while the
+  engine builds, and the caller sees only `RuntimeError: Engine core initialization
+  failed` — the message listing the ops it *does* have is in the `(EngineCore pid=...)`
+  output above it.
 - **Only taps are served.** A read of any other module location fails when the
   request ends with `'...' is not a tap on this engine`. `model.logits`,
   `model.samples` and `tracer.result` always work.
 - **Edits land in place.** `x[:] += v` is exactly right; a replacement
-  (`layer.output = t`) is copied back into the graph's memory and must keep its
-  shape.
+  (`layer.output = t`) is copied back into the graph's memory and must keep the rows
+  the block owns — nothing checks that, and a short one reaches the copy-back with
+  the wrong height, which can take the engine down, not just the request.
 - **Clone what you keep.** The value served *is* the graph's memory, rewritten
   next step. An un-cloned list still comes back as N separate tensors (each is
-  copied at collect time), all holding the last step's values, and nothing warns.
+  copied at collect time), but every decode entry holds the last step's values and
+  nothing warns. The prefill entry is a different buffer, sized to the prompt, so it
+  survives — which is why a list of un-cloned captures looks partly right.
 - **Steer inside the `iter` loop.** An edit written before the loop fires on the
   prefill only.
 - **`torch.compile` is off** for a tapped engine; the switch is process-wide.
@@ -78,18 +84,24 @@ with model.trace(prompt, temperature=0.0, max_tokens=1):
 
 ## Measured
 
-Llama-3.1-8B, bf16, A100, 512-token prompt, 128 new tokens, greedy, tokens per
-second, capturing one layer every step, as a share of vanilla vLLM:
+Llama-3.1-8B, bf16, A100, 512-token prompt, 128 new tokens, greedy, capturing one
+layer every step. Vanilla and taps in tokens per second, taps with its share of
+vanilla in parentheses; the eager column is a share only:
 
 | | vanilla | eager | taps |
 |---|---:|---:|---:|
-| 8B, 1 GPU | 92 | 79 (85%) | 89 (96%) |
-| 8B, tp=4 | 229 | 67 (29%) | 213 (93%) |
-| 8B, tp=8 | 313 | 64 (20%) | 284 (91%) |
-| 70B, tp=8 | 61 | 28 (46%) | 58 (95%) |
+| 8B, 1 GPU | 92 | 85% | 89 (96%) |
+| 8B, tp=4 | 229 | 29% | 213 (93%) |
+| 8B, tp=8 | 313 | 20% | 284 (91%) |
+| 70B, tp=8 | 61 | 46% | 58 (95%) |
 
-The eager engine sits near 70 tok/s on 8B however many cards it has — the
-per-module Python handoff runs on the driver while the GPUs wait. Declare taps
-whenever the GPUs outnumber one. On new architectures the gap to vanilla is wider
-(Qwen3.5-0.8B: taps 59% of vanilla, eager 11%) because vanilla's `torch.compile`
-pays there and a tapped engine runs without it.
+The eager column is a share, not a rate, because an eager engine's rate is not a
+property of the card: it spends a Python round trip per module call on the driver,
+so it follows the host's spare CPU (8B plain generation: 86 tok/s on a quiet box,
+54 on a busy one, where a tapped engine gives 89 on both). It is also not nnsight's
+cost — plain `vllm.LLM(..., enforce_eager=True)` measures the same as `VLLM(...)`
+generating with no trace (69.6 / 69.7, 52.1 / 54.1, and 39.3 / 39.0 at tp=2). What
+taps buy is the graph, and the graph is what scales: declare them whenever the GPUs
+outnumber one. On new architectures the gap to vanilla is wider (Qwen3.5-0.8B: taps
+59% of vanilla, eager 11%) because vanilla's `torch.compile` pays there and a tapped
+engine runs without it.

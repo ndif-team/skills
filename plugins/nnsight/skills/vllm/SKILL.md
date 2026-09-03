@@ -70,9 +70,13 @@ vLLM's engine args (`max_model_len`, `enable_prefix_caching`, `seed`, ...). The
 engine runs eagerly, serving every location, unless you declare `taps=` — see
 [graph taps](references/graph-taps.md).
 
-Scripts need an `if __name__ == "__main__":` guard (vLLM spawns its engine core
-and re-imports the main module); set `VLLM_WORKER_MULTIPROC_METHOD=spawn`.
-`enable_prefix_caching=False` whenever you will `model.edit()`.
+Scripts need an `if __name__ == "__main__":` guard. Dispatching initializes CUDA in
+your process, so vLLM starts its EngineCore with `spawn` (it sets
+`VLLM_WORKER_MULTIPROC_METHOD` itself, logging `Reasons: CUDA is initialized`), spawn
+re-imports the main module, and a `VLLM(...)` at the top level of that module dies
+with `An attempt has been made to start a new process before the current process has
+finished its bootstrapping phase`. One GPU and `mode="sync"` included; notebooks are
+exempt. `enable_prefix_caching=False` whenever you will `model.edit()`.
 
 ## Per-step values and generation
 
@@ -107,9 +111,18 @@ assert steps[3][1] is True
 ```
 
 - `tracer.iter[:N]` is bounded so code after the loop (`tracer.result.save()`)
-  runs — but only if all `N` steps happen. A model that emits EOS at step 3 ends
-  the request there, the loop never completes, and nothing after it runs (`result`
-  is unbound). Pass `ignore_eos=True` when you rely on the count.
+  runs — but only if all `N` steps happen, and `max_tokens` is a cap, not a
+  promise: an EOS, a `stop` string, `stop_token_ids` or a `tracer.stop()` all end
+  the request early. A loop the run cannot supply — bounded or open — is cut
+  short there with a warning: what it saved comes home, the statements after the
+  loop never run, and the warning is emitted in the EngineCore subprocess, so
+  `warnings.catch_warnings` in your code never sees it. The result looks complete
+  while holding fewer steps than the bound, so check the `len()` of what you
+  collected. Hold the run to the count with `ignore_eos=True` or `min_tokens=N`
+  (vLLM's spelling; the warning text names it, alongside transformers'
+  `min_new_tokens=`), or loop with `tracer.all()` and put the trailing statements
+  in a separate `tracer.invoke()` — `tracer.result` cannot be read after the
+  `with` block.
 - **`tracer.result` must be the last read.** It is the finished `RequestOutput`,
   served after every module, `logits` and `samples` visit; a read after it raises
   `OutOfOrderError` naming that later value.
@@ -175,6 +188,15 @@ assert patched > base
 
 Many invokes still batch: a layer sweep is one trace with one patched invoke per
 layer. Index rows as `hs[POS]` (no batch axis) and write *both* elements.
+
+Writing *into* the served value, as above, always fits. A whole-value replacement
+(`layer.output = t`) is spliced back into the batch the model is running, so it
+has to keep the rows the block owns — and nothing checks that for you. A donor
+captured at a different prompt length is the usual way to get a short one; spliced
+in as given, it hands the next kernels a slab of the wrong height, and the
+mismatch can land as a device-side assert that takes the engine and every request
+in it, not just yours. Slice the donor to the rows you are writing
+(`served[POS] = donor[POS]`) rather than handing back a shorter tensor.
 
 ## Sampling parameters and `n > 1`
 
@@ -250,7 +272,7 @@ assert getattr(outputs[0], "saves", None) is not None
 `generate` (and over serve) picks which installed edits run: the named ones
 listed **plus every unnamed edit**. No `edits=` runs them all; `edits=[]` the
 unnamed only. An unknown name is refused (`ValueError` locally; the request's
-error over serve). nnsight `0.8` branch, after 0.8.0.
+error over serve).
 
 <!-- test: gpu -->
 ```python
@@ -290,9 +312,9 @@ model.clear_edits()
 ## Graph taps, serving, parallelism, architectures
 
 - **[Graph taps](references/graph-taps.md)** — `taps=[...]` keeps CUDA-graph replay
-  and serves the named locations from it: 89 vs 86 tok/s on one GPU, 284 vs 64 at
-  tp=8. Only taps are served, edits land in place, clone what you keep, hybrid
-  trunks pin decode-only graphs.
+  and serves the named locations from it: 96% of vanilla vLLM on one GPU against the
+  eager engine's 85%, and 91% against 20% at tp=8. Only taps are served, edits land
+  in place, clone what you keep, hybrid trunks pin decode-only graphs.
 - **[Serving](references/serving.md)** — `nnsight-serve`, GPU-less clients with
   `trace(..., serve=url)` and `edit(serve=url)`, the CLI's forwarded flags, and
   what the server is not (an OpenAI endpoint).
@@ -302,17 +324,33 @@ model.clear_edits()
 
 ## Not supported on the vLLM path
 
-- **Gradients / `backward()`**, **`model.scan()`**, **`.source` on fused kernels**.
+- **Gradients / `backward()`** and **`.source` inside a fused kernel** — the kernel's
+  inputs and outputs are locations, its interior is not Python.
+- **`model.scan()`** — it propagates shapes by running the model's forward under a
+  fake-tensor mode, and the forward is in the worker under `torch.inference_mode`.
+  It raises `NotImplementedError: scan is unavailable on vLLM: ... Trace a prompt
+  and read the shapes off the activations it serves.`
 - **Image/video inputs** — vision-language checkpoints load and trace on text; the
   decoder is at `model.language_model.model.layers`.
 - **Cross-invoke values and `tracer.barrier`** — two traces (above).
 - **Pipeline parallelism and speculative decoding** — shard with
-  `tensor_parallel_size`.
+  `tensor_parallel_size`. A `pipeline_parallel_size=2` engine builds and then fails
+  every trace with `RuntimeError: UnknownPersistentIdError:
+  Module:model.model.layers.12.self_attn`, naming a layer on the other stage.
 - **`model.lm_head(h)`** — raises; the unembed is
   `model.logits_processor(model.lm_head, model.model.norm(h))`.
 
 Errors raised inside the worker come back as `RuntimeError` carrying the original
-type and an "Intervention traceback" pointing at your line.
+type and an "Intervention traceback" pointing at your line — so catch `RuntimeError`
+and match on the message, not the class. Warnings do not come back: they are emitted
+by vLLM's EngineCore subprocess, so `warnings.catch_warnings()` around a trace records
+nothing — a `tracer.iter` loop that outran the run is cut short with only that
+engine-side warning, and your process sees a short result and nothing else. Once
+the engine is running, that is the one behaviour that differs from the local
+path; errors are identical. Nor does anything that fails while the engine builds
+come back as itself, including a bad `taps=` entry: the caller gets
+`RuntimeError: Engine core initialization failed. See root cause above.` and the
+real message is in the `(EngineCore pid=...)` lines above it.
 
 ## Choosing
 

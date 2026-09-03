@@ -14,17 +14,22 @@ idioms are the single most common cause.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `OutOfOrderError` | modules touched out of forward order | reorder, or split across `tracer.invoke`s |
-| `UnboundLocalError` after the block | forgot `.save()` | save it, and bind it to a name |
-| Saved list is empty / missing values | saved the elements, not the container | `nnsight.save([])` then append raw values |
+| `OutOfOrderError: … already ran past it` | modules touched out of forward order | reorder, or split across `tracer.invoke`s |
+| `UserWarning: … was never reached` and a short result | a `tracer.iter` loop asked for a step the run did not make; it was cut short | `min_new_tokens=N` (`min_tokens=`/`ignore_eos=True` on vLLM), or `tracer.all()` with the trailing code in a separate `tracer.invoke()` |
+| `UnboundLocalError` after the block | forgot `.save()`, or a loop above unwound the rest of the block | save it and bind it; check the loop's bound |
 | `ValueError: save() was called outside a trace` | save before/after the `with` | move it inside |
 | `ValueError: Cannot access ... outside of interleaving` | `.output` read outside a trace | open a trace, or use `model.scan` for shapes |
-| `WithBlockNotFoundError` (no message) | the block's source isn't on disk | run from a file/IPython, not `exec` of a string |
+| ``ValueError: … cannot start with `try:` `` | the body's first statement is a `try` | put any statement above it, or wrap the whole `with` |
+| `SyntaxError: 'return' outside function` | a `return` inside the block | save it, return after the `with` |
+| `WithBlockNotFoundError` (no message) | the block's source isn't on disk | run from a file/IPython, not stdin or `exec` of a string |
+| `AttributeError: 'NoneType' object has no attribute 'event'` | `model.trace(...)` nested inside another trace | `model.session()`, or sibling invokes |
 | `AttributeError: ... has attribute 'model'` | wrong module path for this architecture | `scripts/inspect_model.py` in the `nnsight` skill |
 | `TypeError: 'tuple' object does not support item assignment` | assigning into a tuple output | `out[0][:] = x`, or rebuild and assign the tuple |
+| Shape error deep in a later module of a batched trace | a whole-tensor write changed an invoke's row count — nothing checks it at the write | build the replacement from the activation you were served |
 | Intervention has no effect | wrote to a copy, or indexed a tensor as if it were a tuple | see [Silent failures](#silent-failures) |
-| Everything after a loop is missing | unbounded `tracer.iter[:]` / `tracer.all()` | bound it: `tracer.iter[:N]` |
-| `NameError` on a value from another invoke | read before the producer ran | `tracer.barrier(n)` |
+| Everything after a loop is missing | a `tracer.iter` loop — bounded or open — outran the run | pin the run to the bound (`min_new_tokens=`), or move the trailing code to a separate `tracer.invoke()` |
+| Saved list is empty **when run remotely** | saved the elements, not the container | `nnsight.save([])` then append raw values |
+| `NameError` on a value from another invoke | read before the producer ran, or a `tracer.barrier(n)` whose `n` is too small released it early | `tracer.barrier(n)` with the true block count, then call it: `b()` |
 | `NotImplementedError: ... batching multiple invokes` | base `NNsight` with 2+ input invokes | one invoke, or implement `_batch_size`/`_batch` |
 | Remote job errors or returns nothing | serialization / save rules differ remotely | the `nnsight-remote` skill |
 
@@ -71,15 +76,69 @@ with model.trace() as tracer:
     with tracer.invoke(prompt):
         early = model.transformer.h[2].output.save()
 
-print(late.shape, early.shape)
+assert late.shape == early.shape == (1, 10, 768)   # each invoke sees its own rows
 ```
 
 3. **Cache** if you want many modules regardless of order:
    `cache = tracer.cache()`.
 
+Inside a `tracer.iter` loop, an out-of-order body does not always announce
+itself: it shifts every request one step later, and that only surfaces when a
+shifted request runs off the end of the run — at step 0 as this error, past it
+as the cut-short warning. A bound that stops short of the run's last step
+completes silently with its writes on the wrong steps — see
+[references/error-catalogue.md](references/error-catalogue.md).
+
 The same error appears when you request a module the run never reached — after
 `tracer.stop()`, on a `.skip()`ped module's children, or past the point where
 generation ended.
+
+## A loop that outran the run
+
+A loop that asks for a step the run does not make is cut short there — the
+worker is unwound *at the loop*, so every statement after it is discarded, and
+the only signal is a warning. What the loop saved is kept, so the result looks
+complete while holding fewer steps than the bound named:
+
+```python
+import warnings
+
+ids = None
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    with model.generate(prompt, max_new_tokens=3) as tracer:
+        seen = nnsight.save([])
+        for step in tracer.iter[:20]:          # the run makes 3 steps, not 20
+            seen.append(model.output.logits[0, -1].argmax(dim=-1))
+        ids = tracer.result.save()
+
+assert len(seen) == 3                          # short, and nothing raised
+assert ids is None                             # the save after the loop never ran
+assert any("was never reached" in str(w.message) for w in caught)
+```
+
+Pin the run to the count the loop asks for:
+
+```python
+with model.generate(prompt, max_new_tokens=3, min_new_tokens=3) as tracer:
+    seen = nnsight.save([])
+    for step in tracer.iter[:3]:
+        seen.append(model.output.logits[0, -1].argmax(dim=-1))
+    ids = tracer.result.save()
+
+assert len(seen) == 3
+assert ids.shape[-1] == len(model.tokenizer.encode(prompt)) + 3
+```
+
+If the step count isn't knowable in advance, loop with `tracer.all()` and put
+whatever follows the loop in a separate `tracer.invoke()` — an open loop ends by
+outrunning the run, and the values saved inside it survive. Trailing code goes in
+an invoke rather than after the `with` because `tracer.result` outside the block
+raises ``Cannot access `result` outside of interleaving``.
+
+A stop string beats both minimums: `stop_strings=["Paris"]` still ends the run
+early, so a bounded loop over that generation is still cut short even with
+`min_new_tokens=` set. Use `tracer.all()` when the run has stop conditions.
 
 ## Nothing came back
 
@@ -97,8 +156,8 @@ def get_hidden():
 get_hidden()
 ```
 
-**Saved the elements instead of the container** — this one is silent locally and
-empty remotely:
+**Saved the elements instead of the container** — this one collects values locally
+and comes back empty remotely:
 
 ```python
 with model.trace(prompt):
@@ -106,12 +165,17 @@ with model.trace(prompt):
     for block in model.transformer.h:
         right.append(block.output[0, -1])          # append raw values
 
-print(len(right))                                  # 12
+assert len(right) == 12
 ```
 
-**Marked a value with no name to return it under.** `.save()` returns the value by
-its *variable name*; a bare `model.output.logits.save()` on its own line marks
-something with no local to carry it back, and it silently never appears.
+**Marked a value with no name to return it under.** `save` records the object's
+identity and the block returns every local bound to a marked object, so a bare
+`model.output.logits.save()` on its own line marks something no local carries
+back, and it never appears. Bind it.
+
+The same identity rule means a saved value Python interns — a small int, `True`,
+`None` — also brings back any unrelated local holding the same object. Harmless,
+but it explains a name that is defined after the block when you never saved it.
 
 ## "Cannot access outside of interleaving"
 
@@ -129,14 +193,18 @@ hidden = model.transformer.h[0].output
 If you wanted shapes rather than values, use `model.scan(prompt)` — no weights, no
 compute. If you wanted values, open a trace.
 
-## WithBlockNotFoundError
+## The block never ran at all
 
-Raised with **no message**. nnsight reads the `with` block's source text to compile
-it; if the source isn't retrievable, there is nothing to run. Triggers:
-`exec(compile(source_string, ...))`, some bare REPLs, and dynamically generated
-code. Run from a real file, IPython, or a notebook.
+Three ways a `with` block is refused before anything executes.
 
-The related one:
+**`WithBlockNotFoundError`**, raised with no message. nnsight reads the `with`
+block's source text to compile it; if the source isn't retrievable, there is
+nothing to run. Triggers: a script piped to the interpreter
+(`python < s.py`, `cat s.py | python`), `exec(compile(source_string, ...))`, and
+generated code. Run from a real file, IPython, or a notebook — `python -c "..."`
+is fine.
+
+**The body has to start on its own line**:
 
 ```
 ValueError: The body of a traced `with` must start on its own line; nnsight runs
@@ -144,6 +212,33 @@ the body itself, and can only intercept it at the start of a line.
 ```
 
 Never write `with model.trace(x): out = ...` on one line.
+
+**The body cannot start with `try:`**:
+
+```
+ValueError: A traced `with` block cannot start with `try:`; nnsight intercepts the
+body at its first line, and a `try` there is the one statement Python gives it no
+way back out of. Put any statement above the `try`, or move the `try` outside the
+block.
+```
+
+nnsight stops the interpreter running the body inline by raising at the body's
+first line and catching that raise in the `with`; CPython gives the `try`
+keyword's line no exception-table entry to route it through. Wrapping the whole
+`with` in a `try` works, and so does any statement above it — only the first
+statement is the cue:
+
+```python
+with model.trace(prompt):
+    hidden = model.transformer.h[0].output      # any statement above the try
+    try:
+        head = hidden[0, -1]
+    except IndexError:
+        head = None
+    kept = nnsight.save(head)
+
+assert kept.shape == (768,)
+```
 
 ## Silent failures
 
@@ -159,14 +254,15 @@ with model.trace(prompt):
     whole = model.transformer.h[5].output.save()          # [batch, seq, hidden]
     row0 = model.transformer.h[5].output[0].save()        # [seq, hidden] — a row!
 
-print(whole.shape, row0.shape)
+assert whole.shape == (1, 10, 768)
+assert row0.shape == (10, 768)
 ```
 
 Check with `isinstance(x, tuple)` or `scripts/inspect_model.py --prompt ...`.
 
-**An unbounded iteration loop swallowing trailing code.** `tracer.all()` and
+**An open iteration loop swallowing trailing code.** `tracer.all()` and
 `tracer.iter[:]` unwind at the final over-run step, dropping every later line in
-that invoke:
+that invoke. Only a warning marks it:
 
 ```python
 with model.generate(prompt, max_new_tokens=3) as tracer:
@@ -175,11 +271,9 @@ with model.generate(prompt, max_new_tokens=3) as tracer:
         seen.append(model.output.logits[0, -1].argmax(dim=-1))
     after_the_loop = nnsight.save("this line never runs")
 
-print(len(seen))                             # 3 — the loop's own values survive
-print("after_the_loop" in globals())         # False — the trailing line was dropped
+assert len(seen) == 3                        # the loop's own values survive
+assert "after_the_loop" not in globals()     # the trailing line was dropped
 ```
-
-Bound the loop (`tracer.iter[:3]`) and the trailing code runs.
 
 **An intervention that never took effect.** Assigning to a local doesn't change
 the model — you must write through the property:
@@ -194,6 +288,7 @@ with model.trace(prompt):
     model.transformer.h[5].output[:] = 0   # writes through the property
     changed = model.output.logits[0, -1].argmax().save()
 
+assert unchanged.item() != changed.item()
 print(model.tokenizer.decode(unchanged), "|", model.tokenizer.decode(changed))
 ```
 
@@ -210,6 +305,8 @@ with model.trace(prompt):
     resid = model.transformer.h[5].output
     print("layer 5:", resid.shape, resid.dtype, resid.device, resid.detach().norm().item())
     logits = model.output.logits.save()
+
+assert logits.shape == (1, 10, 50257)
 ```
 
 Remotely, `print` output comes back as log lines — far cheaper than saving a
@@ -217,13 +314,17 @@ tensor just to look at it.
 
 **Check shapes without running:** `with model.scan(prompt):` gives fake tensors
 with real shapes. Do not branch on their *values* — that raises
-`GuardOnDataDependentSymNode`.
+`GuardOnDataDependentSymNode`. `scan` is unavailable on vLLM, which refuses it
+with a `NotImplementedError` explaining why.
 
 **See inside a forward:** `print(model.transformer.h[0].mlp.source)` lists every
-hookable operation, outside a trace.
+operation you can reach, outside a trace.
 
 **Full tracebacks:** nnsight strips its own frames by default so errors point at
-your code. To see everything:
+your code. Frames from torch and transformers stay, so a failure caused by a
+badly shaped write arrives with the model's stack under it and does *not* name the
+line that wrote the value — read the `with` line at the top and check your writes.
+To see everything:
 
 ```python
 nnsight.CONFIG.APP.DEBUG = True
@@ -243,6 +344,11 @@ If the code you are fixing uses `.value`, `nnsight.list()`, `tracer.next()`,
 "proxies", it targets a pre-0.8 nnsight. Do not patch it line by line — translate
 it with [references/porting-pre-0.8.md](references/porting-pre-0.8.md), which maps
 every removed idiom to its 0.8 form.
+
+Run it with warnings visible while you port: every name that still works under an
+old spelling raises `nnsight.NNsightDeprecationWarning` naming its replacement,
+and being a `FutureWarning` it shows from a package or helper module, not just
+from `__main__`.
 
 ## Related skills
 
