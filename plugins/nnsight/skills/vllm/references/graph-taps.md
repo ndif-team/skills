@@ -51,16 +51,22 @@ What changes under graphs:
 - **A tap can be a `.source` op** — `"model.layers.10.self_attn.source.qkv_split_0.output"`:
   the worker instruments that forward before recording, and the op is served on
   replay (reads equal eager exactly; in-place edits land). Ops inside fused kernels
-  are still not locations. nnsight `0.8` branch, after 0.8.0.
+  are still not locations. An op name the forward does not have is refused while the
+  engine builds, and the caller sees only `RuntimeError: Engine core initialization
+  failed` — the message listing the ops it *does* have is in the `(EngineCore pid=...)`
+  output above it.
 - **Only taps are served.** A read of any other module location fails when the
   request ends with `'...' is not a tap on this engine`. `model.logits`,
   `model.samples` and `tracer.result` always work.
 - **Edits land in place.** `x[:] += v` is exactly right; a replacement
-  (`layer.output = t`) is copied back into the graph's memory and must keep its
-  shape.
+  (`layer.output = t`) is copied back into the graph's memory and must keep the rows
+  the block owns — a short one is refused with `A batched write has to keep its rows:
+  ... must be (9, 576), not (2, 576)` before the model sees it.
 - **Clone what you keep.** The value served *is* the graph's memory, rewritten
   next step. An un-cloned list still comes back as N separate tensors (each is
-  copied at collect time), all holding the last step's values, and nothing warns.
+  copied at collect time), but every decode entry holds the last step's values and
+  nothing warns. The prefill entry is a different buffer, sized to the prompt, so it
+  survives — which is why a list of un-cloned captures looks partly right.
 - **Steer inside the `iter` loop.** An edit written before the loop fires on the
   prefill only.
 - **`torch.compile` is off** for a tapped engine; the switch is process-wide.
