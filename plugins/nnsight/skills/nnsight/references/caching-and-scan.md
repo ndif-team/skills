@@ -143,7 +143,7 @@ assert out.shape[1] == 8
 `out.mean(1)` there is three quarters padding. Index from the right (`[:, -1]` is
 stable, the padding is on the left) or mask before reducing. This costs more in a
 cache than in a `.save()`, because nobody eyeballs twelve layers times N invokes.
-`batching.md` has the mechanism.
+[batching.md](batching.md) has the mechanism.
 
 To capture the whole combined batch, open the cache in an empty `tracer.invoke()`:
 
