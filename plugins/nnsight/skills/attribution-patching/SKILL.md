@@ -62,6 +62,8 @@ attribution = [
     for i in range(n_layers)
 ]
 
+assert len(attribution) == n_layers and max(attribution) > 1.0
+
 for layer, score in enumerate(attribution):
     print(f"layer {layer:2d}  attribution {score:+.4f}")
 ```
@@ -78,57 +80,84 @@ the corrupt pass in `torch.no_grad()`.
 ## Validate before you trust it
 
 The approximation is only useful if it ranks components the way real patching
-does. You already have both, so measure it — on this prompt pair, against the real
-patching sweep:
+does. You already have both halves, so measure the agreement before you believe a
+heatmap. Patch one layer at a time — a *slice* of the residual, not all of it —
+and correlate the real effect against the attribution restricted to that same
+slice:
 
 ```python
-with model.trace() as tracer:
-    real = nnsight.save([])
-    for layer in range(n_layers):
-        with tracer.invoke(corrupt):
-            model.transformer.h[layer].output[:] = clean_acts[layer]
-            logits = model.output.logits[0, -1]
-            real.append((logits[paris] - logits[rome]).detach())
+def validate(positions, name):
+    approx = torch.tensor([
+        float(((clean_acts[i] - corrupt_acts[i]) * grads[i])[:, positions].sum())
+        for i in range(n_layers)
+    ])
 
-real_effects = torch.tensor([float(x) for x in real])
-approx = torch.tensor(attribution)
+    # Keyed by layer, not appended: values come back in the order the model
+    # reaches the invokes, which is not necessarily the order you wrote them.
+    with model.trace() as tracer:
+        real = nnsight.save({})
+        for layer in range(n_layers):
+            with tracer.invoke(corrupt):
+                model.transformer.h[layer].output[:, positions] = clean_acts[layer][:, positions]
+                patched = model.output.logits[0, -1]
+                real[layer] = (patched[paris] - patched[rome]).detach()
 
-centered_a = approx - approx.mean()
-centered_r = real_effects - real_effects.mean()
-correlation = (centered_a @ centered_r) / (centered_a.norm() * centered_r.norm())
+    real_effects = torch.tensor([float(real[i]) for i in range(n_layers)])
 
-print(f"rank agreement (Pearson r) = {correlation.item():+.3f}")
+    # Layers that all return the same metric leave nothing to correlate against.
+    assert real_effects.std() > 0.5, f"{name}: degenerate sweep, std {real_effects.std():.2e}"
+
+    centered_a = approx - approx.mean()
+    centered_r = real_effects - real_effects.mean()
+    r = float((centered_a @ centered_r) / (centered_a.norm() * centered_r.norm()))
+    print(f"{name:<20} real-effect spread {real_effects.std():.4f}   Pearson r {r:+.3f}")
+    return approx, real_effects, r
+
+
+SUBJECT = slice(1, 5)        # ' Col', 'os', 'se', 'um' — the corrupt prompt's subject
+LAST = slice(-1, None)
+
+approx, real_effects, r_subject = validate(SUBJECT, "subject positions")
+_, _, r_last = validate(LAST, "last position")
+
 print(f"top-3 by attribution: {torch.topk(approx, 3).indices.tolist()}")
 print(f"top-3 by real patch:  {torch.topk(real_effects, 3).indices.tolist()}")
+assert r_last > r_subject
 ```
 
 On this prompt pair that prints:
 
 ```
-rank agreement (Pearson r) = -0.357
-top-3 by attribution: [11, 10, 9]
-top-3 by real patch:  [3, 2, 10]
+subject positions    real-effect spread 1.5652   Pearson r +0.168
+last position        real-effect spread 1.4942   Pearson r +0.999
+top-3 by attribution: [7, 6, 5]
+top-3 by real patch:  [2, 0, 1]
 ```
 
-**Negative.** Attribution and real patching disagree about which layers matter —
-and this is not a bug in the code, it is the method's failure condition. Swapping
-an entire layer's residual stream is an enormous perturbation, far outside the
-regime where a first-order term means anything.
-
-Shrink the intervention and the approximation recovers. Measured on the same
-prompt pair, patching progressively smaller slices:
+Two sizes of intervention, two verdicts. At one position the linearization is
+nearly exact and the rankings agree. Across the four subject tokens it falls to
+`+0.168`, and the top-3 lists share no layer at all — swapping four positions of
+residual at once moves the run well outside the regime a first-order term
+describes.
 
 | What is patched | Pearson r vs real patching |
 |---|---|
-| the whole residual stream at a layer | **−0.357** |
-| the subject-token positions only | +0.168 |
 | the last position only | **+0.999** |
+| four subject-token positions | +0.168 |
 
 The rule that falls out: **attribution patching is trustworthy for small, local
-interventions and untrustworthy for large ones.** Patch a position, a head, or a
-feature — not a whole layer. And run this correlation check on your own task
-before believing a heatmap; it costs one extra sweep and it is the difference
-between a screening tool and a random number generator.
+interventions and decays as the intervention grows.** Patch a position, a head,
+or a feature. And run this check on your own task before believing a heatmap; it
+costs one extra sweep and it is the difference between a screening tool and a
+random number generator.
+
+**Why the sweep asserts a spread.** Patch a layer's *entire* residual output and
+the sweep stops measuring anything. Overwriting all of layer L with the clean
+activation makes everything after it a deterministic function of a clean state,
+so every layer returns exactly the clean metric — `2.4247` at all twelve layers
+here, with a spread of `1.2e-05`. Correlating attribution against that vector is
+rounding error over rounding error, and it prints a confident-looking number
+either way. The assertion is what makes that failure loud instead of publishable.
 
 ## Per-position heatmap
 
@@ -142,6 +171,8 @@ heatmap = torch.stack([
 ])
 
 tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(corrupt).input_ids]
+assert heatmap.shape == (n_layers, len(tokens))
+
 print(f"{'token':<12}" + "".join(f"L{l:<7}" for l in range(0, 12, 3)))
 for pos, token in enumerate(tokens):
     row = "".join(f"{heatmap[l, pos]:+.3f} " for l in range(0, 12, 3))
@@ -181,6 +212,8 @@ for layer in range(n_layers):
         lo, hi = head * head_dim, (head + 1) * head_dim
         scores[layer, head] = delta[..., lo:hi].sum()
 
+assert scores.shape == (n_layers, n_heads) and scores.abs().max() > 0
+
 flat = scores.flatten().abs().topk(5).indices
 for index in flat.tolist():
     layer, head = divmod(index, n_heads)
@@ -202,7 +235,7 @@ discovery — see the `circuit-discovery` skill.
 
 | Condition | Effect |
 |---|---|
-| Large intervention (a whole layer, a whole prompt's worth of positions) | the ranking can *invert* — measured r = −0.357 above. Keep interventions local |
+| Large intervention (many positions at once, or a whole layer) | agreement decays toward chance — `+0.999` at one position against `+0.168` across four, measured above. Keep interventions local |
 | Saturated metric (softmax probability near 0 or 1) | gradients vanish; everything scores ~0. Use a logit difference, not a probability |
 | Components whose effect is gated or thresholded | attribution can be near zero for a component that fully controls the output |
 | Very deep interactions | error compounds across layers; treat late-layer scores more cautiously |
