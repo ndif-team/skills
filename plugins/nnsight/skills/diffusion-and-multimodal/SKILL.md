@@ -231,9 +231,10 @@ float32.
 
 `with sd.generate(...)` is a *traced* run, and a traced run defaults to
 `num_inference_steps=1`. The same call means one denoising step inside a `with`
-and the pipeline's default outside it. On SD 1.4 that is 1 forward versus 51,
-and one step gives a noise blob rather than an image, silently. Name the step
-count on every traced generation you want to look at.
+and the pipeline's default outside it. On SD 1.4 that is 1 denoiser forward
+against 51, and a single step gives a noise blob rather than an image with
+nothing printed to say so. Name the step count on every traced generation whose
+image you intend to look at.
 
 ### Per-timestep interventions
 
@@ -300,11 +301,11 @@ assert distances[0] > distances[21]
 {0: 0.2296, 6: 0.1796, 12: 0.1513, 21: 0.0926}
 ```
 
-Deeper layers land closer to the image the full encoder produces. What the images
-*show* is the interesting part: CLIP encoders settle on a compound prompt's first
-noun early and add the second later, T5 encoders the other way round. The
-`diffusion_lens.ipynb` tutorial runs the sweep on SD 1.5, Deep Floyd, SDXL and
-FLUX with the per-encoder module paths for each.
+Deeper layers land closer to the image the full encoder produces. The images
+themselves are the result worth looking at: Toker et al. report that CLIP
+encoders settle on a compound prompt's first noun early and add the second later,
+while T5 encoders do the reverse. The `diffusion_lens.ipynb` tutorial reproduces
+that on SD 1.5, Deep Floyd, SDXL and FLUX, with the module paths for each.
 
 Module paths for the lens differ by encoder: CLIP layers are
 `text_encoder.encoder.layers[i]` and return a tensor; T5 blocks are
@@ -358,8 +359,8 @@ step 5: latent 0.838   conv_out 0.219
 across steps all end up holding the last step's data.
 
 Guidance doubles the denoiser's batch. `guidance_scale=0.0` above keeps it at one
-row; at any guidance scale above 1 the rows are the unconditional half followed
-by the conditional half, so `preview[0]` is the image for the *empty* prompt.
+row; above 1 the rows are the unconditional half followed by the conditional
+half, so row 0 decodes to the empty prompt's image, not the prompt's.
 
 ### Cross-attention: where the prompt acts
 
@@ -401,7 +402,8 @@ depends on the task, and the others are `None`:
 |---|---|
 | `image-text-to-text` | `processor`, `tokenizer` (from the processor) |
 | `image-classification`, `image-feature-extraction` | `image_processor` |
-| `automatic-speech-recognition`, `audio-classification` | `feature_extractor`, `tokenizer` for ASR |
+| `automatic-speech-recognition` | `feature_extractor`, `tokenizer` |
+| `audio-classification` | `feature_extractor` |
 | `fill-mask`, `text-classification`, `token-classification` | `tokenizer` |
 
 `model.tokenizer` is populated on a VLM. It is `None` for the tasks with no text
@@ -491,9 +493,8 @@ and move between `transformers` releases. Inspect first.
 
 **`scan` fails on some VLM families** with
 `GuardOnDataDependentSymNode`: preprocessing takes a size that depends on tensor
-*data*, which fake tensors cannot supply. It raises on Idefics3 and Qwen3-VL
-(inside `get_vision_bilinear_indices_and_weights`) and succeeds on both Llava
-variants. Run a real trace when `scan` refuses.
+*data*, which fake tensors cannot supply. It raises on Idefics3 and Qwen3-VL and
+succeeds on both Llava variants. Run a real trace when `scan` refuses.
 
 **Diffusion has no single "output token".** Metrics are image-space or
 latent-space, so decide what you are measuring before intervening; the
