@@ -454,7 +454,7 @@ assert short.shape[0] == 1 and windows.shape[0] == 7
 torch.Size([1, 18, 2]) torch.Size([7, 512, 2])
 ```
 
-Four things to know about these tasks:
+Five things to know about these tasks:
 
 - A chunked invoke is the whole batch. The row count belongs to the task, so
   putting one next to another invoke is refused with `task=... splits this invoke
@@ -469,6 +469,11 @@ Four things to know about these tasks:
   image before yielding one input per batch of candidate points, so there is no
   single forward to assemble. Use `model.pipe(image)`, or build an encoding with
   `model.image_processor` and pass the points as `input_points=`.
+- `keypoint-matching` is refused too, for a different reason: its unit input is
+  a *pair* of images, which a trace's list convention (one prompt per element)
+  would split. Use `model.pipe([image_a, image_b])`, or trace an encoding you
+  build with `model.image_processor(images=[image_a, image_b],
+  return_tensors='pt')`.
 
 ```python
 zero_shot = TransformersModel("hf-internal-testing/tiny-random-DistilBertForSequenceClassification",
