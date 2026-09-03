@@ -238,11 +238,13 @@ with model.generate(["The Eiffel Tower is in", "The Colosseum is in"],
     ids = tracer.result.save()
 
 assert tuple(ids.shape) == (2, 10)      # left-padded to the longer prompt, + 3 new
-print([model.tokenizer.decode(row) for row in ids])
+print([model.tokenizer.decode(row, skip_special_tokens=True) for row in ids])
 ```
 
-Prompts are left-padded to the longest. Each invoke keeps its own step counter, so
-different invokes can iterate over different ranges.
+Prompts are left-padded to the longest, and the padding is still in
+`tracer.result`, so decode with `skip_special_tokens=True` unless you want it.
+Each invoke keeps its own step counter, so different invokes can iterate over
+different ranges.
 
 ## Chat models
 
