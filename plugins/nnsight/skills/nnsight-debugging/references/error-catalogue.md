@@ -79,10 +79,10 @@ run rather than at the line that caused it. Reorder the body.
 
 | Exception | Message | Cause → fix |
 |---|---|---|
-| `ValueError` | ``A barrier was never reached by every block it waits for; check the count it was created with`` | `tracer.barrier(n)` with `n` larger than the number of blocks that call it → pass the true count. **Call the barrier, don't wait on it**: `b = tracer.barrier(2)` then `b()`. There is no `b.wait()` |
+| `ValueError` | ``A barrier was never reached by every block it waits for; check the count it was created with`` | `tracer.barrier(n)` with `n` **larger** than the number of blocks that call it → pass the true count. This is the safe way to get the count wrong: it is loud, and it fails at run end without having released anything. A count that is too *small* releases early and says nothing — see the `NameError` row. **Call the barrier, don't wait on it**: `b = tracer.barrier(2)` then `b()`. There is no `b.wait()` |
 | `ValueError` | ``A batched `.skip()` has to cover every row: skip the module in every invoke, or none — a shared forward can't run for only the rows an invoke left unskipped.`` | `.skip()` in some invokes but not others → skip in all of them or none |
 | `ValueError` | ``A batched write has to keep its rows: this block owns rows 0:1 of 2, so the replacement must be (1, 7, 768), not (2, 7, 768).`` | a whole-tensor write inside one invoke of a batch, with a different leading dim → build the replacement from the activation you were served. A lone invoke *is* the batch and may reshape freely |
-| `NameError` | ``name 'src' is not defined`` | a value from another invoke read before its producer ran → `tracer.barrier(n)`, or park the reader past the producing module first |
+| `NameError` | ``name 'src' is not defined`` | **(a)** a value from another invoke read before its producer ran → `tracer.barrier(n)`, or park the reader past the producing module first. **(b)** a `tracer.barrier(n)` whose `n` is *smaller* than the number of blocks holding it: it releases as soon as `n` of them arrive, so the waiting blocks resume before the producer has bound its value. Nothing mentions the barrier — the name in the message is the tell. Count the blocks that call it. See `docs/usage/barrier.md` |
 
 ## Values and shapes
 

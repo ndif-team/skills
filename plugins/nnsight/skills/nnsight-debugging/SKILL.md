@@ -29,7 +29,7 @@ idioms are the single most common cause.
 | Intervention has no effect | wrote to a copy, or indexed a tensor as if it were a tuple | see [Silent failures](#silent-failures) |
 | Everything after a loop is missing | an open `tracer.iter[:]` / `tracer.all()` | bound it and pin the run, or move the trailing code past the `with` |
 | Saved list is empty **when run remotely** | saved the elements, not the container | `nnsight.save([])` then append raw values |
-| `NameError` on a value from another invoke | read before the producer ran | `tracer.barrier(n)`, then call it: `b()` |
+| `NameError` on a value from another invoke | read before the producer ran, or a `tracer.barrier(n)` whose `n` is too small released it early | `tracer.barrier(n)` with the true block count, then call it: `b()` |
 | `NotImplementedError: ... batching multiple invokes` | base `NNsight` with 2+ input invokes | one invoke, or implement `_batch_size`/`_batch` |
 | Remote job errors or returns nothing | serialization / save rules differ remotely | the `nnsight-remote` skill |
 
