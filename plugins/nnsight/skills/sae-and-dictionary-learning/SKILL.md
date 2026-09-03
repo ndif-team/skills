@@ -170,13 +170,12 @@ fit vectors: (83, 768)  held-out vectors: (47, 768)
 
 **Mask the padding.** Everything inside one `trace(...)` is left-padded to the
 longest input in the batch, so a plain `.reshape(-1, d_model)` over this corpus
-would hand the optimizer 112 vectors of which 29 are pad. They are not small
-vectors: at GPT-2's layer 6 the mean residual norm is 3118 on a pad position
-against 377 on a real one, 8.3x, so an unmasked dictionary spends real capacity
-modelling the padding and every downstream feature ranking is contaminated by it.
-The ratio is architecture-specific — pythia-70m's pad residuals are *smaller*
-than its real ones (0.4x) — so measure it rather than assuming either way. The
-`nnsight` skill → batching has the padding rule itself.
+would hand the optimizer 112 vectors of which 29 are pad. They are not small: at
+GPT-2's layer 6 the mean residual norm is 3118 on a pad position against 377 on a
+real one. An unmasked dictionary spends capacity modelling the padding, and every
+feature ranking downstream inherits it. The ratio is architecture-specific, and
+pythia-70m's pad residuals are *smaller* than its real ones, so measure rather
+than assume. The `nnsight` skill → batching has the padding rule itself.
 
 **Collect a held-out set.** Metrics computed on the tensor the dictionary was fit
 to answer a different question from the one you want. See the evaluation section.
@@ -323,9 +322,8 @@ applied at the wrong point produces plausible-looking garbage.
 
 ## Feature analysis
 
-**Max-activating examples** — what makes a feature fire. Rank over real tokens
-only: a batch of examples is left-padded to its longest member, and on GPT-2 an
-SAE fires *hardest* on the pad positions.
+**Max-activating examples** — what makes a feature fire. Mask the padding here
+too, for the same reason as during collection:
 
 ```python
 examples = [
@@ -367,11 +365,10 @@ live features: 1678
 feature 376 fires hardest on 'Dogs are loyal pets.' at token 'D'
 ```
 
-Without `masked_fill`, 327 of those 1,678 features would be reported against a pad
-position, and the left-padding correction turns negative there — so a
+Without `masked_fill`, 327 of those 1,678 features get reported against a pad
+position. The left-padding correction turns negative there, so a
 `tokens[max(0, position)]` guard prints token 0 of some example and reads like an
-answer. Masking is what makes the printed token real. Bound `position` and let it
-raise if it is not.
+answer. Bound `position` and let it raise instead.
 
 Interpret features from a *large* corpus of max-activating examples, not four
 sentences, and check the bottom of the distribution too, since a feature that
