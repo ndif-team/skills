@@ -84,18 +84,24 @@ with model.trace(prompt, temperature=0.0, max_tokens=1):
 
 ## Measured
 
-Llama-3.1-8B, bf16, A100, 512-token prompt, 128 new tokens, greedy, tokens per
-second, capturing one layer every step, as a share of vanilla vLLM:
+Llama-3.1-8B, bf16, A100, 512-token prompt, 128 new tokens, greedy, capturing one
+layer every step. Vanilla and taps in tokens per second, taps with its share of
+vanilla in parentheses; the eager column is a share only:
 
 | | vanilla | eager | taps |
 |---|---:|---:|---:|
-| 8B, 1 GPU | 92 | 79 (85%) | 89 (96%) |
-| 8B, tp=4 | 229 | 67 (29%) | 213 (93%) |
-| 8B, tp=8 | 313 | 64 (20%) | 284 (91%) |
-| 70B, tp=8 | 61 | 28 (46%) | 58 (95%) |
+| 8B, 1 GPU | 92 | 85% | 89 (96%) |
+| 8B, tp=4 | 229 | 29% | 213 (93%) |
+| 8B, tp=8 | 313 | 20% | 284 (91%) |
+| 70B, tp=8 | 61 | 46% | 58 (95%) |
 
-The eager engine sits near 70 tok/s on 8B however many cards it has — the
-per-module Python handoff runs on the driver while the GPUs wait. Declare taps
-whenever the GPUs outnumber one. On new architectures the gap to vanilla is wider
-(Qwen3.5-0.8B: taps 59% of vanilla, eager 11%) because vanilla's `torch.compile`
-pays there and a tapped engine runs without it.
+The eager column is a share, not a rate, because an eager engine's rate is not a
+property of the card: it spends a Python round trip per module call on the driver,
+so it follows the host's spare CPU (8B plain generation: 86 tok/s on a quiet box,
+54 on a busy one, where a tapped engine gives 89 on both). It is also not nnsight's
+cost — plain `vllm.LLM(..., enforce_eager=True)` measures the same as `VLLM(...)`
+generating with no trace (69.6 / 69.7, 52.1 / 54.1, and 39.3 / 39.0 at tp=2). What
+taps buy is the graph, and the graph is what scales: declare them whenever the GPUs
+outnumber one. On new architectures the gap to vanilla is wider (Qwen3.5-0.8B: taps
+59% of vanilla, eager 11%) because vanilla's `torch.compile` pays there and a tapped
+engine runs without it.
