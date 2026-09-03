@@ -140,15 +140,19 @@ with model.trace(prompt):
 print(grad.shape)
 ```
 
-**Generation** — bound your iteration loop, or trailing code is dropped:
+**Generation** — a `tracer.iter` loop must not ask for a step the run does not
+make. A bound the run meets keeps the code after the loop; one it does not raises
+`OutOfOrderError`. `max_new_tokens` is an upper bound, so pass `min_new_tokens=`
+when the bound has to hold:
 
 ```python
-with model.generate(prompt, max_new_tokens=3) as tracer:
+with model.generate(prompt, max_new_tokens=3, min_new_tokens=3) as tracer:
     picks = nnsight.save([])
-    for step in tracer.iter[:3]:                 # bounded, so `ids` still runs
+    for step in tracer.iter[:3]:
         picks.append(model.output.logits[0, -1].argmax(dim=-1))
     ids = tracer.result.save()
 
+assert len(picks) == 3
 print(model.tokenizer.decode(ids[0]))
 ```
 
