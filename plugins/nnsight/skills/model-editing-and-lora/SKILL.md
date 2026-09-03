@@ -38,18 +38,71 @@ future run. Nothing about the weights changes.
 
 ```python
 with model.edit(inplace=True):
-    model.transformer.h[9].output[:, -1, :] *= 1.5
+    model.transformer.h[9].output[:, -1, :] = 0
 
 with model.trace(prompt):
     edited = model.output.logits[0, -1].argmax().save()
 
 print(f"with edit: {model.tokenizer.decode(edited)!r}")
+assert int(edited) != int(original)
 model.clear_edits()
+```
+
+```
+original prediction: ' Paris'
+with edit: ' and'
 ```
 
 Use `model.edit()` without `inplace=True` to get an edited *copy* sharing the same
 weights — the safe default when you want to compare against the original. See the
 `nnsight` skill → control flow.
+
+### Two boundaries an edit does not cross
+
+Both are silent, and both cost an afternoon the first time.
+
+**An edit belongs to the envoy you stored it on.** A trace replays only the edits
+of the envoy it is rooted at, so an edit stored on a layer does nothing when you
+trace the model, and the model's `clear_edits()` does not remove it:
+
+```python
+with model.transformer.h[9].edit(inplace=True):
+    model.transformer.h[9].output[:] = 0
+
+with model.trace(prompt):
+    unaffected = model.output.logits[0, -1].argmax().save()
+
+print(f"root trace: {model.tokenizer.decode(unaffected)!r}")   # ' Paris'
+assert int(unaffected) == int(original)
+
+model.clear_edits()
+assert len(model.transformer.h[9]._edits) == 1                 # still there
+model.transformer.h[9].clear_edits()                           # this clears it
+```
+
+Store the edit on the model and write the layer's path inside it instead.
+
+**An edit applies through the interleaver, not to the module.** `model.trace(...)`,
+`model.generate(...)`, `model.pipe(...)` and `model.trace(**ids, trace=False)` all
+replay stored edits. A direct call on the wrapped `torch.nn.Module` does not:
+
+```python
+ids = model.tokenizer(prompt, return_tensors="pt").to(model.device)
+
+with model.edit(inplace=True):
+    model.transformer.h[9].output[:] = 0
+
+through_trace = int(model.trace(**ids, trace=False).logits[0, -1].argmax())
+direct_call = int(model(**ids).logits[0, -1].argmax())
+
+print(model.tokenizer.decode(through_trace), "|", model.tokenizer.decode(direct_call))
+assert through_trace != direct_call and direct_call == int(original)
+model.clear_edits()
+```
+
+So a HuggingFace `Trainer`, an eval harness, or anything else holding
+`model._module` runs the unedited model. Route those through `model.trace(...)`,
+or make the change in the weights.
 
 ## Direct weight editing
 
@@ -94,7 +147,16 @@ after restore: ' Paris'
 ```
 
 **Always keep a backup.** A weight edit is global: every prompt, every experiment
-in the process, and anything else holding a reference to the model sees it.
+in the process, and anything else holding a reference to the model sees it. Unlike
+an activation edit, it does reach a direct `model(**ids)` call, because it is in
+the parameters.
+
+On a tensor-parallel model the same code needs `.to_local()`: an in-place write
+through a `DTensor` raises `NotImplementedError: Operator aten.fill_.Tensor does
+not have a sharding strategy registered`, and a reduction over a sharded weight
+returns *this rank's* answer rather than the whole matrix's, so a check like
+`float(weight.norm())` disagrees across ranks with no error. See
+`nnsight/docs/models/tensor-parallel.md`.
 
 Real ROME solves for the update rather than eyeballing a scale — it computes the
 key from the subject's activations at the layer a causal trace identified, and
@@ -123,6 +185,19 @@ The adapter's own modules appear in the envoy tree, so you can read *inside* the
 adapter — which is the point of doing this in nnsight rather than plain PEFT.
 Inspect the paths with `scripts/inspect_model.py --grep lora` from the `nnsight`
 skill.
+
+**PEFT re-roots every path under `base_model.model`.** The wrapped module becomes
+a `PeftModelForCausalLM`, so a GPT-2 block that was `model.transformer.h.0` is now
+`model.base_model.model.transformer.h.0`, and `tracer.cache()` sees 201 modules
+where the base model had 151. Two things absorb this and one does not:
+
+- Envoy navigation with the short path still works (`adapted.transformer.h[0]`),
+  because attribute lookup falls through PEFT's `__getattr__`.
+- `CacheView[...]` falls back to tree navigation, so
+  `cache["model.transformer.h.0"]` resolves and `in cache` is `True`.
+- `cache.keys()`, `.path`, and `scan` output all report the long form. Anything
+  that builds a dict from `keys()` and matches it against paths you wrote by hand
+  comes up empty.
 
 ## Training an adapter through a frozen model
 
@@ -199,21 +274,45 @@ modified by an inplace operation
 `output = ...` hands the model a new tensor and leaves the graph intact. This is
 the single most common failure when training anything through nnsight.
 
-To make the adapter permanent, move the routing into an edit:
+To make the adapter permanent, move the routing into an edit. A plain edit fires
+at each location's **first** occurrence, which under `generate` is prefill alone —
+so put the routing under `tracer.iter[:]` or the adapter is absent from every step
+after the first:
 
 ```python
 model.transformer.h[9].adapter = lora
 
-with model.edit(inplace=True):
-    hidden = model.transformer.h[9].output
-    model.transformer.h[9].output = hidden + model.transformer.h[9].adapter(hidden)
+with model.edit(inplace=True) as tracer:
+    for _ in tracer.iter[:]:
+        hidden = model.transformer.h[9].output
+        model.transformer.h[9].output = hidden + model.transformer.h[9].adapter(hidden)
 
-with model.generate(prompt, max_new_tokens=5) as tracer:
+with model.generate(prompt, max_new_tokens=5, do_sample=False) as tracer:
     ids = tracer.result.save()
 
 print(model.tokenizer.decode(ids[0]))
 model.clear_edits()
 ```
+
+A cache over the adapter counts the steps it actually ran, which is the check
+worth making whenever an edit is supposed to hold across a generation:
+
+```python
+with model.edit(inplace=True) as tracer:
+    for _ in tracer.iter[:]:
+        hidden = model.transformer.h[9].output
+        model.transformer.h[9].output = hidden + model.transformer.h[9].adapter(hidden, hook=True)
+
+with model.generate(prompt, max_new_tokens=5, do_sample=False) as tracer:
+    ran = tracer.cache(modules=[model.transformer.h[9].adapter])
+
+print(f"adapter ran {len(ran['model.transformer.h.9.adapter'])} of 5 steps")
+assert len(ran["model.transformer.h.9.adapter"]) == 5      # 1 without the loop
+model.clear_edits()
+```
+
+`hook=True` is what puts the adapter in the cache at all: a module you call
+yourself is not recorded otherwise.
 
 ## Evaluating an edit
 
