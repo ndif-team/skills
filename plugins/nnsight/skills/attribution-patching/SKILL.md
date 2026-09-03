@@ -1,226 +1,266 @@
 ---
 name: attribution-patching
-description: Gradient-based approximation to activation patching for scalable circuit analysis. Use when activation patching is too slow or when analyzing many components simultaneously.
+description: Approximate activation patching with gradients — attribution = (clean activation − corrupt activation) · gradient of the metric — so a whole layer×position×head map costs two forward passes and one backward instead of one forward pass per component. Use to screen large models or large component sets before verifying the survivors with real patching, to build circuit-level attribution heatmaps, and for edge attribution patching. Includes the validation step that tells you whether the approximation is trustworthy on your task, and the conditions under which it silently is not.
 ---
 
 # Attribution Patching
 
-Attribution patching uses gradients to approximate activation patching results in a single backward pass, making it practical to analyze thousands of components simultaneously.
-
-## Core Idea
-
-Instead of running separate forward passes for each component:
-
-1. Run clean and corrupted forward passes
-2. Compute gradients of the metric w.r.t. corrupted activations
-3. Multiply gradients by (clean - corrupted) activation differences
-
-This linear approximation works when clean and corrupted runs are similar.
-
-## Mathematical Formula
+Activation patching costs one forward pass per component. For every (layer,
+position, head) of a real model that is intractable. Attribution patching replaces
+the measurement with its first-order Taylor approximation:
 
 ```
-attribution(component) = grad_corrupted(metric) * (clean_activation - corrupted_activation)
+effect of patching component a  ≈  (a_clean − a_corrupt) · ∇_a metric
 ```
 
-## Setup
+Both terms come from **two forward passes and one backward** — total, for every
+component at once. It is an approximation, so the workflow is always: attribute
+everything cheaply, then verify the top candidates with real patching.
 
+<!-- test: setup -->
 ```python
-from nnsight import LanguageModel
 import torch
+import nnsight
+from nnsight import TransformersModel
 
-model = LanguageModel("openai-community/gpt2", device_map="auto", dispatch=True)
+model = TransformersModel("openai-community/gpt2", dispatch=True)
 
-clean_prompt = "After John and Mary went to the store, Mary gave a bottle of milk to"
-corrupted_prompt = "After John and Mary went to the store, John gave a bottle of milk to"
+clean = "The Eiffel Tower is in the city of"       # → " Paris"
+corrupt = "The Colosseum is in the city of"        # → " Rome"
 
-correct_token = model.tokenizer(" John")["input_ids"][0]
-incorrect_token = model.tokenizer(" Mary")["input_ids"][0]
-
-def logit_diff(logits):
-    return logits[0, -1, correct_token] - logits[0, -1, incorrect_token]
-```
-
-## Basic Attribution Patching
-
-```python
+paris = model.tokenizer.encode(" Paris")[0]
+rome = model.tokenizer.encode(" Rome")[0]
 n_layers = len(model.transformer.h)
+assert len(model.tokenizer(clean).input_ids) == len(model.tokenizer(corrupt).input_ids)
+```
 
-clean_acts = []
-corrupted_acts = []
-corrupted_grads = []
+## Canonical implementation
 
-# Clean forward pass - save activations
-with model.trace(clean_prompt):
-    for layer in model.transformer.h:
-        act = layer.output[0]
-        clean_acts.append(act.save())
+```python
+# Pass 1 — clean activations. No gradients needed.
+with torch.no_grad():
+    with model.trace(clean):
+        clean_acts = nnsight.save([block.output for block in model.transformer.h])
 
-# Corrupted forward + backward pass
-with model.trace(corrupted_prompt):
-    # Register intermediate values in forward order
-    for layer in model.transformer.h:
-        act = layer.output[0]
-        act.requires_grad = True
-        corrupted_acts.append(act.save())
+# Pass 2 — corrupt forward, then backward through the metric.
+with model.trace(corrupt):
+    refs = [block.output for block in model.transformer.h]          # forward order
+    corrupt_acts = nnsight.save([h.detach() for h in refs])
 
-    # Compute metric
-    logits = model.lm_head.output
-    metric = logit_diff(logits)
+    logits = model.output.logits[0, -1]
+    metric = logits[paris] - logits[rome]
 
-    # Access gradients in REVERSE order within backward context
     with metric.backward():
-        for layer in reversed(model.transformer.h):
-            corrupted_grads.insert(0, layer.output[0].grad.save())
+        grads = nnsight.save([])
+        for layer in reversed(range(n_layers)):                     # reverse order
+            grads.append(refs[layer].grad.clone())
 
-# Compute attributions
-attributions = []
-for i in range(n_layers):
-    clean = clean_acts[i].value
-    corrupted = corrupted_acts[i].value
-    grad = corrupted_grads[i].value
+grads = grads[::-1]                                                 # back to layer order
 
-    # Attribution = grad * (clean - corrupted)
-    attr = (grad * (clean - corrupted)).sum()
-    attributions.append(attr.item())
+attribution = [
+    float(((clean_acts[i] - corrupt_acts[i]) * grads[i]).sum())
+    for i in range(n_layers)
+]
 
-attributions = torch.tensor(attributions)
+assert len(attribution) == n_layers and max(attribution) > 1.0
+
+for layer, score in enumerate(attribution):
+    print(f"layer {layer:2d}  attribution {score:+.4f}")
 ```
 
-## Per-Position Attribution
+Three ordering rules, all inherited from the `nnsight` execution model:
+
+- capture activations in **forward** order in the corrupt trace
+- read `.grad` in **reverse** order inside `with metric.backward():`
+- ask for `.grad` on the tensor you captured, not a slice of it
+
+No `requires_grad_()` is needed — activations are already in the graph. Do not wrap
+the corrupt pass in `torch.no_grad()`.
+
+## Validate before you trust it
+
+The approximation is only useful if it ranks components the way real patching
+does. You already have both halves, so measure the agreement before you believe a
+heatmap. Patch one layer at a time — a *slice* of the residual, not all of it —
+and correlate the real effect against the attribution restricted to that same
+slice:
 
 ```python
-seq_len = clean_acts[0].value.shape[1]
-position_attrs = torch.zeros(n_layers, seq_len)
+def validate(positions, name):
+    approx = torch.tensor([
+        float(((clean_acts[i] - corrupt_acts[i]) * grads[i])[:, positions].sum())
+        for i in range(n_layers)
+    ])
 
-for layer_idx in range(n_layers):
-    clean = clean_acts[layer_idx].value
-    corrupted = corrupted_acts[layer_idx].value
-    grad = corrupted_grads[layer_idx].value
+    # Keyed by layer, not appended: values come back in the order the model
+    # reaches the invokes, which is not necessarily the order you wrote them.
+    with model.trace() as tracer:
+        real = nnsight.save({})
+        for layer in range(n_layers):
+            with tracer.invoke(corrupt):
+                model.transformer.h[layer].output[:, positions] = clean_acts[layer][:, positions]
+                patched = model.output.logits[0, -1]
+                real[layer] = (patched[paris] - patched[rome]).detach()
 
-    # Sum over hidden dimension only, keep position
-    diff = clean - corrupted
-    attr = (grad * diff).sum(dim=-1).squeeze()  # [seq_len]
-    position_attrs[layer_idx] = attr
+    real_effects = torch.tensor([float(real[i]) for i in range(n_layers)])
+
+    # Layers that all return the same metric leave nothing to correlate against.
+    assert real_effects.std() > 0.5, f"{name}: degenerate sweep, std {real_effects.std():.2e}"
+
+    centered_a = approx - approx.mean()
+    centered_r = real_effects - real_effects.mean()
+    r = float((centered_a @ centered_r) / (centered_a.norm() * centered_r.norm()))
+    print(f"{name:<20} real-effect spread {real_effects.std():.4f}   Pearson r {r:+.3f}")
+    return approx, real_effects, r
+
+
+SUBJECT = slice(1, 5)        # ' Col', 'os', 'se', 'um' — the corrupt prompt's subject
+LAST = slice(-1, None)
+
+approx, real_effects, r_subject = validate(SUBJECT, "subject positions")
+_, _, r_last = validate(LAST, "last position")
+
+print(f"top-3 by attribution: {torch.topk(approx, 3).indices.tolist()}")
+print(f"top-3 by real patch:  {torch.topk(real_effects, 3).indices.tolist()}")
+assert r_last > 0.99, f"last-position linearization no longer near-exact: {r_last:+.3f}"
+assert abs(r_subject) < 0.5, f"subject-slice agreement left the weak band: {r_subject:+.3f}"
 ```
 
-## Attention Head Attribution
+On this prompt pair that prints:
+
+```
+subject positions    real-effect spread 1.5652   Pearson r +0.168
+last position        real-effect spread 1.4942   Pearson r +0.999
+top-3 by attribution: [7, 6, 5]
+top-3 by real patch:  [2, 0, 1]
+```
+
+Two sizes of intervention, two verdicts. At one position the linearization is
+nearly exact and the rankings agree. Across the four subject tokens it falls to
+`+0.168`, and the top-3 lists share no layer at all — swapping four positions of
+residual at once moves the run well outside the regime a first-order term
+describes.
+
+| What is patched | Pearson r vs real patching |
+|---|---|
+| the last position only | **+0.999** |
+| four subject-token positions | +0.168 |
+
+The rule that falls out: **attribution patching is trustworthy for small, local
+interventions and decays as the intervention grows.** Patch a position, a head,
+or a feature. And run this check on your own task before believing a heatmap; it
+costs one extra sweep and it is the difference between a screening tool and a
+random number generator.
+
+**Why the sweep asserts a spread.** Patch a layer's *entire* residual output and
+the sweep stops measuring anything. Overwriting all of layer L with the clean
+activation makes everything after it a deterministic function of a clean state,
+so every layer returns exactly the clean metric — `2.4247` at all twelve layers
+here, with a spread of `1.2e-05`. Correlating attribution against that vector is
+rounding error over rounding error, and it prints a confident-looking number
+either way. The assertion is what makes that failure loud instead of publishable.
+
+## Per-position heatmap
+
+Keep the position axis instead of summing it — the same two passes give a
+`[layer, position]` map:
 
 ```python
-from einops import rearrange
+heatmap = torch.stack([
+    ((clean_acts[i] - corrupt_acts[i]) * grads[i]).sum(dim=-1)[0]
+    for i in range(n_layers)
+])
 
+tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(corrupt).input_ids]
+assert heatmap.shape == (n_layers, len(tokens))
+
+print(f"{'token':<12}" + "".join(f"L{l:<7}" for l in range(0, 12, 3)))
+for pos, token in enumerate(tokens):
+    row = "".join(f"{heatmap[l, pos]:+.3f} " for l in range(0, 12, 3))
+    print(f"{token!r:<12}{row}")
+```
+
+## Per-head attribution
+
+Attribute at the attention output projection's input, where heads are still
+separate slices — this is the cheap version of a head-level circuit scan:
+
+```python
 n_heads = model.config.n_head
 head_dim = model.config.n_embd // n_heads
-head_attrs = torch.zeros(n_layers, n_heads)
 
-# Collect clean attention outputs
-clean_attn = []
-with model.trace(clean_prompt):
-    for layer in model.transformer.h:
-        attn_out = layer.attn.c_proj.input[0][0]  # Before projection
-        clean_attn.append(attn_out.save())
+with torch.no_grad():
+    with model.trace(clean):
+        clean_heads = nnsight.save([
+            model.transformer.h[i].attn.c_proj.input for i in range(n_layers)
+        ])
 
-# Collect corrupted attention outputs and gradients
-corrupted_attn = []
-attn_grads = []
+with model.trace(corrupt):
+    head_refs = [model.transformer.h[i].attn.c_proj.input for i in range(n_layers)]
+    corrupt_heads = nnsight.save([h.detach() for h in head_refs])
+    logits = model.output.logits[0, -1]
+    with (logits[paris] - logits[rome]).backward():
+        head_grads = nnsight.save([])
+        for i in reversed(range(n_layers)):
+            head_grads.append(head_refs[i].grad.clone())
 
-with model.trace(corrupted_prompt):
-    # Register intermediate values in forward order
-    for layer in model.transformer.h:
-        attn_out = layer.attn.c_proj.input[0][0]
-        attn_out.requires_grad = True
-        corrupted_attn.append(attn_out.save())
+head_grads = head_grads[::-1]
 
-    metric = logit_diff(model.lm_head.output)
+scores = torch.zeros(n_layers, n_heads)
+for layer in range(n_layers):
+    delta = (clean_heads[layer] - corrupt_heads[layer]) * head_grads[layer]
+    for head in range(n_heads):
+        lo, hi = head * head_dim, (head + 1) * head_dim
+        scores[layer, head] = delta[..., lo:hi].sum()
 
-    # Access gradients in REVERSE order within backward context
-    with metric.backward():
-        for layer in reversed(model.transformer.h):
-            attn_grads.insert(0, layer.attn.c_proj.input[0][0].grad.save())
+assert scores.shape == (n_layers, n_heads) and scores.abs().max() > 0
 
-# Compute per-head attributions
-for layer_idx in range(n_layers):
-    clean = clean_attn[layer_idx].value
-    corrupted = corrupted_attn[layer_idx].value
-    grad = attn_grads[layer_idx].value
-
-    # Reshape to [batch, seq, heads, head_dim]
-    clean_heads = rearrange(clean, 'b s (h d) -> b s h d', h=n_heads)
-    corrupted_heads = rearrange(corrupted, 'b s (h d) -> b s h d', h=n_heads)
-    grad_heads = rearrange(grad, 'b s (h d) -> b s h d', h=n_heads)
-
-    # Attribution per head
-    diff = clean_heads - corrupted_heads
-    attr = (grad_heads * diff).sum(dim=(0, 1, 3))  # Sum batch, seq, head_dim
-    head_attrs[layer_idx] = attr
+flat = scores.flatten().abs().topk(5).indices
+for index in flat.tolist():
+    layer, head = divmod(index, n_heads)
+    print(f"L{layer}H{head:<2} attribution {scores[layer, head]:+.4f}")
 ```
 
-## Efficient Batched Version
+144 head attributions from two forward passes. Verify the top few with real head
+patching (`activation-patching` skill) before believing any of them.
 
-Process both prompts in a single forward pass using batching:
+## Edge attribution
 
-```python
-# Batch both prompts together in a single trace
-all_acts = []
-all_grads = []
+The same trick applied to *connections* rather than components: attribute the
+effect of the path from an upstream component to a downstream one by taking the
+gradient at the downstream input and the activation difference at the upstream
+output. That is the basis of edge attribution patching and automated circuit
+discovery — see the `circuit-discovery` skill.
 
-with model.trace([clean_prompt, corrupted_prompt]):
-    # Register intermediate values in forward order
-    for layer in model.transformer.h:
-        act = layer.output[0]
-        act.requires_grad = True
-        all_acts.append(act.save())
+## When the approximation breaks
 
-    logits = model.lm_head.output
-    # Metric on corrupted (index 1)
-    metric = logit_diff(logits[1:2])
+| Condition | Effect |
+|---|---|
+| Large intervention (many positions at once, or a whole layer) | agreement decays toward chance — `+0.999` at one position against `+0.168` across four, measured above. Keep interventions local |
+| Saturated metric (softmax probability near 0 or 1) | gradients vanish; everything scores ~0. Use a logit difference, not a probability |
+| Components whose effect is gated or thresholded | attribution can be near zero for a component that fully controls the output |
+| Very deep interactions | error compounds across layers; treat late-layer scores more cautiously |
 
-    # Access gradients in REVERSE order within backward context
-    with metric.backward():
-        for layer in reversed(model.transformer.h):
-            all_grads.insert(0, layer.output[0].grad.save())
+Two habits that keep it honest: always report *validated* attribution (correlation
+against real patching on a subset), and always state that a heatmap is
+approximate. Integrated gradients — averaging the gradient along a path from
+corrupt to clean rather than taking it at one point — is the standard upgrade when
+the linearization is poor, at the cost of N backward passes.
 
-# Split clean/corrupted and compute attributions
-attributions = []
-for i in range(n_layers):
-    acts = all_acts[i].value
-    grads = all_grads[i].value
+## Cost comparison
 
-    clean = acts[0:1]
-    corrupted = acts[1:2]
-    grad = grads[1:2]  # Gradient is only for corrupted
+| Approach | Passes for L layers × P positions × H heads |
+|---|---|
+| Activation patching, naive | one forward per component |
+| Activation patching, batched into invokes | one forward per layer |
+| Attribution patching | 2 forward + 1 backward, total |
+| Attribution + verification of top-K | 2 forward + 1 backward + K |
 
-    attr = (grad * (clean - corrupted)).sum()
-    attributions.append(attr.item())
-```
+The last row is the recommended workflow.
 
-## Comparison with Activation Patching
+## Related skills
 
-| Aspect | Activation Patching | Attribution Patching |
-| ------ | ------------------- | -------------------- |
-| Accuracy | Exact | Approximation |
-| Speed | O(n_components) forwards | O(1) forward + backward |
-| Memory | Lower per run | Higher (stores grads) |
-| Best for | Few components | Many components |
-
-## Validation
-
-Compare attribution results against ground truth patching:
-
-```python
-# Scatter plot: attribution vs actual patching effect
-import matplotlib.pyplot as plt
-
-plt.scatter(attributions, actual_patching_results)
-plt.xlabel("Attribution Score")
-plt.ylabel("Actual Patching Effect")
-plt.title("Attribution vs Patching Correlation")
-correlation = torch.corrcoef(torch.stack([attributions, actual_patching_results]))[0, 1]
-plt.text(0.1, 0.9, f"r = {correlation:.3f}", transform=plt.gca().transAxes)
-```
-
-## When to Use
-
-- **Use attribution patching**: Initial exploration, many components, large models
-- **Use activation patching**: Validating specific components, exact measurements needed
-- **Combine both**: Attribution for screening, patching for confirmation
+- `activation-patching` — the ground truth this approximates, and the verification step
+- `circuit-discovery` — edge attribution and automated circuit search
+- `nnsight` — gradients, ordering rules, batching
+- `nnsight-remote` — running the two passes on a model you cannot host
