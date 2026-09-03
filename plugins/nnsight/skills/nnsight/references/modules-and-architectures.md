@@ -39,9 +39,14 @@ eager = TransformersModel("openai-community/gpt2", dispatch=True,
 print(eager.config.model_type)
 ```
 
-Others worth knowing: `task=` (pipeline task, inferred if omitted), `device_map=`,
-`torch_dtype=`, `revision=`, `peft=<adapter repo id>`, `rename=` (below), and
-anything else HuggingFace accepts — it is forwarded.
+Others worth knowing: `task=` (pipeline task, inferred if omitted — inference
+asks the Hub, so pass it when offline), `device_map=`, `dtype=`, `revision=`,
+`peft=<adapter repo id>`, `rename=` (below), and anything else HuggingFace
+accepts — it is forwarded.
+
+`dtype=` also takes a quantization name (`"nf4"`, `"int8"`, ...) for a checkpoint
+too big for the GPU you have; load the `quantization` skill before using one, since
+three of the formats fail silently rather than raising.
 
 ## Finding module paths
 
