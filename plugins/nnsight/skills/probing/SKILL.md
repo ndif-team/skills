@@ -1,6 +1,6 @@
 ---
 name: probing
-description: Train classifiers on internal activations to test what information is linearly decodable from a model, where in depth it appears, and whether the model actually uses it. Covers activation collection in one forward pass, logistic-regression and difference-in-means (mass-mean) probes, layer sweeps, the controls that distinguish a real finding from a dataset artifact, and causal validation by steering along the probe direction. Use for truth/sentiment/entity probing, geometry-of-truth style analysis, and turning a probe direction into an intervention.
+description: Train classifiers on internal activations to test what information is linearly decodable from a model, where in depth it appears, and whether the model actually uses it. Covers activation collection in one forward pass, logistic-regression and difference-in-means (mass-mean) probes, layer sweeps, the controls that distinguish a real finding from a dataset artifact, causal validation by steering along the probe direction, and concept erasure (LEACE/INLP applied inside the forward pass) as the strong version of that test. Use for truth/sentiment/entity probing, geometry-of-truth style analysis, and turning a probe direction into an intervention.
 ---
 
 # Probing

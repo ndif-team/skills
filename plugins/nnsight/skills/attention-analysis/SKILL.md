@@ -1,6 +1,6 @@
 ---
 name: attention-analysis
-description: Extract and analyze attention patterns and per-head behavior — attention probability matrices via .source, per-head metrics (entropy, previous-token, attention-sink, induction), automatic head-type detection, per-head reading and editing of the output. Use to find out what a head attends to, to identify induction/copy/previous-token heads, to visualize where information moves, or to pick candidate heads before patching or ablating them. Requires attn_implementation="eager"; covers grouped-query attention and the head-slicing convention.
+description: Extract and analyze attention patterns and per-head behavior — attention probability matrices from attn.output[1] or .source, the anchors that check they really are probabilities, per-head metrics (entropy, previous-token, attention-sink, induction), automatic head-type detection, per-head reading and editing of the output. Use to find out what a head attends to, to identify induction/copy/previous-token heads, to visualize where information moves, or to pick candidate heads before patching or ablating them. Requires attn_implementation="eager"; covers grouped-query attention and the head-slicing convention.
 ---
 
 # Attention Analysis

@@ -1,6 +1,6 @@
 ---
 name: logit-lens
-description: Decode what a model predicts at every layer by applying its final norm and unembedding to intermediate residual streams. Use to see where in depth an answer emerges, to track a specific token's probability across layers, to sanity-check that a model knows a fact before running invasive interventions, or to compare prediction trajectories between prompts. Built on nnsight 0.8; includes per-architecture variants, the tuned-lens caveat, and the failure modes that make a logit lens look informative when it is not.
+description: Decode what a model predicts at every layer by applying its final norm and unembedding to intermediate residual streams. Use to see where in depth an answer emerges, to track a specific token's probability across layers, to sanity-check that a model knows a fact before running invasive interventions, or to compare prediction trajectories between prompts. Built on nnsight 0.8; includes the one-line wiring check that catches a wrong norm, a wrong unembedding or logit softcapping before you plot, per-architecture variants, the tuned-lens caveat, and the failure modes that make a logit lens look informative when it is not.
 ---
 
 # Logit Lens
