@@ -1,6 +1,6 @@
 ---
 name: quantization
-description: Load a model in 4 or 8 bits by naming the format where you would name a dtype — TransformersModel(..., dtype="nf4"). Covers the accepted names (nf4/int4/4bit, fp4, int8/8bit, fp8), what a trace sees (module paths and activations are unchanged; raw .weight is a packed blob), the compute dtype and why int8 differs and is several times slower, how much memory it actually saves versus what the arithmetic predicts, the accuracy cost in KL and top-1 agreement, and the three silent failures — fp8 loading unquantized below compute capability 8.9, int3 loading float32, and MoE experts never being quantized at all. Use when a checkpoint does not fit on the available GPU, when a user asks about bitsandbytes, load_in_4bit, load_in_8bit, BitsAndBytesConfig, quantization_config, NF4, or 8-bit inference, when gradients through a quantized model come back NaN, or when a quantized model's weights look like the wrong shape.
+description: Load a model in 4 or 8 bits by naming the format where you would name a dtype — TransformersModel(..., dtype="nf4"). Covers the accepted names (nf4/int4/4bit, fp4, int8/8bit, fp8), what a trace sees (module paths and activations are unchanged; raw .weight is a packed blob), the compute dtype and why int8 differs and is several times slower, how much memory it actually saves versus what the arithmetic predicts, the accuracy cost in KL and top-1 agreement, the fp8 refusal below compute capability 8.9, and the two silent failures — int3 loading float32, and MoE experts never being quantized at all. Use when a checkpoint does not fit on the available GPU, when a user asks about bitsandbytes, load_in_4bit, load_in_8bit, BitsAndBytesConfig, quantization_config, NF4, or 8-bit inference, when gradients through a quantized model come back NaN, or when a quantized model's weights look like the wrong shape.
 ---
 
 # Quantization
@@ -49,34 +49,33 @@ quantization name — two answers to how the weights are held, so it raises.
 Requires `pip install bitsandbytes accelerate`. Neither is a dependency of
 nnsight, so a clean install raises `ImportError` at the first quantized load.
 
-### `fp8` is silent below compute capability 8.9
+### `fp8` is refused below compute capability 8.9
 
 `fp8` is transformers' own quantizer rather than bitsandbytes, and it needs a
-4090, an L40S, an H100 or later. On older hardware it does **not** raise. It logs
-a warning, sets `dequantize` on the quantization config, and loads bfloat16 —
-while leaving the `FineGrainedFP8HfQuantizer` attached, so anything that inspects
-`hf_quantizer` is told the model is quantized.
+4090, an L40S, an H100 or later. An **A100 is 8.0 and does not qualify** — the
+most common interpretability card cannot run it. nnsight refuses the load with a
+`ValueError` naming the requirement, before any weights are fetched.
 
-Measured on Llama-3.2-1B on an A6000 (8.6): `Linear` rather than `FP8Linear`, the
-same 2.30 GB as bfloat16, and a KL of 0.000000 against the bfloat16 run — the same
-model, bit for bit, at twice the width the caller budgeted. An **A100 is 8.0 and
-does not qualify either**, so a user asking for `fp8` on the most common
-interpretability card gets an unquantized run reported as an 8-bit result.
+The refusal exists because transformers itself does not raise on old hardware:
+it logs a warning, sets `dequantize` on the quantization config, and loads
+bfloat16 at **twice the width the caller budgeted** — while leaving the
+`FineGrainedFP8HfQuantizer` attached, so anything inspecting `hf_quantizer` is
+told the model is quantized. Measured on an A6000 (8.6) before the refusal:
+Llama-3.2-1B at `fp8` was bit-identical to bfloat16 — same 2.30 GB, `Linear`
+rather than `FP8Linear`, KL 0.000000.
 
 <!-- test: gpu -->
 ```python
-fp8 = TransformersModel(
-    "openai-community/gpt2", task="text-generation", dtype="fp8",
-    dispatch=True, device=0,
-)
-
 if torch.cuda.get_device_capability() < (8, 9):
-    assert fp8._module.config.quantization_config.dequantize is True
-    assert type(fp8.transformer.h[0].attn.c_attn._module).__name__ == "Conv1D"
+    try:
+        TransformersModel(
+            "openai-community/gpt2", task="text-generation", dtype="fp8",
+            dispatch=True, device=0,
+        )
+        raise AssertionError("fp8 was not refused below capability 8.9")
+    except ValueError as e:
+        assert "compute capability 8.9" in str(e)
 ```
-
-`config.quantization_config.dequantize` is the check. `True` means the weights
-are bfloat16 whatever the name asked for.
 
 ## Your intervention code does not change
 
