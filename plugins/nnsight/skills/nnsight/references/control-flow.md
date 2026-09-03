@@ -25,15 +25,32 @@ with model.trace(prompt):
 print(model.tokenizer.decode(logits[0, -1].argmax()))
 ```
 
-Skipping a module with its own input turns it into a pass-through — the identity
-ablation of a whole sublayer:
+Feeding a module its own input turns it into a pass-through — the identity
+ablation of a whole block. This works for a residual-stream block, whose input and
+output are both the `(batch, seq, hidden)` hidden state; it is wrong for a module
+that returns something shaped differently from what it takes:
+
+```python
+with model.trace(prompt):
+    model.transformer.h[6].skip(model.transformer.h[6].input)   # block 6 is a no-op
+    passthrough = model.output.logits[0, -1].argmax().save()
+
+with model.trace(prompt):
+    baseline = model.output.logits[0, -1].argmax().save()
+
+assert model.tokenizer.decode(passthrough) == " London"     # baseline is " Paris"
+assert passthrough.item() != baseline.item()
+```
+
+Zeroing the output instead is a different ablation — the block contributes nothing
+rather than passing its input along:
 
 ```python
 with model.trace(prompt):
     model.transformer.h[5].mlp.skip(torch.zeros_like(model.transformer.h[5].mlp.input))
     logits = model.output.logits.save()
 
-print(logits.shape)
+assert logits.shape[-1] == model.config.vocab_size
 ```
 
 Uses: ablate a sublayer, splice in a cached activation, or route around layers you
@@ -41,8 +58,12 @@ have already computed (skipping layers 0..L-1 with a cache saves real time on de
 models).
 
 Rules:
-- The replacement must match the module's real output **type and shape** — tensor
-  for a GPT-2 block, tuple for a module that returns one.
+- The replacement must match the module's real output in **structure, shape, dtype
+  and device** — a tensor for a GPT-2 block, a tuple for a module that returns one.
+  A mismatch is caught by the model, not by nnsight, so it arrives as a bare torch
+  error from inside the next forward (`expected scalar type Double but found
+  Float`, `Expected all tensors to be on the same device`) that names neither
+  `skip` nor your module.
 - A skipped module's submodules never run, so reading their `.output` is out of
   order.
 - In a batched trace, a skip must be applied in **every** invoke or none.
@@ -65,13 +86,32 @@ decode loop, not just the current step:
 
 ```python
 with model.generate(prompt, max_new_tokens=20) as tracer:
-    for step in tracer.iter[:20]:
-        token = model.output.logits[0, -1].argmax(dim=-1)
-        if token.item() == model.tokenizer.eos_token_id:
+    picks = nnsight.save([])
+    for step in tracer.all():
+        picks.append(model.output.logits[0, -1].argmax(dim=-1))
+        if len(picks) == 3:
             tracer.stop()
-    ids = tracer.result.save()
 
-print(ids.shape)
+assert len(picks) == 3          # the run ended at step 2, not step 19
+```
+
+Two things a stop takes with it:
+
+- **The run's result is gone.** A stopped run never returns one, so
+  `tracer.result.save()` after the `stop()` is unreachable, and from a separate
+  empty invoke it raises `OutOfOrderError: 'result.i0'`. Save activations, not
+  results.
+- **Saving `tracer.result` *before* the `stop()` defeats it.** The worker parks on
+  the result until the run finishes, so the whole forward runs and the stop fires
+  afterwards — with a full logits tensor in hand as evidence it "worked".
+
+```python
+with model.trace(prompt) as tracer:
+    early = model.transformer.h[2].output.save()
+    result = tracer.result.save()      # parks here until the run is over
+    tracer.stop()                      # too late to save anything
+
+assert result.logits.shape[1] == len(model.tokenizer.encode(prompt))
 ```
 
 Early stopping is the cheapest optimization in interpretability: if your metric
@@ -177,6 +217,11 @@ with model.trace(prompt):
 
 print(logits.shape)
 ```
+
+One syntactic restriction: a trace body cannot **start** with `try:` — nnsight
+intercepts the body at its first line, and a `try` there is the one statement
+Python gives it no way back out of. Put any statement above it, or the `try`
+outside the `with`.
 
 The exceptions are `model.scan()` (fake tensors — branch on shapes only, not
 values) and remote traces (the body is serialized, so helpers from your own files

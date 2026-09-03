@@ -25,9 +25,14 @@ prompt = "The Eiffel Tower is in the city of"
 with model.generate(prompt, max_new_tokens=3) as tracer:
     ids = tracer.result.save()
 
-print(ids.shape)                        # [1, 13] — 10 prompt + 3 new
-print(model.tokenizer.decode(ids[0]))
+assert tuple(ids.shape) == (1, 13)      # 10 prompt tokens + 3 new
+print(model.tokenizer.decode(ids[0]))   # The Eiffel Tower is in the city of Paris, and
 ```
+
+`tracer.result` has to be read inside the block — it is served during the run, so
+reading it afterwards raises `ValueError: Cannot access 'result' outside of
+interleaving`. `model.generator.output` hands back the identical tensor and warns
+that `tracer.result` is the way to ask for it.
 
 Generation through the model is **greedy by default**, so it is reproducible
 without passing anything. Ask for sampling explicitly (`do_sample=True, top_k=50`);
@@ -41,6 +46,7 @@ Called without a `with` block it simply returns the ids: `ids = model.generate(p
 with model.pipe(prompt, max_new_tokens=5, do_sample=False) as tracer:
     records = tracer.result.save()
 
+assert records[0]["generated_text"].startswith(prompt)
 print(records[0]["generated_text"])
 ```
 
@@ -96,46 +102,97 @@ with model.generate(prompt, max_new_tokens=4) as tracer:
 print(model.tokenizer.decode(ids[0]))
 ```
 
-## The unbounded-iteration trap
+## The one rule for iteration loops
 
-`tracer.all()` and `tracer.iter[:]` run until generation stops — and the final
-over-run unwinds the loop **and every line after it in that invoke**. Code placed
-after an unbounded loop does not run:
+**A loop must not ask for a step the run does not make.** A bound the run meets
+is fine, and the code after the loop runs. A bound it does not meet raises
+`OutOfOrderError` naming the iteration asked for and the count the run reached:
 
+<!-- test: expect-error OutOfOrderError -->
 ```python
 with model.generate(prompt, max_new_tokens=3) as tracer:
-    seen = nnsight.save([])
-    for step in tracer.all():
-        seen.append(model.output.logits[0, -1].argmax(dim=-1))
-    after_the_loop = nnsight.save("this line never runs")
-
-print(len(seen))                             # 3 — the loop's own values survive
-print("after_the_loop" in globals())         # False — the trailing line was dropped
+    for step in tracer.iter[:10]:                # 10 steps of a 3-step run
+        model.transformer.h[6].output[:, -1, :] *= 0.5
+# OutOfOrderError: '...i3' was never reached: the loop asked for iteration 3 ...
 ```
 
-**Bounding the loop is not a reliable fix.** `max_new_tokens` is a cap, not a
-promise: if the model emits EOS (or hits a stop string) before step `N`, a bounded
-`tracer.iter[:N]` parks on a step that never runs and drops the trailing code
-exactly as the unbounded form does — it warns `'...' was never reached` and
-carries on. Since you cannot know in advance how many steps a generation takes,
-no bound can guarantee the loop completes.
-
-The reliable fix is to put the trailing code in a **separate empty invoke**:
+`max_new_tokens` is an upper bound: an EOS or a stop string ends generation
+sooner, and then a bound matching `max_new_tokens` outruns the run.
+`min_new_tokens=N` suppresses EOS until N tokens are generated, which is what
+makes a bound of N hold:
 
 ```python
-with model.generate(prompt, max_new_tokens=3) as tracer:
-    seen = nnsight.save([])
-    for step in tracer.iter[:]:
-        seen.append(model.output.logits[0, -1].argmax(dim=-1))
+with model.generate(prompt, max_new_tokens=5, min_new_tokens=5) as tracer:
+    picks = nnsight.save([])
+    for step in tracer.iter[:5]:
+        picks.append(model.output.logits[0, -1].argmax(dim=-1))
+    ids = tracer.result.save()
+
+assert len(picks) == 5 and ids.shape[1] == 5 + len(model.tokenizer.encode(prompt))
+```
+
+`min_new_tokens` holds off EOS only — a `stop_strings=` criterion still ends the
+run wherever it matches.
+
+### When you cannot know the step count
+
+`tracer.all()` and `tracer.iter[:]` end *by* asking for a step the run does not
+make, so they warn instead of raising. The same unwind still discards everything
+the block has after the loop:
+
+```python
+import warnings
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    with model.generate(prompt, max_new_tokens=3) as tracer:
+        seen = nnsight.save([])
+        for step in tracer.all():
+            seen.append(model.output.logits[0, -1].argmax(dim=-1))
+        after_the_loop = nnsight.save("this line never runs")
+
+assert len(seen) == 3                            # the loop's own values survive
+assert "after_the_loop" not in globals()         # the trailing line was dropped
+assert "was never reached" in str(caught[0].message)
+```
+
+Put what has to happen afterwards in a separate empty invoke — its own worker, so
+the loop's unwind does not reach it:
+
+```python
+with model.generate(max_new_tokens=3) as tracer:
+    with tracer.invoke(prompt):
+        seen = nnsight.save([])
+        for step in tracer.iter[:]:
+            seen.append(model.output.logits[0, -1].argmax(dim=-1))
 
     with tracer.invoke():             # a separate invoke always runs
         ids = tracer.result.save()
 
-print(len(seen), ids.shape)
+assert len(seen) == 3 and ids.shape[0] == 1
 ```
 
-Values from the steps that did happen are kept either way — only trailing code in
-the *same* invoke is lost.
+Reading `tracer.result` below the `with` block instead does not work: it is
+served during the run, so outside the block it raises `ValueError: Cannot access
+'result' outside of interleaving`.
+
+### Two ways a loop hangs or lies
+
+An open loop ends when a request in its body outruns the model, so a body that
+reads no module never ends at all — a pure Python spin, no warning, no timeout:
+
+<!-- test: skip -->
+```python
+# Hangs forever — nothing in the body parks the worker, so the loop never ends.
+with model.generate(prompt, max_new_tokens=2) as tracer:
+    n = nnsight.save([0])
+    for step in tracer.all():
+        n[0] = step
+```
+
+And inside a loop, a read followed by a write to a module *below* it parks the
+write on the next step, so every intervention lands one step late. Order the body
+the way the forward runs.
 
 ### Step 0 is the prefill
 
@@ -146,8 +203,9 @@ the prefill over the whole prompt:
 with model.generate("The Eiffel Tower is in the city of", max_new_tokens=3) as tracer:
     shapes = nnsight.save([])
     for step in tracer.iter[:]:
-        shapes.append(model.transformer.h[0].output.shape)
-# [(1, 10, 768), (1, 1, 768), (1, 1, 768)]  <- 10 prompt tokens, then one per step
+        shapes.append(tuple(model.transformer.h[0].output.shape))
+
+assert shapes == [(1, 10, 768), (1, 1, 768), (1, 1, 768)]   # prompt, then one token per step
 ```
 
 So an intervention inside the loop applies to **every prompt position** on step 0
@@ -167,7 +225,7 @@ with model.generate(prompt, max_new_tokens=3) as tracer:
     for step in tracer.iter[:3]:
         chunks.append(model.generator.streamer.output)
 
-print([tuple(c.shape) for c in chunks])    # [(1, 10), (1,), (1,)]
+assert [tuple(c.shape) for c in chunks] == [(1, 10), (1,), (1,)]
 ```
 
 The prompt arrives as one block, then one token per step.
@@ -179,11 +237,14 @@ with model.generate(["The Eiffel Tower is in", "The Colosseum is in"],
                     max_new_tokens=3) as tracer:
     ids = tracer.result.save()
 
-print([model.tokenizer.decode(row) for row in ids])
+assert tuple(ids.shape) == (2, 10)      # left-padded to the longer prompt, + 3 new
+print([model.tokenizer.decode(row, skip_special_tokens=True) for row in ids])
 ```
 
-Prompts are left-padded to the longest. Each invoke keeps its own step counter, so
-different invokes can iterate over different ranges.
+Prompts are left-padded to the longest, and the padding is still in
+`tracer.result`, so decode with `skip_special_tokens=True` unless you want it.
+Each invoke keeps its own step counter, so different invokes can iterate over
+different ranges.
 
 ## Chat models
 
