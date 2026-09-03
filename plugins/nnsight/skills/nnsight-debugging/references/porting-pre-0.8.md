@@ -36,7 +36,7 @@ warning filters.
 | `tracer.next()` | `AttributeError: 'InterleavingTracer' object has no attribute 'next'` | `for step in tracer.iter[:N]:` |
 | `module.next()` | `AttributeError: 'Envoy' object (nor its module) has attribute 'next'` | `for step in tracer.iter[:N]:` |
 | `tracer.local()` | `AttributeError: 'InterleavingTracer' object has no attribute 'local'` | *(not ported)* — use a remote session |
-| `CONFIG.APP.CROSS_INVOKER` | `AttributeError: 'AppConfig' object has no attribute 'CROSS_INVOKER'` | nothing needed; `tracer.barrier(n)` orders cross-invoke reads |
+| `CONFIG.APP.CROSS_INVOKER` | `AttributeError: 'AppConfig' object has no attribute 'CROSS_INVOKER'` | nothing needed — invokes share values by default. A `tracer.barrier(n)` is only for the ordering case described in `docs/usage/invoke-and-batching.md` |
 | `CONFIG.APP.CACHE_DIR` / `TRACE_CACHING` | `AttributeError: 'AppConfig' object has no attribute 'CACHE_DIR'` | nothing needed |
 | `nnsight.save([])` before the `with` | `ValueError: save() was called outside a trace. …` | move the save inside the block |
 
