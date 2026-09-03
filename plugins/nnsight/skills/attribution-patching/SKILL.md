@@ -122,7 +122,8 @@ _, _, r_last = validate(LAST, "last position")
 
 print(f"top-3 by attribution: {torch.topk(approx, 3).indices.tolist()}")
 print(f"top-3 by real patch:  {torch.topk(real_effects, 3).indices.tolist()}")
-assert r_last > r_subject
+assert r_last > 0.99, f"last-position linearization no longer near-exact: {r_last:+.3f}"
+assert abs(r_subject) < 0.5, f"subject-slice agreement left the weak band: {r_subject:+.3f}"
 ```
 
 On this prompt pair that prints:

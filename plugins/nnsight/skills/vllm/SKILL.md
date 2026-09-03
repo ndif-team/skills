@@ -345,10 +345,12 @@ type and an "Intervention traceback" pointing at your line — so catch `Runtime
 and match on the message, not the class. Warnings do not come back: they are emitted
 by vLLM's EngineCore subprocess, so `warnings.catch_warnings()` around a trace records
 nothing — a `tracer.iter` loop that outran the run is cut short with only that
-engine-side warning, and your process sees a short result and nothing else. That is
-the one behaviour that differs from the local path; errors are identical. Nor does anything that fails while the engine builds, including a bad `taps=`
-entry: the caller gets `RuntimeError: Engine core initialization failed. See root cause
-above.` and the real message is in the `(EngineCore pid=...)` lines above it.
+engine-side warning, and your process sees a short result and nothing else. Once
+the engine is running, that is the one behaviour that differs from the local
+path; errors are identical. Nor does anything that fails while the engine builds
+come back as itself, including a bad `taps=` entry: the caller gets
+`RuntimeError: Engine core initialization failed. See root cause above.` and the
+real message is in the `(EngineCore pid=...)` lines above it.
 
 ## Choosing
 

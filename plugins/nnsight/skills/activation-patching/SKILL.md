@@ -250,9 +250,15 @@ for pos, token in enumerate(tokens):
     cells = "".join(f"{grid[i][pos]:+.2f} " for i in range(len(grid)))
     print(f"{token!r:<12}{cells}")
 
-subject_cells = [grid[i][pos] for i in range(len(grid)) for pos in range(1, 5)]
-assert max(subject_cells) > 0.0 > corrupt_diff.item()          # subject tokens light up early
-assert grid[-1][-1] > max(grid[0][-1], grid[1][-1])            # last token lights up late
+baseline = corrupt_diff.item()
+early_subject = max(grid[i][pos] for i in range(3) for pos in range(1, 5))    # L0-L4
+late_subject = max(grid[i][pos] for i in range(4, 6) for pos in range(1, 5))  # L8-L10
+assert early_subject > 0.0 > baseline    # subject recovery crosses zero at layers 0-4...
+assert late_subject < 0.0                # ...and no subject cell does from layer 8 on
+suffix_cells = [grid[i][pos] for i in range(len(grid)) for pos in range(5, 9)]
+assert all(abs(v - baseline) < 0.15 for v in suffix_cells)        # ' is'..' city' flat everywhere
+assert all(abs(grid[i][-1] - baseline) < 0.15 for i in range(4))  # ' of' does nothing through L6
+assert grid[-1][-1] > 0.0                                         # then carries the answer
 ```
 
 ```

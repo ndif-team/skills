@@ -60,7 +60,7 @@ run rather than at the line that caused it. Reorder the body.
 **An out-of-order loop body does not always warn.** The shift only surfaces when
 a shifted request runs off the end of the run, so a bound that stops *short* of
 the run's last step (`iter[1:3]` over four steps) completes with no warning and no
-warning, the writes landing one step late and the trailing code running. Verify a
+error, the writes landing one step late and the trailing code running. Verify a
 loop's writes against a no-write baseline per step rather than trusting a clean
 exit — see `docs/errors/out-of-order-error.md` for the full table.
 

@@ -181,7 +181,12 @@ generator = torch.Generator().manual_seed(0)
 control = torch.randn(function_vector.shape, generator=generator).to(function_vector)
 control = control / control.norm() * function_vector.norm()
 
-for country in ["Portugal", "Brazil", "Poland", "Greece", "Sweden", "Austria", "Thailand"]:
+capitals = {"Portugal": " Lisbon", "Brazil": " Brasília", "Poland": " Warsaw",
+            "Greece": " Athens", "Sweden": " Stockholm", "Austria": " Vienna",
+            "Thailand": " Bangkok"}
+
+plain_out, fv_out, random_out = {}, {}, {}
+for country in capitals:
     zero_shot = f"{country} ->"
     with model.trace() as tracer:
         with tracer.invoke(zero_shot):
@@ -192,9 +197,19 @@ for country in ["Portugal", "Brazil", "Poland", "Greece", "Sweden", "Austria", "
         with tracer.invoke(zero_shot):
             model.transformer.h[LAYER].output[:, -1, :] += control
             random = model.output.logits[0, -1].argmax().save()
-    print(f"{zero_shot:<14} plain {model.tokenizer.decode(plain)!r:>12}"
-          f"   +fv {model.tokenizer.decode(steered)!r:>12}"
-          f"   +random {model.tokenizer.decode(random)!r:>12}")
+    plain_out[country] = model.tokenizer.decode(plain)
+    fv_out[country] = model.tokenizer.decode(steered)
+    random_out[country] = model.tokenizer.decode(random)
+    print(f"{zero_shot:<14} plain {plain_out[country]!r:>12}"
+          f"   +fv {fv_out[country]!r:>12}"
+          f"   +random {random_out[country]!r:>12}")
+
+# The capital on exactly these three of seven -- the Portugal row included.
+assert [c for c in capitals if fv_out[c] == capitals[c]] == ["Portugal", "Austria", "Thailand"]
+# Three of the remaining four echo the country's own name; Brazil is the fourth.
+assert [c for c in capitals if fv_out[c] == f" {c}"] == ["Poland", "Greece", "Sweden"]
+# The matched-norm random control is not inert: it moves three of the seven outputs.
+assert sum(random_out[c] != plain_out[c] for c in capitals) == 3
 ```
 
 ```
@@ -227,10 +242,20 @@ Run the few-shot control before you believe any of it. Put the demonstrations in
 the prompt and see whether the model does the task at all:
 
 ```python
-for country in ["Portugal", "Brazil", "Poland", "Greece", "Sweden", "Austria", "Thailand"]:
+fewshot = {}
+for country in capitals:
     with model.trace(f"France -> Paris, Japan -> Tokyo, Italy -> Rome, {country} ->"):
         answer = model.output.logits[0, -1].argmax().save()
-    print(f"  {country:<10} -> {model.tokenizer.decode(answer)!r}")
+    fewshot[country] = model.tokenizer.decode(answer)
+    print(f"  {country:<10} -> {fewshot[country]!r}")
+
+# Five of seven; the two failures are Portugal and Brazil.
+assert [c for c in capitals if fewshot[c] != capitals[c]] == ["Portugal", "Brazil"]
+assert fewshot["Portugal"] == " Rome"     # copies the last demonstration
+assert fewshot["Brazil"] == " Buenos"     # Argentina's capital
+# The coincidence the prose hangs on: the vector's Portugal hit lands on a
+# prompt the model fails few-shot.
+assert fv_out["Portugal"] == capitals["Portugal"]
 ```
 
 ```
