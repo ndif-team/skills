@@ -262,14 +262,13 @@ with sd.generate(PROMPT, **SETTINGS) as tracer:
 assert len(trajectory) == CALLS
 ```
 
-`step` is a plain `int`, so `if step > 3:` really branches. Three ways to get
+`step` is a plain `int`, so `if step > 3:` really branches. Two ways to get
 this wrong:
 
-- A bound past the calls the run makes raises `OutOfOrderError`, naming the
-  iteration asked for and the count reached.
-- An open `tracer.iter[:]` warns instead, and every statement after the loop is
-  dropped — `tracer.result.save()` among them, so the name is unbound after the
-  block.
+- A loop that asks for a call the run does not make — a bound past the calls the
+  run makes, or an open `tracer.iter[:]` reaching its natural end — is cut short
+  with a warning, and every statement after the loop is dropped:
+  `tracer.result.save()` among them, so the name is unbound after the block.
 - An open `tracer.iter[:]` whose body touches no module at all never returns.
 
 Order matters inside the loop as well: reading a later component and then writing

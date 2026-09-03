@@ -105,15 +105,26 @@ print(model.tokenizer.decode(ids[0]))
 ## The one rule for iteration loops
 
 **A loop must not ask for a step the run does not make.** A bound the run meets
-is fine, and the code after the loop runs. A bound it does not meet raises
-`OutOfOrderError` naming the iteration asked for and the count the run reached:
+is fine, and the code after the loop runs. A loop that outruns the run — bounded
+or open — is cut short there with a warning: values saved inside it are kept,
+and the statements after it do not run. The result looks complete while being
+shorter than the bound, so check the `len()` of what you collected:
 
-<!-- test: expect-error OutOfOrderError -->
 ```python
-with model.generate(prompt, max_new_tokens=3) as tracer:
-    for step in tracer.iter[:10]:                # 10 steps of a 3-step run
-        model.transformer.h[6].output[:, -1, :] *= 0.5
-# OutOfOrderError: '...i3' was never reached: the loop asked for iteration 3 ...
+import warnings
+
+tail = None
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    with model.generate(prompt, max_new_tokens=3) as tracer:
+        seen = nnsight.save([])
+        for step in tracer.iter[:10]:            # 10 steps of a 3-step run
+            seen.append(model.transformer.h[6].output[:, -1, :].norm())
+        tail = nnsight.save("after the loop")
+
+assert len(seen) == 3                            # cut short at the run's end
+assert tail is None                              # the statement after the loop never ran
+assert any("was never reached" in str(w.message) for w in caught)
 ```
 
 `max_new_tokens` is an upper bound: an EOS or a stop string ends generation

@@ -142,9 +142,11 @@ print(grad.shape)
 ```
 
 **Generation** — a `tracer.iter` loop must not ask for a step the run does not
-make. A bound the run meets keeps the code after the loop; one it does not raises
-`OutOfOrderError`. `max_new_tokens` is an upper bound, so pass `min_new_tokens=`
-when the bound has to hold:
+make. A bound the run meets keeps the code after the loop; a loop that outruns
+the run warns, keeps what it saved, and drops the statements after it — the
+result looks complete while being short. `max_new_tokens` is an upper bound, so
+pass `min_new_tokens=` when the bound has to hold, and check the `len()` of what
+you collected:
 
 ```python
 with model.generate(prompt, max_new_tokens=3, min_new_tokens=3) as tracer:

@@ -60,8 +60,8 @@ What changes under graphs:
   `model.samples` and `tracer.result` always work.
 - **Edits land in place.** `x[:] += v` is exactly right; a replacement
   (`layer.output = t`) is copied back into the graph's memory and must keep the rows
-  the block owns — a short one is refused with `A batched write has to keep its rows:
-  ... must be (9, 576), not (2, 576)` before the model sees it.
+  the block owns — nothing checks that, and a short one reaches the copy-back with
+  the wrong height, which can take the engine down, not just the request.
 - **Clone what you keep.** The value served *is* the graph's memory, rewritten
   next step. An un-cloned list still comes back as N separate tensors (each is
   copied at collect time), but every decode entry holds the last step's values and

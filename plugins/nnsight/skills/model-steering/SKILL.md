@@ -102,11 +102,11 @@ whole sweep.
 
 **`min_new_tokens=12` is load-bearing here.** Steering changes when the model
 emits EOS: at α = 0.25 this one stops after 11 forward passes. A bounded
-`tracer.iter[:12]` that the run does not reach the end of cuts the loop short and
-drops every statement after it, `ids = tracer.result.save()` included, so nnsight
-raises `OutOfOrderError` naming the iteration asked for and the count reached.
-Pinning the step count also makes the rows the same length and therefore
-comparable. See the `nnsight` skill → generation.
+`tracer.iter[:12]` that the run does not reach the end of is cut short with only
+a warning, and every statement after it is dropped — `ids = tracer.result.save()`
+included, so that row would come back with `ids` unbound and one fewer step than
+the others, looking almost right. Pinning the step count also makes the rows the
+same length and therefore comparable. See the `nnsight` skill → generation.
 
 ## Where to inject
 
@@ -314,7 +314,7 @@ describing one as bidirectional.
 | Effect vanishes after the first generated token | intervention not inside a `tracer.iter[...]` loop |
 | Works on the derivation prompts only | too few contrast pairs; the vector encodes the prompts |
 | Later experiments behave strangely | an `edit(inplace=True)` was never cleared |
-| `OutOfOrderError` naming an iteration of a bounded `tracer.iter[:N]` | steering changed when the model emits EOS, so the run made fewer passes than the loop asked for; add `min_new_tokens=N` |
+| `UserWarning: … was never reached`, and code after the loop never ran | steering changed when the model emits EOS, so the run made fewer passes than the loop asked for and it was cut short; add `min_new_tokens=N` |
 | Two rows of a sweep are identical | check they are not the same generation printed twice |
 
 ## Related skills

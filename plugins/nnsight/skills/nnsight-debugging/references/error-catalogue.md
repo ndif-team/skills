@@ -25,39 +25,31 @@ Fix: reorder into forward order; put independent orders in separate
 `tracer.invoke(...)` blocks; use `tracer.cache()` when the order is unknown; for
 gradients, read in reverse-forward order and only on the exact captured tensor.
 
-**A loop with an end the run did not reach:**
+**A loop that outran the run** is not this exception at all — it is a
+`UserWarning`, bounded and open loops alike:
 
 ```
-'model.transformer.h.11.output.i3' was never reached: the loop asked for iteration 3
-of 'model.transformer.h.11.output' and the run reached it 3 times, so the loop was
-cut short and nothing after it ran. Bound the loop to the iterations the run makes —
-a generation is held to a step count by `min_new_tokens=` on transformers and by
-`min_tokens=` or `ignore_eos=True` on vLLM, though neither holds a run that a stop
-string ends — or loop with `tracer.all()` and put what follows the loop in a
-separate `tracer.invoke()`.
+'model.transformer.h.11.output.i3' was never reached: the loop asked for a step
+the run did not make, so it was cut short — values saved inside the loop are
+kept, and the statements after it did not run. An open `tracer.iter[:]` /
+`tracer.all()` loop ends this way by design. To hold a generation to a bounded
+loop's count, pass `min_new_tokens=` on transformers or `min_tokens=` /
+`ignore_eos=True` on vLLM; put what follows the loop in a separate
+`tracer.invoke()`.
 ```
 
-`tracer.iter[:8]`, `tracer.iter[2]`, and `tracer.iter[[0, 2, 7]]` all name an end,
-and a run that makes fewer steps raises. The unwind takes the worker out at the
-loop, so nothing after the loop runs — which is why this is an error and not a
-note.
+`tracer.iter[:8]`, `tracer.iter[2]`, and `tracer.iter[[0, 2, 7]]` all name an
+end, and a run that makes fewer steps cuts the loop short there. The unwind
+takes the worker out at the loop, so nothing after the loop runs — and what the
+loop saved is kept, so the result looks complete while being shorter than the
+bound. Check the `len()` of what you collected.
 
 Fix: `min_new_tokens=N` alongside `max_new_tokens=N` (`min_tokens=` /
 `ignore_eos=True` on vLLM), or `tracer.all()`. A **stop string** overrides both
-minimums, so a run with `stop_strings=` still cuts a bounded loop short and still
-raises — use `tracer.all()` there. Trailing statements go in a separate
-`tracer.invoke()`, not after the `with`: `tracer.result` outside the block raises
+minimums, so a run with `stop_strings=` still cuts a bounded loop short — use
+`tracer.all()` there. Trailing statements go in a separate `tracer.invoke()`,
+not after the `with`: `tracer.result` outside the block raises
 ``Cannot access `result` outside of interleaving``.
-
-**An open loop.** `tracer.iter[:]`, `tracer.iter[2:]`, and `tracer.all()` have no
-end of their own, so outrunning the model is how they finish. That one is a
-`UserWarning`, not an exception:
-
-```
-'model.transformer.h.11.output.i3' was never reached: an open `tracer.iter[:]` /
-`tracer.all()` loop ends by asking for a step the run does not make. Values saved
-inside the loop are kept; the statements after it did not run.
-```
 
 **The `.iN` suffix is the tell.** It is the occurrence index — `.i3` is the fourth
 visit to that location, i.e. generation step 3. An occurrence *past anything the
@@ -65,9 +57,9 @@ loop selected* means the loop body reads locations out of order: each pass pushe
 the next request one occurrence later, and the strand shows up at the end of the
 run rather than at the line that caused it. Reorder the body.
 
-**An out-of-order loop body does not always raise.** The shift only surfaces when
+**An out-of-order loop body does not always warn.** The shift only surfaces when
 a shifted request runs off the end of the run, so a bound that stops *short* of
-the run's last step (`iter[1:3]` over four steps) completes with no error and no
+the run's last step (`iter[1:3]` over four steps) completes with no warning and no
 warning, the writes landing one step late and the trailing code running. Verify a
 loop's writes against a no-write baseline per step rather than trusting a clean
 exit — see `docs/errors/out-of-order-error.md` for the full table.
@@ -94,7 +86,6 @@ exit — see `docs/errors/out-of-order-error.md` for the full table.
 |---|---|---|
 | `ValueError` | ``A barrier was never reached by every block it waits for; check the count it was created with`` | `tracer.barrier(n)` with `n` **larger** than the number of blocks that call it → pass the true count. This is the safe way to get the count wrong: it is loud, and it fails at run end without having released anything. A count that is too *small* releases early and says nothing — see the `NameError` row. **Call the barrier, don't wait on it**: `b = tracer.barrier(2)` then `b()`. There is no `b.wait()` |
 | `ValueError` | ``A batched `.skip()` has to cover every row: skip the module in every invoke, or none — a shared forward can't run for only the rows an invoke left unskipped.`` | `.skip()` in some invokes but not others → skip in all of them or none |
-| `ValueError` | ``A batched write has to keep its rows: this block owns rows 0:1 of 2, so the replacement must be (1, 7, 768), not (2, 7, 768).`` | a whole-tensor write inside one invoke of a batch, with a different leading dim → build the replacement from the activation you were served. A lone invoke *is* the batch and may reshape freely |
 | `NameError` | ``name 'src' is not defined`` | **(a)** a value from another invoke read before its producer ran → `tracer.barrier(n)`, or park the reader past the producing module first. **(b)** a `tracer.barrier(n)` whose `n` is *smaller* than the number of blocks holding it: it releases as soon as `n` of them arrive, so the waiting blocks resume before the producer has bound its value. Nothing mentions the barrier — the name in the message is the tell. Count the blocks that call it. See `docs/usage/barrier.md` |
 
 ## Values and shapes
@@ -105,6 +96,7 @@ exit — see `docs/errors/out-of-order-error.md` for the full table.
 | `TypeError` | ``'tuple' object does not support item assignment`` | `attn.output[0] = x` → `attn.output[0][:] = x`, or rebuild the tuple and assign to `.output` |
 | `AttributeError` | ``'TransformersModel' object (nor its module) has attribute 'model'`` | wrong module path for this architecture → `scripts/inspect_model.py <repo_id>`. The same message appears when an `eproperty`'s preprocess raises `AttributeError`, since a failing property getter falls through to `__getattr__` |
 | `RuntimeError` | ``The expanded size of the tensor (10) must match the existing size (3) at non-singleton dimension 1.`` | a replacement tensor whose shape doesn't match the activation → build it from the activation (`torch.zeros_like(x)`, `x.shape`, `x.device`, `x.dtype`) |
+| shape error in a **later** module of a batched trace | e.g. an attention mask that no longer matches the hidden states' batch dim | a whole-tensor write in one invoke changed its row count — the splice takes the write as given, and nothing checks the height → build the replacement from the activation you were served. A lone invoke *is* the batch and may reshape freely |
 | `NotImplementedError` | ``This tensor does not require grad, so a backward session cannot produce gradients: nothing the block reads can ever receive one. The forward ran without gradient tracking (e.g. under torch.no_grad()), or the tensor was created without requires_grad=True.`` | a `with metric.backward():` inside a `torch.no_grad()` region → drop the `no_grad` around the trace |
 | `GuardOnDataDependentSymNode` | ``Could not guard on data-dependent expression ...`` | branching on **values** inside `model.scan(...)` — fake tensors have no data → branch on shapes only, or use a real trace |
 
@@ -128,13 +120,12 @@ class**:
 <!-- test: skip nocompile -->
 ```python
 except RuntimeError as error:
-    if "A batched write has to keep its rows" in str(error):
+    if str(error).startswith("IndexError"):
         ...
 ```
 
 | Message | Cause → fix |
 |---|---|
-| ``ValueError: A batched write has to keep its rows: …`` | a write that changes the request's row count → keep the leading dim. The refusal ends that request alone; the engine and its co-tenants survive |
 | ``'<location>' is not a tap on this engine, so a replayed CUDA graph never reaches it`` | reading a module location on a `taps=` engine that was not declared → add it to `taps`, or build the engine without `taps` (eager, every location served) |
 | ``... prompt was split across steps by chunked prefill`` | `enable_chunked_prefill=True` was passed and this prompt exceeded the step's token budget → drop the flag (off by default), or raise `max_num_batched_tokens` |
 | ``enforce_eager=... contradicts taps=...`` | `ValueError` at construction: the engine mode follows from `taps` → drop `enforce_eager` |
@@ -155,7 +146,7 @@ between your machine and the server. `python scripts/check_env.py --remote` (in 
 
 | Category | When |
 |---|---|
-| `UserWarning: '<location>.iN' was never reached: an open …` | an open `iter[:]` / `all()` loop finished by outrunning the model. Expected; the statements after the loop did not run |
+| `UserWarning: '<location>.iN' was never reached: the loop asked for a step the run did not make …` | a `tracer.iter` loop — bounded or open — outran the model and was cut short. The statements after the loop did not run, and what it saved is shorter than a bounded loop's count. On vLLM the warning is emitted in the EngineCore subprocess, not yours |
 | `NNsightDeprecationWarning` | a deprecated name. A `FutureWarning`, so it shows wherever the call is — script, module, or notebook. Every message names its replacement; the full list is in [porting-pre-0.8.md](porting-pre-0.8.md) |
 
 ## Not errors, but they end the run

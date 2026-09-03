@@ -266,7 +266,7 @@ producer binds, and nothing errors.
 | `.skip()` must cover every row | If one invoke skips a module, all of them must — a shared forward cannot run for a subset of rows. |
 | A trace with no input needs an invoke | `with model.trace():` and nothing else is a `ValueError`. |
 | One invoke is not "narrowed" | A lone invoke *is* the whole batch, so its write may change the leading dim and widen the run. |
-| A batched write must keep its rows | With two or more invokes, a replacement whose leading dim isn't the block's row count raises `ValueError: A batched write has to keep its rows: ...` before it reaches the model. |
+| A batched write must keep its rows | With two or more invokes, a replacement is spliced back into the combined batch as given — nothing checks its height. One with the wrong leading dim builds a batch that is no longer the model's; the mismatch surfaces in a later module, or not at all. |
 | `tracer.stop()` is not per-invoke | It halts the shared forward, so a sibling parked on a later location dies with `OutOfOrderError`. |
 | Direct input and invokes don't mix | `with model.trace(x)` plus `tracer.invoke(y)` raises `Cannot invoke while the model is already running.` |
 

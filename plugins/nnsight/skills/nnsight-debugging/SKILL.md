@@ -15,7 +15,7 @@ idioms are the single most common cause.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `OutOfOrderError: … already ran past it` | modules touched out of forward order | reorder, or split across `tracer.invoke`s |
-| `OutOfOrderError: … the loop asked for iteration N` | a bounded `tracer.iter[:N]` the run never reached | `min_new_tokens=N` (`min_tokens=`/`ignore_eos=True` on vLLM), or `tracer.all()` with the trailing code in a separate `tracer.invoke()` |
+| `UserWarning: … was never reached` and a short result | a `tracer.iter` loop asked for a step the run did not make; it was cut short | `min_new_tokens=N` (`min_tokens=`/`ignore_eos=True` on vLLM), or `tracer.all()` with the trailing code in a separate `tracer.invoke()` |
 | `UnboundLocalError` after the block | forgot `.save()`, or a loop above unwound the rest of the block | save it and bind it; check the loop's bound |
 | `ValueError: save() was called outside a trace` | save before/after the `with` | move it inside |
 | `ValueError: Cannot access ... outside of interleaving` | `.output` read outside a trace | open a trace, or use `model.scan` for shapes |
@@ -25,9 +25,9 @@ idioms are the single most common cause.
 | `AttributeError: 'NoneType' object has no attribute 'event'` | `model.trace(...)` nested inside another trace | `model.session()`, or sibling invokes |
 | `AttributeError: ... has attribute 'model'` | wrong module path for this architecture | `scripts/inspect_model.py` in the `nnsight` skill |
 | `TypeError: 'tuple' object does not support item assignment` | assigning into a tuple output | `out[0][:] = x`, or rebuild and assign the tuple |
-| `ValueError: A batched write has to keep its rows` | a whole-tensor write changed an invoke's row count | build the replacement from the activation you were served |
+| Shape error deep in a later module of a batched trace | a whole-tensor write changed an invoke's row count — nothing checks it at the write | build the replacement from the activation you were served |
 | Intervention has no effect | wrote to a copy, or indexed a tensor as if it were a tuple | see [Silent failures](#silent-failures) |
-| Everything after a loop is missing | an open `tracer.iter[:]` / `tracer.all()` | bound it and pin the run, or move the trailing code past the `with` |
+| Everything after a loop is missing | a `tracer.iter` loop — bounded or open — outran the run | pin the run to the bound (`min_new_tokens=`), or move the trailing code to a separate `tracer.invoke()` |
 | Saved list is empty **when run remotely** | saved the elements, not the container | `nnsight.save([])` then append raw values |
 | `NameError` on a value from another invoke | read before the producer ran, or a `tracer.barrier(n)` whose `n` is too small released it early | `tracer.barrier(n)` with the true block count, then call it: `b()` |
 | `NotImplementedError: ... batching multiple invokes` | base `NNsight` with 2+ input invokes | one invoke, or implement `_batch_size`/`_batch` |
@@ -82,10 +82,11 @@ assert late.shape == early.shape == (1, 10, 768)   # each invoke sees its own ro
 3. **Cache** if you want many modules regardless of order:
    `cache = tracer.cache()`.
 
-Inside a `tracer.iter` loop, an out-of-order body does not always raise: it shifts
-every request one step later, and that only surfaces when a shifted request runs
-off the end of the run. A bound that stops short of the run's last step completes
-silently with its writes on the wrong steps — see
+Inside a `tracer.iter` loop, an out-of-order body does not always announce
+itself: it shifts every request one step later, and that only surfaces when a
+shifted request runs off the end of the run — at step 0 as this error, past it
+as the cut-short warning. A bound that stops short of the run's last step
+completes silently with its writes on the wrong steps — see
 [references/error-catalogue.md](references/error-catalogue.md).
 
 The same error appears when you request a module the run never reached — after
@@ -94,18 +95,26 @@ generation ended.
 
 ## A loop that outran the run
 
-A loop with an end you named is a claim about the run, and a run that makes fewer
-steps raises rather than warning — the worker is unwound *at the loop*, so every
-statement after it is discarded, and a warning would leave those names holding
-stale values:
+A loop that asks for a step the run does not make is cut short there — the
+worker is unwound *at the loop*, so every statement after it is discarded, and
+the only signal is a warning. What the loop saved is kept, so the result looks
+complete while holding fewer steps than the bound named:
 
-<!-- test: expect-error OutOfOrderError -->
 ```python
-with model.generate(prompt, max_new_tokens=3) as tracer:
-    seen = nnsight.save([])
-    for step in tracer.iter[:20]:              # the run makes 3 steps, not 20
-        seen.append(model.output.logits[0, -1].argmax(dim=-1))
-    ids = tracer.result.save()
+import warnings
+
+ids = None
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    with model.generate(prompt, max_new_tokens=3) as tracer:
+        seen = nnsight.save([])
+        for step in tracer.iter[:20]:          # the run makes 3 steps, not 20
+            seen.append(model.output.logits[0, -1].argmax(dim=-1))
+        ids = tracer.result.save()
+
+assert len(seen) == 3                          # short, and nothing raised
+assert ids is None                             # the save after the loop never ran
+assert any("was never reached" in str(w.message) for w in caught)
 ```
 
 Pin the run to the count the loop asks for:
@@ -122,13 +131,13 @@ assert ids.shape[-1] == len(model.tokenizer.encode(prompt)) + 3
 ```
 
 If the step count isn't knowable in advance, loop with `tracer.all()` and put
-whatever follows the loop in a separate `tracer.invoke()` — an open loop warns
-instead of raising, and the values saved inside it survive. Trailing code goes in
+whatever follows the loop in a separate `tracer.invoke()` — an open loop ends by
+outrunning the run, and the values saved inside it survive. Trailing code goes in
 an invoke rather than after the `with` because `tracer.result` outside the block
 raises ``Cannot access `result` outside of interleaving``.
 
 A stop string beats both minimums: `stop_strings=["Paris"]` still ends the run
-early, so a bounded loop over that generation still raises even with
+early, so a bounded loop over that generation is still cut short even with
 `min_new_tokens=` set. Use `tracer.all()` when the run has stop conditions.
 
 ## Nothing came back

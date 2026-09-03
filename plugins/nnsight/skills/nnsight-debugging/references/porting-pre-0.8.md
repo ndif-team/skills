@@ -107,13 +107,13 @@ does not, and the over-run unwinds every line after the loop:
       ids = tracer.result.save()     # only runs if the loop is bounded
 ```
 
-A bound is a claim about the run, so a `tracer.iter[:5]` the run does not reach
-raises rather than warning:
+A `tracer.iter[:5]` the run does not reach is cut short with a warning and hands
+back fewer values than the bound named:
 
 ```
-OutOfOrderError: 'model.output.i3' was never reached: the loop asked for iteration
-3 of 'model.output' and the run reached it 3 times, so the loop was cut short and
-nothing after it ran. …
+UserWarning: 'model.output.i3' was never reached: the loop asked for a step the
+run did not make, so it was cut short — values saved inside the loop are kept,
+and the statements after it did not run. …
 ```
 
 Add `min_new_tokens=5` alongside `max_new_tokens=5` so the generation cannot stop
