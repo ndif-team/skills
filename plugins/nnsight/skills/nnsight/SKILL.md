@@ -31,9 +31,9 @@ with model.trace(prompt):
     model.transformer.h[8].output[:, -1, :] *= 2           # modify one
     edited = model.output.logits.save()                    # see what it changed
 
-print(resid.shape)                                         # torch.Size([1, 10, 768])
-print(model.tokenizer.decode(clean[0, -1].argmax()))       # ' Paris'
-print(model.tokenizer.decode(edited[0, -1].argmax()))      # ' London'
+assert tuple(resid.shape) == (1, 10, 768)
+assert model.tokenizer.decode(clean[0, -1].argmax()) == " Paris"
+assert model.tokenizer.decode(edited[0, -1].argmax()) == " London"
 ```
 
 Install: `pip install nnsight` (needs `torch` and `transformers`).
@@ -51,7 +51,7 @@ with model.trace("The Eiffel Tower is in the city of"):
     for block in model.transformer.h:
         per_layer.append(block.output[0, -1])     # …append raw values
 
-print(len(per_layer))                             # 12
+assert len(per_layer) == 12
 ```
 
 There is no `.value` in 0.8 — the saved variable *is* the tensor.
@@ -59,7 +59,8 @@ There is no `.value` in 0.8 — the saved variable *is* the tensor.
 **2. Access modules in forward-pass order.** Reading layer 8 then layer 2 raises
 `OutOfOrderError`: your code is a worker that parks until the model produces each
 value, and the model has already gone past. Within a block, the submodules
-(`ln_1`, `attn`, `mlp`) come before the block's own `.output`.
+(`ln_1`, `attn`, `mlp`) come before the block's own `.output`. This binds writes
+too — an edit at layer 0 goes above a read at layer 11, not below it.
 
 **3. Don't guess module paths or output types.** `model.transformer.h[i]` is GPT-2;
 Llama is `model.model.layers[i]`; Gemma-3 is `model.model.language_model.layers[i]`.
@@ -90,7 +91,7 @@ convert it first; see the `nnsight-debugging` skill.
 | one forward pass | `model.trace(x)` | the model's output object |
 | generated tokens | `model.generate(x, max_new_tokens=N)` | token ids on `tracer.result` (greedy by default) |
 | decoded text / labels | `model.pipe(x, ...)` | pipeline records (often sampled — pass `do_sample=False`) |
-| shapes, no compute | `model.scan(x)` | fake tensors: shapes and dtypes only |
+| shapes, no compute | `model.scan(x)` | fake tensors: shapes and dtypes only — it cannot see devices or values |
 | several traces sharing values | `model.session()` | values flow between traces |
 | a permanent intervention | `model.edit(inplace=True)` | replayed on every later run |
 
