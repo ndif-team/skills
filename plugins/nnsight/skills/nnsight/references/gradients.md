@@ -190,6 +190,7 @@ you optimize a steering vector or a soft prompt against a frozen model:
 direction = torch.zeros(768, requires_grad=True)
 optimizer = torch.optim.SGD([direction], lr=1.0)
 
+losses = []
 for _ in range(3):
     with model.trace(prompt):
         model.transformer.h[6].output[:, -1, :] += direction.to(model.device)
@@ -199,7 +200,10 @@ for _ in range(3):
         tracked = nnsight.save(loss.item())
     optimizer.step()
     optimizer.zero_grad()
+    losses.append(tracked)
     print(f"loss {tracked:.3f}  ||v|| {direction.norm().item():.4f}")
+
+assert losses[0] > losses[-1] and direction.norm() > 0     # the vector is learning
 ```
 
 The model's own parameters are untouched — only `direction` receives updates.
