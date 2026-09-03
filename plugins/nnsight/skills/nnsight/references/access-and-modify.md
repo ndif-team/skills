@@ -100,17 +100,25 @@ only option when the value is not a tensor (a tuple, a dataclass output).
 
 **A replacement has to descend from the value it replaces if you want gradients.**
 `output = torch.zeros_like(output)` hands the model a tensor autograd has never
-seen and cuts the graph there, so a later `.grad` read on anything captured
-upstream fails with an object id for a location:
+seen and cuts the graph there — with two different consequences. Replace a whole
+block's `.output` (every path severed) and a later `.grad` read on anything
+captured upstream fails with an object id for a location:
 
 ```
 OutOfOrderError: '139932764543792.grad.i0' was requested but the model already ran past it
 ```
 
+Replace a bypassed submodule's `.output` (an MLP or attention — the residual
+stream routes around it) and upstream `.grad` reads **succeed**, silently
+returning a gradient missing that module's path: on gpt2, replacing
+`h[3].mlp.output` with a detached copy of the very same values leaves the forward
+bit-identical yet shifts the layer-0 gradient by 45% in L2 norm, with no warning.
+
 `output[:] = 0` writes through the existing tensor and keeps the graph; so does
 any replacement built from the old value (`output * 0`, `output + steering`). If a
 location in an error message is a long number rather than a module path, this is
-what happened.
+what happened — and if there is no error but gradients are involved, audit any
+fresh-tensor replacement for a silently partial gradient.
 
 **Mutating a tuple element by assignment fails** — `output[0] = x` is
 `tuple.__setitem__`. Either mutate in place through the element, or rebuild:
