@@ -243,11 +243,12 @@ for country in ["Portugal", "Brazil", "Poland", "Greece", "Sweden", "Austria", "
   Thailand   -> ' Bangkok'
 ```
 
-Five of seven with demonstrations. `Portugal` copies the last demonstration's
-answer instead of answering, and it is the one prompt in the table above where
-the vector produces the right capital. A function vector is not supposed to
-install a capability the model lacks, so a hit on a prompt the model fails
-few-shot is a result to explain before publishing it.
+Five of seven with demonstrations. `Brazil` answers with Argentina's capital,
+and `Portugal` copies the last demonstration instead of answering. `Portugal` is
+also the one prompt in the table above where the vector produces the right
+capital. A function vector is not supposed to install a capability the model
+lacks, so a hit on a prompt the model fails few-shot is a result to explain
+before publishing it.
 
 ## Evaluating a steering vector
 
@@ -255,11 +256,9 @@ A vector that changes the output is not automatically a vector that encodes the
 concept. Check:
 
 **Dose-response.** Behavior should increase smoothly with α before collapsing. A
-step change from nothing to gibberish means you are disrupting, not steering.
-
-**Dose size.** The probability the steered model still assigns to the *unsteered*
-top token falls monotonically with α, which is the number to plot against the
-behavior you care about:
+step change from nothing to gibberish means you are disrupting, not steering. The
+probability the steered model still assigns to the *unsteered* top token is a
+cheap continuous version of that curve, and it should fall monotonically:
 
 ```python
 with model.trace(prompt):
