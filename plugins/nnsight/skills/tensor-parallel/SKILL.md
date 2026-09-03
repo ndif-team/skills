@@ -40,14 +40,14 @@ model = TransformersModel(
 )
 ```
 
-**Ask with `distributed_config`, not `tp_plan`.** transformers also accepts a
-bare `tp_plan="auto"` and it does shard a checkpoint that publishes a plan — but
-that argument goes straight to transformers, so nnsight never sees the request
-and never runs the degree check below. On a checkpoint with no plan the result is
-silent: gpt2 at `--nproc_per_node=2` loads its full 0.5 GB on *both* ranks,
-answers correctly, and leaves `model.interleaver.fragments.enabled` at `False` —
-two GPUs doing one GPU's work, with nothing to see. `distributed_config` is the
-form that gets checked.
+**`tp_plan="auto"` is checked too.** A bare `tp_plan="auto"` names no degree of
+its own — transformers shards over the ranks the launcher provided — so nnsight
+reads the degree off the world size and runs the same check below: gpt2 at
+`--nproc_per_node=2` is refused with `UnshardableCheckpoint` instead of silently
+loading its full 0.5 GB on both ranks. A custom plan (a dict of patterns)
+overrides the checkpoint's published plan and loads unchecked. Prefer
+`distributed_config=DistributedConfig(tp_size=N)` anyway: it states the degree in
+the code, and it is the only form that can ask for expert parallelism.
 
 `tp_size` must divide the model's attention heads, key/value heads, and
 intermediate size. Check before you allocate anything — this reads the config
@@ -348,7 +348,7 @@ Three of these arrive wrapped in a pipeline `ValueError: Could not load model
 | `tp_size (2) * fsdp_size (1) is not equal to world_size (4)` | `--nproc_per_node` must equal `tp_size` |
 | `` `tp_plan` and `device_map` are mutually exclusive `` | Pick one — they are two different ways of spreading a model |
 | `UnshardableCheckpoint` | No `base_model_tp_plan`, a refused style, or a degree that divides nothing. The message lists the degrees that work. Load on one GPU or with `device_map` |
-| Nothing raised, but `fragments.enabled` is `False` and every rank holds the whole model | `tp_plan=` instead of `distributed_config=` — the degree check never ran |
+| Nothing raised, but `fragments.enabled` is `False` and every rank holds the whole model | A custom `tp_plan` dict whose patterns match nothing — a dict plan is not degree-checked |
 | Activation width is `hidden_size/N` or `intermediate_size/N` | A value between two sharded modules. `gather(model, v, dim=...)`, naming the axis |
 | Shape looks right but the numbers are wrong, and differ per rank | A `DTensor` reporting the global shape: a `.source` value inside a sharded module, or a reduction over a weight. Check `v.placements`; fix with `.full_tensor()` |
 | Bare `AssertionError`, empty message | `embed_tokens.output` on a plan that shards the embedding, or a `tracer.cache()` with no arguments that reaches it. Read `layers[0].input` and name the modules to cache |
