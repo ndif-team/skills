@@ -117,7 +117,10 @@ nothing after it ran. …
 ```
 
 Add `min_new_tokens=5` alongside `max_new_tokens=5` so the generation cannot stop
-short of what the loop asks for.
+short of what the loop asks for — `min_tokens=` or `ignore_eos=True` on vLLM.
+Neither holds a run that a stop string ends, so keep `tracer.all()` where
+`stop_strings=` is in play, and put what follows the loop in a separate
+`tracer.invoke()`.
 
 **3. Saving list elements.** Old code often wrote `results.append(x.save())` into
 a list created outside the trace. It collects values locally and returns nothing
@@ -190,7 +193,7 @@ A pattern that used to be a silent no-op is now an error — build accumulators
    `model.session()`.
 3. Convert `with tracer.all():` / `tracer.next()` to a **bounded**
    `for step in tracer.iter[:N]:`, and add `min_new_tokens=N` so the run reaches
-   the bound.
+   the bound. Keep `tracer.all()` if the run can be ended by a stop string.
 4. Re-check every `.output[0]` against the real output type.
 5. Move accumulator creation inside the trace; save containers, not elements.
 6. Swap `model.generator.output` for `tracer.result` — same tensor, no re-indexing.

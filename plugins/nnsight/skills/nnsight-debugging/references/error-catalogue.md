@@ -30,9 +30,11 @@ gradients, read in reverse-forward order and only on the exact captured tensor.
 ```
 'model.transformer.h.11.output.i3' was never reached: the loop asked for iteration 3
 of 'model.transformer.h.11.output' and the run reached it 3 times, so the loop was
-cut short and nothing after it ran. Bound the loop to the iterations the run makes
-(`min_new_tokens=` holds a generation to a step count), or loop with `tracer.all()`
-and put what follows the loop after the `with` block.
+cut short and nothing after it ran. Bound the loop to the iterations the run makes —
+a generation is held to a step count by `min_new_tokens=` on transformers and by
+`min_tokens=` or `ignore_eos=True` on vLLM, though neither holds a run that a stop
+string ends — or loop with `tracer.all()` and put what follows the loop in a
+separate `tracer.invoke()`.
 ```
 
 `tracer.iter[:8]`, `tracer.iter[2]`, and `tracer.iter[[0, 2, 7]]` all name an end,
@@ -40,8 +42,12 @@ and a run that makes fewer steps raises. The unwind takes the worker out at the
 loop, so nothing after the loop runs — which is why this is an error and not a
 note.
 
-Fix: `min_new_tokens=N` alongside `max_new_tokens=N`, or `tracer.all()` with the
-trailing statements moved past the `with` block.
+Fix: `min_new_tokens=N` alongside `max_new_tokens=N` (`min_tokens=` /
+`ignore_eos=True` on vLLM), or `tracer.all()`. A **stop string** overrides both
+minimums, so a run with `stop_strings=` still cuts a bounded loop short and still
+raises — use `tracer.all()` there. Trailing statements go in a separate
+`tracer.invoke()`, not after the `with`: `tracer.result` outside the block raises
+``Cannot access `result` outside of interleaving``.
 
 **An open loop.** `tracer.iter[:]`, `tracer.iter[2:]`, and `tracer.all()` have no
 end of their own, so outrunning the model is how they finish. That one is a
@@ -58,6 +64,13 @@ visit to that location, i.e. generation step 3. An occurrence *past anything the
 loop selected* means the loop body reads locations out of order: each pass pushes
 the next request one occurrence later, and the strand shows up at the end of the
 run rather than at the line that caused it. Reorder the body.
+
+**An out-of-order loop body does not always raise.** The shift only surfaces when
+a shifted request runs off the end of the run, so a bound that stops *short* of
+the run's last step (`iter[1:3]` over four steps) completes with no error and no
+warning, the writes landing one step late and the trailing code running. Verify a
+loop's writes against a no-write baseline per step rather than trusting a clean
+exit — see `docs/errors/out-of-order-error.md` for the full table.
 
 ## Context and setup
 

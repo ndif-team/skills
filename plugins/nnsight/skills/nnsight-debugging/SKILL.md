@@ -15,7 +15,7 @@ idioms are the single most common cause.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `OutOfOrderError: … already ran past it` | modules touched out of forward order | reorder, or split across `tracer.invoke`s |
-| `OutOfOrderError: … the loop asked for iteration N` | a bounded `tracer.iter[:N]` the run never reached | `min_new_tokens=N`, or `tracer.all()` with the trailing code past the `with` |
+| `OutOfOrderError: … the loop asked for iteration N` | a bounded `tracer.iter[:N]` the run never reached | `min_new_tokens=N` (`min_tokens=`/`ignore_eos=True` on vLLM), or `tracer.all()` with the trailing code in a separate `tracer.invoke()` |
 | `UnboundLocalError` after the block | forgot `.save()`, or a loop above unwound the rest of the block | save it and bind it; check the loop's bound |
 | `ValueError: save() was called outside a trace` | save before/after the `with` | move it inside |
 | `ValueError: Cannot access ... outside of interleaving` | `.output` read outside a trace | open a trace, or use `model.scan` for shapes |
@@ -82,6 +82,12 @@ assert late.shape == early.shape == (1, 10, 768)   # each invoke sees its own ro
 3. **Cache** if you want many modules regardless of order:
    `cache = tracer.cache()`.
 
+Inside a `tracer.iter` loop, an out-of-order body does not always raise: it shifts
+every request one step later, and that only surfaces when a shifted request runs
+off the end of the run. A bound that stops short of the run's last step completes
+silently with its writes on the wrong steps — see
+[references/error-catalogue.md](references/error-catalogue.md).
+
 The same error appears when you request a module the run never reached — after
 `tracer.stop()`, on a `.skip()`ped module's children, or past the point where
 generation ended.
@@ -116,8 +122,14 @@ assert ids.shape[-1] == len(model.tokenizer.encode(prompt)) + 3
 ```
 
 If the step count isn't knowable in advance, loop with `tracer.all()` and put
-whatever follows the loop after the `with` block — an open loop warns instead of
-raising, and the values saved inside it survive.
+whatever follows the loop in a separate `tracer.invoke()` — an open loop warns
+instead of raising, and the values saved inside it survive. Trailing code goes in
+an invoke rather than after the `with` because `tracer.result` outside the block
+raises ``Cannot access `result` outside of interleaving``.
+
+A stop string beats both minimums: `stop_strings=["Paris"]` still ends the run
+early, so a bounded loop over that generation still raises even with
+`min_new_tokens=` set. Use `tracer.all()` when the run has stop conditions.
 
 ## Nothing came back
 
