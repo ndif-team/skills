@@ -421,7 +421,13 @@ occupies.
 
 **Prompt pairs.** Same token length, same structure, differing only in the fact
 under test. Unequal lengths mean position `i` is not the same thing in both runs
-and every result is garbage. Check with an assert, as in the setup above.
+and every result is garbage. Check with an assert, as in the setup above. The
+constraint is stronger than it looks in a batched sweep: every invoke's
+activations are padded to the batch's longest prompt, so an absolute index shifts
+with the batch's contents while `[:, -1, :]` does not. Every sweep in this skill
+batches invokes of one prompt pair at one length, which is what makes
+`slice(1, 5)` and the appended result order safe here; neither survives a mixed
+length batch. See the `nnsight` skill on invokes and batching.
 
 **Which activation.** The residual stream (`block.output`) tells you *where*
 information is; attention output tells you *what moved it*; MLP output tells you

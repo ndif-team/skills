@@ -1,6 +1,6 @@
 ---
 name: circuit-discovery
-description: Find the subgraph of components a model uses for a task and prove it is the right one — task and metric design, per-head attribution to rank candidates, edge attribution and path patching for connections, greedy pruning, and the faithfulness/completeness/minimality tests that separate a circuit from a list of high-scoring components. Use for IOI-style circuit analysis, for automating what activation patching does one component at a time, and whenever a claim of the form "these components implement this behavior" needs evidence.
+description: Find the subgraph of components a model uses for a task and prove it is the right one — task and metric design, per-head attribution to rank candidates, edge attribution and path patching for connections, greedy pruning, and the faithfulness/completeness/minimality tests that separate a circuit from a list of high-scoring components, including the empty-circuit floor an ablation score has to be scaled against and how to check that the test can fail at all. Use for IOI-style circuit analysis, for automating what activation patching does one component at a time, and whenever a claim of the form "these components implement this behavior" needs evidence.
 ---
 
 # Circuit Discovery
