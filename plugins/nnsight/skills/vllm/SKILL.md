@@ -117,9 +117,10 @@ assert steps[3][1] is True
   naming what it asked for and what the run made:
   `OutOfOrderError: 'model.samples.i4' was never reached: the loop asked for
   iteration 4 of 'model.samples' and the run reached it 4 times ...`. Hold the run
-  to the count with `ignore_eos=True` or `min_tokens=N` (vLLM's spelling; the error
-  text names `min_new_tokens=`, which this path refuses), or loop with
-  `tracer.all()` and put the trailing statements after the `with` block. An open
+  to the count with `ignore_eos=True` or `min_tokens=N` (vLLM's spelling; the
+  error text names it, alongside transformers' `min_new_tokens=`), or loop with
+  `tracer.all()` and put the trailing statements in a separate `tracer.invoke()`
+  — `tracer.result` cannot be read after the `with` block. An open
   `tracer.iter[:]` / `tracer.all()` ends *by* outrunning the run, so it warns
   instead — from the EngineCore subprocess, so `warnings.catch_warnings` in your
   code never sees it.
