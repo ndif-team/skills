@@ -37,8 +37,12 @@ with model.trace(prompt):
         logits = model.lm_head(model.transformer.ln_f(resid))    # applied out of order
         top_per_layer.append(logits[:, -1, :].argmax(dim=-1))
 
-for layer, token in enumerate(top_per_layer):
-    print(f"layer {layer:2d}: {model.tokenizer.decode(token[0])!r}")
+decoded = [model.tokenizer.decode(token[0]) for token in top_per_layer]
+for layer, token in enumerate(decoded):
+    print(f"layer {layer:2d}: {token!r}")
+
+assert decoded[:6] == [" the"] * 6
+assert decoded[10:] == [" Paris", " Paris"]
 ```
 
 ```
@@ -54,8 +58,52 @@ The whole sweep is **one forward pass**. Calling `model.lm_head(...)` inside the
 trace runs its `forward` directly — no hooks, no ordering constraint — so you can
 apply the unembedding to a layer-5 activation without re-running anything.
 
-Do not write `block.output[0]`: a GPT-2 block returns a plain tensor, so that
-indexes batch row 0. (See the `nnsight` skill.)
+Do not write `block.output[0]`: a block returns a plain tensor on every family
+tested, so that indexes batch row 0 — no error, and a lens that decodes the same
+token at every layer. (See the `nnsight` skill.)
+
+## Check the wiring before you read anything off it
+
+Applied to the **last** block, the lens is the model's own final computation, so
+it must reproduce the model's logits exactly. One line tells you whether the
+norm, the head and the block output you picked are the right three:
+
+```python
+with model.trace(prompt):
+    lens = model.lm_head(model.transformer.ln_f(model.transformer.h[-1].output)).save()
+    real = model.output.logits.save()
+
+assert torch.equal(lens, real), (lens - real).abs().max()
+```
+
+Run it on any model before plotting. A mismatch means one of three things, none
+of which raises on its own:
+
+- **the wrong norm**, or none — `lm_head(resid)` without the final norm decodes
+  `' the'` at probability `1.0000` at *every* GPT-2 layer, which looks like a
+  confident lens and reads exactly like the "does not transfer" symptom below;
+- **the wrong head or block output** — `block.output[0]` on a tensor, or a head
+  attribute the model does not have;
+- **the model post-processes the logits.** `google/gemma-2-2b` softcaps them
+  (`config.final_logit_softcapping = 30.0`), so the check fails by `51.0` and the
+  uncapped distribution is far too sharp: max probability `0.9995` against the
+  model's `0.9257`, entropy `0.0050` against `0.6010`.
+
+Reapply the cap yourself and every layer is read on the model's own scale. Check
+`model.config` rather than a list of model names — Gemma-3 sets
+`final_logit_softcapping` to `None`, and GPT-2 has no such attribute at all:
+
+```python
+cap = getattr(model.config, "final_logit_softcapping", None)
+
+with model.trace(prompt):
+    logits = model.lm_head(model.transformer.ln_f(model.transformer.h[-1].output))
+    if cap is not None:
+        logits = torch.tanh(logits / cap) * cap
+    capped = logits.save()
+
+assert torch.equal(capped, real)      # cap is None here; on gemma-2 this is what makes it hold
+```
 
 ## Top-k, and the probability trajectory of one token
 
@@ -135,13 +183,15 @@ for layer, (a, b) in enumerate(zip(eiffel, colosseum)):
 
 ## Other architectures
 
-The recipe is always *final norm, then unembedding* — only the names change.
+The recipe is always *final norm, then unembedding* — only the names change. A
+block's `.output` is a plain tensor in every row of this table (nnsight 0.8,
+`transformers` 5.15); none of them wants a `[0]`.
 
 | Family | Residual | Final norm | Unembed |
 |---|---|---|---|
 | GPT-2 | `model.transformer.h[i].output` | `model.transformer.ln_f` | `model.lm_head` |
-| Llama / Mistral / Qwen | `model.model.layers[i].output[0]` | `model.model.norm` | `model.lm_head` |
-| GPT-NeoX / Pythia | `model.gpt_neox.layers[i].output` | `model.gpt_neox.final_layer_norm` | `model.embed_out` |
+| Llama / Mistral / Qwen / SmolLM2 | `model.model.layers[i].output` | `model.model.norm` | `model.lm_head` |
+| GPT-NeoX / Pythia | `model.gpt_neox.layers[i].output` | `model.gpt_neox.final_layer_norm` | `model.lm_head` |
 
 ```python
 llama = TransformersModel("HuggingFaceTB/SmolLM2-135M-Instruct", dispatch=True)
@@ -149,15 +199,35 @@ llama = TransformersModel("HuggingFaceTB/SmolLM2-135M-Instruct", dispatch=True)
 with llama.trace("The capital of France is"):
     tops = nnsight.save([])
     for block in llama.model.layers:
-        logits = llama.lm_head(llama.model.norm(block.output[0]))
+        logits = llama.lm_head(llama.model.norm(block.output))
         tops.append(logits[0, -1].argmax(dim=-1))
 
-print([llama.tokenizer.decode(t) for t in tops[-6:]])
+decoded = [llama.tokenizer.decode(t) for t in tops[-6:]]
+print(decoded)
+
+assert decoded == [" the", " the", " the", " the", " the", " Paris"]
 ```
 
-Note `block.output[0]` there — on this checkpoint the block returns a tuple.
-Confirm per model with `scripts/inspect_model.py` in the `nnsight` skill rather
-than copying either form.
+The answer arrives at the last layer and nowhere earlier — see
+[Reading the result honestly](#reading-the-result-honestly). That is the common
+case; GPT-2's smooth trajectory is the exception.
+
+Confirm the row for your own checkpoint by running the wiring check on it. It
+catches a wrong unembedding name in one line — Pythia's, for instance, is
+`model.lm_head`, and `model.embed_out` raises `AttributeError` naming the module
+rather than the model:
+
+```python
+pythia = TransformersModel("EleutherAI/pythia-70m-deduped", dispatch=True)
+
+with pythia.trace("The capital of France is"):
+    lens = pythia.lm_head(
+        pythia.gpt_neox.final_layer_norm(pythia.gpt_neox.layers[-1].output)
+    ).save()
+    real = pythia.output.logits.save()
+
+assert torch.equal(lens, real)
+```
 
 ## During generation
 
@@ -185,15 +255,24 @@ the lens does not transfer, not that the model knows nothing. Symptoms: every
 layer decodes to the same high-frequency token, or probabilities stay near zero
 until the final layer and then jump.
 
-If you hit that, the fix is a **tuned lens**: fit a per-layer affine probe
-(`W_L h_L + b_L`) to match the final-layer distribution, then decode through that.
-It requires a training pass over a corpus, but it is the standard remedy and makes
-cross-layer comparisons meaningful.
+Before concluding that, run the wiring check. A lens missing its final norm
+produces the same symptom — one high-frequency token at probability `1.0000` on
+every layer — and no amount of tuned lens fixes a missing `ln_f`.
+
+If the wiring is right, the remedy is a **tuned lens**: keep the model's frozen
+final norm and unembedding, and learn one affine translator per layer that maps
+`h_L` into the final layer's basis first
+([Belrose et al., 2023](https://arxiv.org/abs/2303.08112)), so the decode is
+`lm_head(ln_f(A_L(h_L)))`. It costs a training pass over a corpus and makes
+cross-layer comparisons meaningful. Decoding `lm_head(A_L(h_L))` instead — with
+the norm dropped — is a different and worse thing: a LayerNorm is not affine, and
+its per-token scale varies 33x across the positions of one GPT-2 prompt.
 
 Other things that quietly invalidate a reading:
 
 - **Skipping the final norm.** `lm_head(resid)` without `ln_f` produces
-  scale-wrong logits that still look like a distribution.
+  scale-wrong logits that still look like a distribution — and a *more* confident
+  one than the correct lens.
 - **Comparing probabilities across layers as if calibrated.** Use them to locate
   transitions, not as calibrated confidences.
 - **Reading only the last position.** Where information appears in the sequence is

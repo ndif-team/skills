@@ -61,9 +61,11 @@ print(len(activations), activations[0].shape)      # 12 layers, [128, 768]
 
 **Wrap collection in `torch.no_grad()`.** A trace runs with autograd on, so a saved
 activation comes back with `requires_grad=True` and a live `grad_fn` that pins the
-whole forward graph — measured at **3.6x peak memory** for a pure capture, and up
-to ~18x on longer runs. The values are bit-identical either way. `.detach()` on the
-saved tensor does not help: the graph is already built by then.
+whole forward graph. This capture — 128 examples, 12 layers — peaks at **279 MiB**
+of activation memory above the weights under `no_grad` and **1293 MiB** without it,
+for bit-identical values. The gap is the retained graph, so it grows with sequence
+length and batch size. `.detach()` on the saved tensor does not help: the graph is
+already built by then.
 
 For datasets too large for one batch, chunk the texts and concatenate — still one
 pass per chunk, never one pass per layer. `tracer.cache()` is the alternative when
@@ -168,7 +170,8 @@ the eventual answer to a question. Design the dataset so that no surface cue
 predicts the label.
 
 **A random direction** of the same norm, scored the same way, is the floor for any
-claim that "this direction encodes X".
+claim that "this direction encodes X". It does the most work in the causal step
+below, where it is run against the probe direction on the same prompt.
 
 ## 6. Difference-in-means probes
 
@@ -206,26 +209,185 @@ test_prompt = "The movie was"
 good = model.tokenizer.encode(" great")[0]
 bad = model.tokenizer.encode(" bad")[0]
 
-with model.trace() as tracer:
-    with tracer.invoke(test_prompt):
-        base = model.output.logits[0, -1]
-        baseline_gap = (base[good] - base[bad]).detach().save()
+def logit_gap(vector):
+    """logit(' great') - logit(' bad'), after adding `vector` at LAYER or nothing."""
+    with model.trace(test_prompt):
+        if vector is not None:
+            norm = model.transformer.h[LAYER].output[0, -1].norm()
+            model.transformer.h[LAYER].output[:, -1, :] += scale * norm * vector
+        logits = model.output.logits[0, -1]
+        gap = (logits[good] - logits[bad]).detach().save()
+    return float(gap)
 
-    with tracer.invoke(test_prompt):
-        norm = model.transformer.h[LAYER].output[0, -1].norm()
-        model.transformer.h[LAYER].output[:, -1, :] += scale * norm * probe_direction
-        pushed = model.output.logits[0, -1]
-        steered_gap = (pushed[good] - pushed[bad]).detach().save()
+baseline = logit_gap(None)
+steered = logit_gap(probe_direction)
+negated = logit_gap(-probe_direction)
 
-print(f"logit(' great') − logit(' bad'):  baseline {float(baseline_gap):+.3f}"
-      f"   steered {float(steered_gap):+.3f}")
+random_generator = torch.Generator().manual_seed(0)
+random_gaps = []
+for _ in range(8):
+    noise = torch.randn(probe_direction.shape, generator=random_generator)
+    random_gaps.append(logit_gap((noise / noise.norm()).to(model.device)))
+
+print(f"baseline {baseline:+.3f}   probe {steered:+.3f}   negated {negated:+.3f}")
+print(f"random directions: mean {sum(random_gaps) / len(random_gaps):+.3f}"
+      f"   max {max(random_gaps):+.3f}")
+
+assert steered > baseline > negated
+assert steered > max(random_gaps)
 ```
+
+```
+baseline +1.129   probe +5.315   negated -2.950
+random directions: mean +1.020   max +1.846
+```
+
+The direction moves the gap by `+4.19` and its negation by `-4.08`; eight random
+directions of the same norm land between `-0.02` and `+1.85`, straddling the
+baseline. **The last two lines are the result.** Without them the first two
+numbers are equally consistent with "any perturbation of this size moves the
+logits", and a steering demonstration with no random control is the failure this
+skill is about.
 
 If steering along the probe direction moves the behavior and a random direction of
 the same norm does not, the direction is causally relevant. If it does not move
 anything, you have a decodable feature the model does not read — a real and common
 result worth reporting as such. See the `model-steering` skill for scaling and
 sweeping.
+
+## 8. Concept erasure — the strong version of the causal test
+
+Steering asks whether pushing along the direction changes the behavior. Erasure
+asks the complement: **remove the concept's linear subspace from the residual
+stream, let the rest of the network run on the erased state, and see what breaks.**
+
+Both standard methods are affine maps of the same shape, `x -> mu + (x - mu) @ M`,
+which hold the mean fixed and remove variance along the erased directions.
+**LEACE** ([Belrose et al., 2023](https://arxiv.org/abs/2306.03819)) is the
+smallest such map under which no linear probe beats chance; for a binary concept
+it is rank 1 and has no hyperparameters. **INLP**
+([Ravfogel et al., 2020](https://arxiv.org/abs/2004.07667)) iterates
+probe-then-project, which gives a whole rank family from one fit.
+
+```python
+def fit_leace(features, y):
+    """LEACE: returns (M, mu) for x -> mu + (x - mu) @ M."""
+    X, z = features.double(), y.double()
+    n, d = X.shape
+    mu = X.mean(0)
+    centered, z_centered = X - mu, (z - z.mean()).unsqueeze(1)
+
+    sigma_xx = (centered.T @ centered) / (n - 1)
+    sigma_xz = (centered.T @ z_centered) / (n - 1)
+
+    values, vectors = torch.linalg.eigh(sigma_xx)
+    values = values.clamp(min=0)
+    keep = values > 1e-8 * values.max()
+    whiten = (vectors * torch.where(keep, values.clamp(min=1e-30).rsqrt(),
+                                    torch.zeros_like(values))) @ vectors.T
+    unwhiten = (vectors * torch.where(keep, values.sqrt(),
+                                      torch.zeros_like(values))) @ vectors.T
+
+    basis = whiten @ sigma_xz
+    basis = basis / basis.norm()
+    return torch.eye(d, dtype=torch.float64) - (unwhiten @ (basis @ basis.T) @ whiten).T, mu
+```
+
+**The erasure has to happen inside the forward pass.** Multiplying cached
+activations by `M` afterwards and retraining a probe shows only that a projection
+defeats a probe on a matrix of numbers — the model computed its logits from the
+unerased state. An assignment to `.output` inside the trace is the causal version,
+and everything downstream consumes the erased tensor:
+
+```python
+def collect(erasers=None):
+    """Residual stream at the last position, per layer, with the erasers running."""
+    erasers = erasers or {}
+    with torch.no_grad():
+        with model.trace(texts):
+            out = nnsight.save([])
+            for site, block in enumerate(model.transformer.h):     # forward order
+                if site in erasers:
+                    M, mu = erasers[site]
+                    block.output = mu + (block.output - mu) @ M
+                out.append(block.output[:, -1, :].detach().cpu().float())
+    return out
+
+SITES = list(range(LAYER, n_layers))
+device = model.device
+
+def to_device(spec):
+    return {s: (M.float().to(device), mu.float().to(device)) for s, (M, mu) in spec.items()}
+
+leace = to_device({s: fit_leace(activations[s][train_idx], labels[train_idx])
+                   for s in SITES})
+
+# rank-matched control: remove one arbitrary direction at the same sites
+control_generator = torch.Generator().manual_seed(0)
+random_erasers = {}
+for site in SITES:
+    vector = torch.randn(hidden, generator=control_generator)
+    vector = vector / vector.norm()
+    random_erasers[site] = (torch.eye(hidden) - torch.outer(vector, vector),
+                            activations[site][train_idx].mean(0))
+random_erasers = to_device(random_erasers)
+
+def decodability(erasers):
+    erased = collect(erasers)
+    return [round(train_probe(erased[s], labels, train_idx, test_idx)[0], 3) for s in SITES]
+
+print("no erasure        :", decodability(None))
+print("LEACE, all sites  :", decodability(leace))
+print("LEACE, site 6 only:", decodability({LAYER: leace[LAYER]}))
+print("random rank-1     :", decodability(random_erasers))
+```
+
+```
+no erasure        : [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+LEACE, all sites  : [0.462, 0.974, 1.0, 1.0, 0.974, 1.0]
+LEACE, site 6 only: [0.462, 1.0, 1.0, 1.0, 0.974, 1.0]
+random rank-1     : [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+```
+
+Three things to read off that table:
+
+- **The retrained probe is the anchor.** After any projection the *original*
+  probe fails by arithmetic — `P w` is nearly zero. Only a probe refitted on
+  activations collected with the erasure running says whether the concept is gone
+  for *any* linear probe.
+- **The random control removes exactly as many directions and erases nothing.**
+  The result is about *which* directions, not how many.
+- **One site is not enough, and neither is naive multi-site.** Decodability is
+  back at 0.974 one block later. Each site's eraser was fitted on that site's
+  *baseline* activations, but once block 6 is erased, block 7 sees a different
+  distribution. Refit greedily — erase 6, collect 7 with 6 erased, fit 7, and so
+  on — and it holds:
+
+```python
+sequential = {}
+for site in SITES:
+    seen = collect(to_device(sequential)) if sequential else activations
+    sequential[site] = fit_leace(seen[site][train_idx], labels[train_idx])
+
+print("sequential LEACE  :", decodability(to_device(sequential)))
+
+assert max(decodability(to_device(sequential))) < 0.6
+```
+
+```
+sequential LEACE  : [0.462, 0.487, 0.462, 0.462, 0.41, 0.462]
+```
+
+**An eraser only erases on the distribution it was fitted on.** LEACE's guarantee
+is exactly that, and it is easy to fit on pooled token positions and then report a
+last-token result the eraser never touched. Say which distribution you fitted.
+
+What is missing here is a behavioral measure: on this dataset the probe reads the
+adjective vocabulary, so erasing it is not erasing something the model computes.
+The `concept_erasure` tutorial on nnsight.net runs the same machinery on
+gender-of-name, where the model's use is visible at the logits, and reports the
+rank sweep, the perplexity cost against the random control, and generation under
+a persistent `model.edit(inplace=True)`.
 
 ## Practical notes
 
