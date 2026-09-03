@@ -218,24 +218,26 @@ Two constraints this validation carries:
   alternating sliding-window and full attention, for instance — layer 0 passing
   says nothing about layer *i*. Spot-check `probs.sum(-1)` at a mid-stack layer
   on a real prompt.
-- **fp16 checkpoints are refused.** `enable_attention_probs=True` forces eager
-  attention, which does the softmax in the checkpoint dtype where sdpa upcasts,
-  and float16 overflows there. `EleutherAI/pythia-70m-deduped` raises
-  `RenamingError: ... returns NaN logits with eager attention`. Load it with
-  `dtype=torch.float32` or `dtype=torch.bfloat16`.
+- **fp16 checkpoints give NaN probabilities.** `enable_attention_probs=True`
+  forces eager attention, which does the softmax in the checkpoint dtype where
+  sdpa upcasts, and float16 overflows there. `EleutherAI/pythia-70m-deduped`
+  loads at fp16 by default and returns NaN — and load validation does not catch
+  it (`allclose(nan, nan)` is False, so its logits check passes vacuously).
+  Load with `dtype=torch.float32` or `dtype=torch.bfloat16`, and check
+  `probs.isnan().any()` before trusting a new checkpoint.
 
-`check_renaming=False` does not withdraw the accessor; it skips this validation
-and warns that the probabilities are unverified for the architecture. Leave it on.
+`check_renaming=False` also disables the accessor entirely —
+`attn_probs_available` stays False even with `enable_attention_probs=True`.
+Leave it on.
 
 ### When the accessor cannot resolve
 
 nnterp reaches the probabilities through the attention forward's
 `attention_interface_1` operation (`nnterp/rename_utils.py`,
-`default_attention_prob_source` and `attention_interface_source`), and that
-name follows whatever transformers writes. If a transformers release rewrites
-the line, construction fails with a `RenamingError` naming the operation it
-looked for. `.source` on the model prints the real names, and works outside a
-trace:
+`default_attention_prob_source`), and that name follows whatever transformers
+writes. If a release rewrites the line, construction fails with the raw
+`SourceNotAvailable`/`AttributeError` from that access. `.source` on the model
+prints the real names, and works outside a trace:
 
 ```python
 print(with_probs.layers[0].self_attn.source)      # the forward, with operation labels
@@ -305,9 +307,10 @@ print(a.shape, c.shape)
   remote=True)` works inside remote traces — see the `nnsight-remote` skill.
 - Under eager attention the attention module returns `(output, weights)`, and
   `weights` is bit-identical to `attention_probabilities[i]` on every family
-  tested. nnterp cross-checks against it at load. It is read-only: the weights
-  are returned rather than consumed, so writing to `self_attn.output[1]` changes
-  nothing downstream and reports no error. Edit through the accessor.
+  tested — a label-free second reading to sanity-check against when a label
+  shift is suspected. It is read-only: the weights are returned rather than
+  consumed, so writing to `self_attn.output[1]` changes nothing downstream and
+  reports no error. Edit through the accessor.
 - `check_renaming=True` (the default) is what makes construction fail loudly on
   an architecture whose modules do not resolve. Turning it off does not fix a
   failing load, it only stops the checking — the accessors still point wherever
