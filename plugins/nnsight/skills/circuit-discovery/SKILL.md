@@ -101,9 +101,14 @@ for layer, head in ranked:
 ```
 
 ```
-L8H10 +1.419    L7H9  +1.070
-L8H6  +1.349    L9H9  +1.016
-L5H5  +1.114    L10H0 +0.613
+L8H10 attribution +1.419
+L8H6  attribution +1.349
+L5H5  attribution +1.114
+L7H9  attribution +1.070
+L9H9  attribution +1.016
+L10H0 attribution +0.613
+L7H3  attribution +0.588
+L3H0  attribution +0.499
 ```
 
 These are the published IOI heads — L9H9 and L10H0 are name movers, L8H6/L8H10 are
@@ -114,11 +119,12 @@ Attribution is a screen, not a result: it is a linear approximation and it fails
 for large interventions (see the `attribution-patching` skill). Everything it
 ranks must be confirmed with a real intervention.
 
-## 4. Verify — faithfulness with a control
+## 4. Verify — faithfulness against a floor that the intervention can reach
 
 The strongest single test: **mean-ablate every head outside the candidate circuit**
-and check that the metric survives. And run the same test on a random set of the
-same size, which is the control almost every write-up omits.
+and check that the metric survives. Two things decide whether the resulting number
+means anything, and the second one is the one write-ups omit: a control circuit of
+the same size, and a **floor** — what the metric reads when the circuit is empty.
 
 ```python
 with model.trace(clean):
@@ -134,6 +140,13 @@ control = set()
 while len(control) < len(circuit):
     control.add((random.randrange(n_layers), random.randrange(n_heads)))
 
+# a circuit that is wrong on purpose: ten heads from the first three layers, which
+# are too early to be doing name selection at all
+random.seed(1)
+wrong = set()
+while len(wrong) < len(circuit):
+    wrong.add((random.randrange(0, 3), random.randrange(n_heads)))
+
 def keep_only(keep):
     with model.trace(clean):
         for layer in range(n_layers):
@@ -145,22 +158,37 @@ def keep_only(keep):
         result = logit_diff(model.output.logits).detach().save()
     return float(result)
 
-span = float(clean_metric) - float(corrupt_metric)
-for label, keep in [("circuit", circuit), ("random", control)]:
+floor = keep_only(set())
+span = float(clean_metric) - floor
+
+print(f"{'empty circuit (the floor)':28} -> {floor:+.3f}")
+for label, keep in [("top-10 by attribution", circuit), ("random 10", control),
+                    ("10 heads from layers 0-2", wrong)]:
     value = keep_only(keep)
-    print(f"{label:8} keep {len(keep)} heads -> {value:+.3f} "
-          f"({(value - float(corrupt_metric)) / span * 100:.0f}% of clean)")
+    print(f"{label:28} -> {value:+.3f}   {(value - floor) / span * 100:6.1f}% of clean")
+
+assert (keep_only(circuit) - floor) / span > 0.9      # the circuit carries the task
+assert (keep_only(wrong) - floor) / span < 0.1        # a wrong circuit does not
 ```
 
 ```
-circuit  keep 10 heads -> +2.574 (99% of clean)
-random   keep 10 heads -> +0.747 (65% of clean)
+empty circuit (the floor)    -> +0.785
+top-10 by attribution        -> +2.574     95.7% of clean
+random 10                    -> +0.747     -2.0% of clean
+10 heads from layers 0-2     -> +0.783     -0.1% of clean
 ```
 
-Ten heads out of 144 recover 99% of the behavior. **And the control is the reason
-this is meaningful**: a random set of ten already recovers 65%, because
-mean-ablation is gentle and the model is redundant. Reporting 99% without the 65%
-would badly overstate the finding.
+**Scale against the floor, not against the corrupt metric.** Mean-ablating heads
+cannot reach `−2.772`: the MLPs and the residual stream are untouched and they
+alone hold the metric at `+0.785`. Divide by `clean − corrupt` instead of
+`clean − floor` and every one of these numbers inflates by the same 66 points —
+the empty circuit scores 66%, the random control 65%, and the *worst* ten heads by
+attribution score 85%. On that scale nothing can fail, which is why the test needs
+the two lines above it: a wrong circuit scores `−0.1%`, and a test that a wrong
+answer passes is not a test.
+
+The floor is one extra `keep_only(set())` call. Run it before reporting any
+ablation-based score.
 
 ## 5. Connect the components
 
@@ -203,23 +231,29 @@ holds:
 
 ```python
 current = set(circuit)
-threshold = 0.90 * span + float(corrupt_metric)
+threshold = 0.90 * span + floor
 
 for member in sorted(circuit, key=lambda lh: scores[lh[0], lh[1]]):
     trial = current - {member}
     if keep_only(trial) >= threshold:
         current = trial
 
-print(f"pruned circuit ({len(current)} heads): {sorted(current)}")
+pruned_value = keep_only(current)
+print(f"pruned circuit ({len(current)} heads): {sorted(current)} -> {pruned_value:+.3f} "
+      f"({(pruned_value - floor) / span * 100:.1f}% of clean)")
+assert pruned_value >= threshold
 ```
 
 ```
-pruned circuit (2 heads): [(9, 9), (10, 0)]
+pruned circuit (3 heads): [(7, 9), (9, 9), (10, 0)] -> +2.523 (93.0% of clean)
 ```
 
-Ten heads prune to **two** — L9H9 and L10H0, exactly the name-mover heads — while
-still holding 90% of the metric. Removing the lowest-scoring member first tends to
-find a smaller circuit than removing the highest.
+Ten heads prune to **three** — the name movers L9H9 and L10H0 plus the
+S-inhibition head L7H9 — while still holding 90% of the metric measured from the
+floor. Removing the lowest-scoring member first tends to find a smaller circuit
+than removing the highest. Prune against the floor: the same loop with the
+corrupt-metric threshold drops L7H9 as well, because on that scale a two-head
+circuit clears 90% without it.
 
 Minimal is not the same as complete: this pair is enough to *produce* the behavior
 under mean ablation, but the S-inhibition and induction heads that were pruned are
@@ -230,9 +264,10 @@ the full candidate set, and say which test each survived.
 
 | Test | Question | How |
 |---|---|---|
-| **Faithfulness** | does the circuit alone do the task? | ablate everything outside it; compare to a random-set control |
-| **Completeness** | is anything important missing? | ablate the circuit; the metric should collapse to near-corrupt |
+| **Faithfulness** | does the circuit alone do the task? | ablate everything outside it; compare to a random-set control and to the empty circuit |
+| **Completeness** | is anything important missing? | ablate the circuit; the metric should collapse toward the floor |
 | **Minimality** | is every member needed? | remove each member; the metric should drop |
+| **Falsifiability** | can this test fail? | run it on a circuit you know is wrong; it must score badly |
 
 ```python
 inside = keep_only(circuit)
@@ -243,7 +278,8 @@ with model.trace(clean):
     knocked_out = logit_diff(model.output.logits).detach().save()
 
 print(f"circuit only:     {inside:+.3f}")
-print(f"circuit removed:  {float(knocked_out):+.3f}   (clean {float(clean_metric):+.3f})")
+print(f"circuit removed:  {float(knocked_out):+.3f}   "
+      f"(clean {float(clean_metric):+.3f}, floor {floor:+.3f})")
 ```
 
 **Sort your component sets before iterating them.** A circuit is naturally a
@@ -255,14 +291,15 @@ loops over `range(n_layers)`.)
 
 ```
 circuit only:     +2.574
-circuit removed:  +1.885   (clean +2.654)
+circuit removed:  +1.885   (clean +2.654, floor +0.785)
 ```
 
-Read that second line carefully: mean-ablating all ten circuit heads leaves the
-metric at +1.885, nowhere near the corrupt baseline of −2.772. **The circuit is
-sufficient but not complete** — the model still does most of the task without it,
-because other components take over. That is the honest state of this analysis, and
-it is exactly what the completeness test exists to reveal.
+Read that second line against the floor. Removing all ten circuit heads costs
+`2.654 − 1.885 = 0.769` of the `1.869` an ablation can take away — **41% of the
+achievable damage**. So the circuit is sufficient (96%) and far from complete: the
+model still does most of the task without it, because other components take over.
+That is the honest state of this analysis, and it is exactly what the completeness
+test exists to reveal.
 
 Completeness is the test people skip, and it is the one that catches a circuit
 that is *sufficient* but not the mechanism the model actually uses. When it fails,
@@ -288,8 +325,9 @@ token position and irrelevant at another. Full circuit work is over
 is a big object; report what you searched and what you pruned rather than
 implying exhaustiveness.
 
-**Redundancy is real.** The 65% control above is the reminder: models route around
-damage, so "the metric survived" is weak evidence unless the control is worse.
+**Redundancy is real.** The completeness result above is the reminder: ten heads
+that carry 96% of the task cost only 41% of it when removed, because models route
+around damage. "The metric survived" is weak evidence unless the control is worse.
 
 ## Related skills
 
