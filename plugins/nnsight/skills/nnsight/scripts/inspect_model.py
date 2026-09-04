@@ -152,8 +152,9 @@ def summarize(repo_id: str, prompt: str | None, grep: str | None, depth: int, di
             print(f"  block child {path}[i].{name}")
         shadowed = [name for name, _ in children if name in ("output", "input", "inputs")]
         if shadowed:
-            print(f"  NOTE: child module(s) named {shadowed} shadow nnsight's own property —")
-            print("        on this module use .nns_output / .nns_input instead")
+            print(f"  NOTE: child module(s) named {shadowed} collide with nnsight's own")
+            print(f"        properties, so they move: reach them as "
+                  f"{', '.join('.E_' + name for name in shadowed)}")
         for role, candidates in (
             ("embeddings", ["transformer.wte", "model.embed_tokens", "gpt_neox.embed_in", "embed_tokens"]),
             ("final norm", ["transformer.ln_f", "model.norm", "gpt_neox.final_layer_norm", "norm"]),

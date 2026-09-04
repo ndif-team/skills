@@ -60,8 +60,8 @@ batch with `tracer.invoke(...)` blocks.
 | `.device` / `.devices` | device(s) of its parameters |
 | `.path` | its dotted path in the tree |
 
-If a child module shadows one of these names, the property moves to `.nns_output` /
-`.nns_input` on that module.
+If a child module is named after one of these, the child moves to `.E_output` /
+`.E_input` on that module and the property keeps the plain name.
 
 ## Envoy methods
 

@@ -261,9 +261,11 @@ trace when you want values.
 ## Name collisions
 
 If a module's own children include a name nnsight uses (BERT's `output`
-submodule), the child keeps the name and nnsight's property moves to `.nns_output`
-(with a warning at load). Check with `print(model)` if a `.output` returns
-something that looks like a module rather than a tensor.
+submodule), the child moves to `.E_output` and `.output` keeps its usual meaning
+(with a warning at load). `print(model)` labels the child `E_output/output`, so
+the printed tree is the one to type. The child's path is unchanged, so
+`named_modules()` still lists it as `...attention.output`; it is attribute access
+that moved, which is what `get()` and `rename` go through.
 
 ## Related
 

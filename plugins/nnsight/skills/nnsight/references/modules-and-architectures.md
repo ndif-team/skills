@@ -84,8 +84,9 @@ Two notes from that table:
 - **Multimodal checkpoints nest the LM.** Gemma-3's text stack is under
   `model.language_model`, not at the root. Always inspect a VLM before writing
   paths.
-- **BERT blocks have a child module literally named `output`.** The child wins, so
-  nnsight's property moves to `.nns_output` on that module (it warns at load).
+- **BERT blocks have a child module literally named `output`.** nnsight's `.output`
+  wins, so the child moves to `.E_output` on that module (it warns at load). Its
+  path is unchanged, so `named_modules()` still lists it as `...attention.output`.
 
 ## Block internals run in a fixed order
 
