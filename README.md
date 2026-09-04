@@ -53,6 +53,7 @@ skill-installer install https://github.com/ndif-team/skills.git
 | `logit-lens` | Decoding what each layer predicts; tracking where an answer emerges. |
 | `activation-patching` | Locating the layers, positions, or heads that carry a behavior; DAS. |
 | `attribution-patching` | Scaling patching to whole models with a gradient approximation. |
+| `atp-star` | An attribution-patching score looks near zero for a component you suspect matters — correct saturated Q/K softmax and residual-path cancellation, then verify for real. |
 | `causal-tracing` | Corrupt-and-restore factual localization (ROME-style). |
 | `ablation` | Testing necessity — zero, mean, resample, and noise ablation. |
 | `attention-analysis` | Attention patterns, per-head metrics, induction/copy head detection. |

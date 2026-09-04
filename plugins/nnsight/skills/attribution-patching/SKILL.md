@@ -261,6 +261,8 @@ The last row is the recommended workflow.
 ## Related skills
 
 - `activation-patching` — the ground truth this approximates, and the verification step
+- `atp-star` — corrects saturated Q/K softmax and residual-path cancellation when a
+  score here looks suspiciously small, plus the exact-verification workflow
 - `circuit-discovery` — edge attribution and automated circuit search
 - `nnsight` — gradients, ordering rules, batching
 - `nnsight-remote` — running the two passes on a model you cannot host
