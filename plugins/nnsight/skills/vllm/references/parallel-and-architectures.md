@@ -85,6 +85,13 @@ To ablate an expert, mask its router logit: `mlp.gate.output[0][:, e] = -inf`.
 Qwen-MoE also carries `mlp.shared_expert` and `mlp.shared_expert_gate` as
 ordinary submodules.
 
+**This section is vLLM's layout only.** The same checkpoint under
+`TransformersModel` gives the router a *three*-tuple `(logits, weights, index)`,
+and the block uses `[1]` and `[2]` — so `gate.output[0][:, e] = -inf` there is a
+silent no-op. The `nnsight` skill's
+[modules-and-architectures.md](../../nnsight/references/modules-and-architectures.md)
+has the `TransformersModel` version.
+
 ## Hybrid (linear-attention) trunks
 
 Qwen3-Next / Qwen3.5 / Qwen3.6 interleave gated-delta-net layers with full

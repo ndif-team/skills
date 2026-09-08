@@ -235,7 +235,7 @@ Wrap the sweep in a bounded iteration loop to watch the trajectory at every
 generated token:
 
 ```python
-with model.generate(prompt, max_new_tokens=3) as tracer:
+with model.generate(prompt, max_new_tokens=3, do_sample=False) as tracer:
     per_step = nnsight.save([])
     for step in tracer.iter[:3]:
         logits = model.lm_head(model.transformer.ln_f(model.transformer.h[8].output))
@@ -245,6 +245,12 @@ with model.generate(prompt, max_new_tokens=3) as tracer:
 print("layer-8 guess per step:", [model.tokenizer.decode(t) for t in per_step])
 print("actually generated:    ", model.tokenizer.decode(ids[0, -3:]))
 ```
+
+`do_sample=False` is load-bearing. `generate` follows the checkpoint's own
+`generation_config`, and most instruct checkpoints set `do_sample=True` there —
+so a **final-layer** lens reading that disagrees with the token that came out is
+sampling, not a broken lens. Rule out sampling before you go looking for a wrong
+norm or a wrong unembedding.
 
 ## Reading the result honestly
 

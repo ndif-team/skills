@@ -89,9 +89,9 @@ convert it first; see the `nnsight-debugging` skill.
 | You want | Use | You get back |
 |---|---|---|
 | one forward pass | `model.trace(x)` | the model's output object |
-| generated tokens | `model.generate(x, max_new_tokens=N)` | token ids on `tracer.result` (greedy by default) |
+| generated tokens | `model.generate(x, max_new_tokens=N)` | token ids on `tracer.result` (the checkpoint's `generation_config` decides sampling — pass `do_sample=False`) |
 | decoded text / labels | `model.pipe(x, ...)` | pipeline records (often sampled — pass `do_sample=False`) |
-| shapes, no compute | `model.scan(x)` | fake tensors: shapes and dtypes only — it cannot see devices or values |
+| shapes, no compute | `model.scan(x)` | fake tensors: shapes and dtypes only — it cannot see devices or values. Loader-backed models only (`TransformersModel`, `DiffusionModel`, `VLLM`); plain `NNsight(module)` has no `.scan` |
 | several traces sharing values | `model.session()` | values flow between traces |
 | a permanent intervention | `model.edit(inplace=True)` | replayed on every later run |
 
@@ -191,13 +191,16 @@ Read the one that matches the task before writing code.
 | [references/caching-and-scan.md](references/caching-and-scan.md) | `tracer.cache()`, `model.scan()`, fake-tensor rules |
 | [references/control-flow.md](references/control-flow.md) | `skip`, `tracer.stop`, `session`, `edit`, conditionals |
 | [references/source-tracing.md](references/source-tracing.md) | `.source` — attention patterns and other values inside a forward |
-| [references/modules-and-architectures.md](references/modules-and-architectures.md) | model classes, per-family module paths, `rename`, wrapping your own module, attaching SAEs/probes |
+| [references/modules-and-architectures.md](references/modules-and-architectures.md) | model classes, per-family module paths (MoE, SSM, hybrids included), `rename`, wrapping your own module, attaching SAEs/probes, custom served values with `eproperty` / `envoys=` |
 | [references/api-reference.md](references/api-reference.md) | every method, property, config key, and exception in tables |
 
 Scripts (run them, don't read them):
 
-- `scripts/inspect_model.py <repo_id> [--prompt P] [--grep attn] [--depth 2]` —
-  module paths, execution order, tensor-vs-tuple, without loading weights
+- `scripts/inspect_model.py <repo_id> [--prompt P] [--grep attn] [--depth 2]
+  [--task text-generation] [--trust-remote-code]` — module paths, execution order,
+  tensor-vs-tuple and MoE router/expert paths, without loading weights. It prints
+  the task and the class it built: the task decides the class, and the class
+  decides the tree
 - `scripts/check_env.py [--remote]` — versions, GPUs, NDIF key/host, deployed
   models, and the local-vs-NDIF package diff
 

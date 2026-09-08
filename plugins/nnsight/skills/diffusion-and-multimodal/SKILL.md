@@ -7,9 +7,9 @@ description: Trace and intervene on models that are not text-only — vision-lan
 
 `trace`, `.output`, `save` and gradients work on these models exactly as they do
 on a language model. What changes is **how you build the input**, **where the
-module tree puts things**, and one hard limit: a multimodal input carries pixel
-or audio tensors, and those cannot be padded into a batch, so each condition in a
-sweep is its own forward pass.
+module tree puts things**, and how batching works: pixel and audio tensors do not
+pad, so only some input forms batch across invokes, and the ones that do are
+scoped per invoke on the language side only.
 
 <!-- test: setup -->
 ```python
@@ -74,10 +74,18 @@ names are not shared across families. Measured on transformers 5.15:
 | `llava-hf/llava-interleave-qwen-0.5b-hf` | `model.vision_tower` | `model.multi_modal_projector` | `model.language_model` |
 | `trl-internal-testing/tiny-LlavaForConditionalGeneration` | `model.vision_tower` | `model.multi_modal_projector` | `model.language_model` |
 | `hf-internal-testing/tiny-random-Idefics3ForConditionalGeneration` | `model.vision_model` | *(none exposed)* | *(no `language_model`)* |
-| `Qwen/Qwen3-VL-4B-Instruct` | `model.visual` (+ `merger`) | *(none)* | `model.language_model` |
+| `Qwen/Qwen3-VL-4B-Instruct` | `model.visual` | `model.visual.merger` **and** `model.visual.deepstack_merger_list` | `model.language_model` |
 
 Check before you index. `scripts/inspect_model.py <repo> --grep vision` from the
 `nnsight` skill prints the paths.
+
+**Qwen3-VL has more than one adapter.** Image features reach the language stream
+twice: through `visual.merger`, and again through `visual.deepstack_merger_list`,
+whose outputs are injected into the residual after language layers 0-2 (visible
+at `language_model.source.self__deepstack_process_0`). Zeroing `visual.merger`
+alone — or the image span at `layers[0].input` — leaves the answer unchanged and
+makes a correct intervention look broken. Zero the merger *and* every deepstack
+merger.
 
 ### Reading the vision path
 
@@ -176,10 +184,10 @@ with image: 'The color of the image is not specified in the caption.'
 projector zeroed: 'The color is this.'
 ```
 
-### One condition, one forward pass
+### What batches, and what a batched VLM trace still gets wrong
 
-Two separate traces above, not two invokes. A processor's encoding cannot be
-batched:
+Two separate traces above, not two invokes — a **processor encoding** cannot be
+batched, and neither can the `prompt, images=` form:
 
 <!-- test: expect-error NotImplementedError -->
 ```python
@@ -191,9 +199,43 @@ with vlm.trace() as tracer:
 # NotImplementedError: Can't batch these inputs; pass text or token ids.
 ```
 
-nnsight batches text and token ids, not a payload with pixel values attached. The
-sweep pattern from the `nnsight` skill (one invoke per variant, one forward pass)
-does not apply here: a 12-layer ablation sweep on a VLM is 12 passes.
+**Chat messages with the image embedded do batch.** nnsight sends those through
+the task pipeline's own preprocessing, which collates `pixel_values` along dim 0,
+so the sweep pattern from the `nnsight` skill applies after all: one invoke per
+variant, one forward pass.
+
+```python
+def chat(img, question="What color is this?"):
+    return [{"role": "user", "content": [{"type": "image", "image": img},
+                                         {"type": "text", "text": question}]}]
+
+with vlm.trace() as tracer:
+    swept = nnsight.save([])
+    for layer in (4, 8, 12):
+        with tracer.invoke(chat(image)):
+            vlm.model.language_model.layers[layer].output[:] = 0
+            swept.append(vlm.output.logits[0, -1].argmax())
+
+print("ablating one layer per invoke, one pass:", [int(t) for t in swept])
+assert len(swept) == 3
+```
+
+**Only the language side is reliably scoped per invoke.** nnsight decides an
+invoke's rows from a value's leading dimension — the batch size, or a whole
+multiple of it (see the `nnsight` skill's
+[batching.md](../nnsight/references/batching.md#which-values-are-scoped-to-your-rows)).
+A vision-tower or projector activation is batched over **images**, which lines up
+with the prompt rows only when every invoke carries the same number of images. Put
+a two-image invoke beside a one-image invoke and
+`vlm.model.multi_modal_projector.output` is `(3, 729, 1024)` in *both* of them:
+zeroing it in the second moves the first invoke's untouched logits by 8.4
+(llava-interleave-qwen-0.5b, bf16). The write warns when this happens; the read
+does not.
+
+So batch **language-side** sweeps, and give every vision-side intervention its
+own trace unless the image counts match. The obvious "does batched match single?"
+control does not catch this: the language side agrees exactly while the vision
+side leaks.
 
 ## Diffusion models
 
@@ -308,9 +350,14 @@ that on SD 1.5, Deep Floyd, SDXL and FLUX, with the module paths for each.
 
 Module paths for the lens differ by encoder: CLIP layers are
 `text_encoder.encoder.layers[i]` and return a tensor; T5 blocks are
-`text_encoder.encoder.block[i]` and return a tuple, so take `.output[0]`. SDXL
-and FLUX read a *penultimate* hidden state from their second encoder, so write
-there rather than into the norm.
+`text_encoder.encoder.block[i]` and return a tuple, so take `.output[0]`.
+
+**Find the read point in the pipeline's own `encode_prompt`, do not assume one.**
+SDXL and FLUX.1 take a *penultimate* hidden state from their second encoder, so
+`[-2]` is where to write; FLUX.2 uses a Qwen3 encoder and reads hidden states 9,
+18 and 27, which makes a write to `[-2]` a silent no-op that looks like a lens
+that does nothing. `inspect.getsource(sd.pipeline.encode_prompt)` settles it in
+one line.
 
 ### Previewing a partly-denoised latent
 
@@ -360,6 +407,14 @@ across steps all end up holding the last step's data.
 Guidance doubles the denoiser's batch. `guidance_scale=0.0` above keeps it at one
 row; above 1 the rows are the unconditional half followed by the conditional
 half, so row 0 decodes to the empty prompt's image, not the prompt's.
+
+**Under guidance, write by assignment rather than in place.** Every example here
+runs at `guidance_scale=0.0`, which is *not* the diffusers default (7.5). With
+guidance on, one prompt owns two non-adjacent row ranges, so the per-invoke value
+your block sees is stitched from both — a copy, not a view into the model's
+tensor. Reads are unaffected, but `output[:] = x` can write into that copy and
+never reach the model, with no error. `output = x` goes through the swap path and
+always lands. Whichever you use, check that the image actually moved.
 
 ### Cross-attention: where the prompt acts
 
@@ -454,7 +509,7 @@ assert short.shape[0] == 1 and windows.shape[0] == 7
 torch.Size([1, 18, 2]) torch.Size([7, 512, 2])
 ```
 
-Five things to know about these tasks:
+Six things to know about these tasks:
 
 - A chunked invoke is the whole batch. The row count belongs to the task, so
   putting one next to another invoke is refused with `task=... splits this invoke
@@ -465,6 +520,11 @@ Five things to know about these tasks:
 - An encoder-decoder task needs the decoder's side of the forward:
   `whisper` traces with `decoder_input_ids=` and gives one row per audio chunk
   (70 s at `chunk_length_s=30` is 3 rows of `[1500, 384]` at the encoder).
+- **Whisper runs its encoder twice.** The first pass is language detection, the
+  second is the transcription. A block that does not loop binds to the *first*
+  one, so an edit written to change the transcript changes the language guess
+  instead and the text comes back unaltered. Wrap it: `for _ in tracer.iter[:2]:`,
+  and act on the second iteration.
 - `mask-generation` is refused. Its preprocessing runs the model to embed the
   image before yielding one input per batch of candidate points, so there is no
   single forward to assemble. Use `model.pipe(image)`, or build an encoding with

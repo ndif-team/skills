@@ -73,7 +73,7 @@ with model.trace() as tracer:
         clean = model.output.logits[0, -1].argmax().save()
     with tracer.invoke(prompt):
         resid = model.transformer.h[LAYER].output
-        model.transformer.h[LAYER].output[:] = model.transformer.h[LAYER].sae(resid)
+        model.transformer.h[LAYER].output = model.transformer.h[LAYER].sae(resid)
         through_sae = model.output.logits[0, -1].argmax().save()
 
 print(f"clean {model.tokenizer.decode(clean)!r}  through SAE {model.tokenizer.decode(through_sae)!r}")
@@ -83,13 +83,21 @@ That comparison is the **cheapest quality check there is**: if the model's outpu
 changes when you route through the SAE, the reconstruction is losing something the
 model uses.
 
+**Replace the output, do not write into it.** `output[:] = sae(resid)` writes the
+SAE's result into the very tensor that was its input, and autograd refuses to
+differentiate back through it: `RuntimeError: one of the variables needed for
+gradient computation has been modified by an inplace operation`. That kills
+training the SAE, attributing through it, or taking any gradient past the layer —
+the whole reason to route the model through it. `output = sae(resid)` costs
+nothing and keeps the graph.
+
 To make the SAE permanent — and its internals observable from other traces — put
 the routing in an `edit` and pass `hook=True`:
 
 ```python
 with model.edit(inplace=True):
     resid = model.transformer.h[LAYER].output
-    model.transformer.h[LAYER].output[:] = model.transformer.h[LAYER].sae(resid, hook=True)
+    model.transformer.h[LAYER].output = model.transformer.h[LAYER].sae(resid, hook=True)
 
 with model.trace(prompt):
     encoder_out = model.transformer.h[LAYER].sae.encoder.output.save()   # observable
