@@ -1,6 +1,6 @@
 ---
 name: vllm
-description: Run nnsight interventions inside the vLLM inference engine — continuous batching, tensor parallelism, CUDA-graph taps, async streaming, an engine-wide edit() and nnsight-serve. Use when an experiment needs throughput or many concurrent prompts, a model sharded across GPUs, streamed tokens with interventions, or a served engine that other clients hit. Covers what a block sees on vLLM (flat [tokens, hidden] rows, the (hidden, residual) layer-output pair, live buffers), model.logits/model.samples, one prompt per invoke, passing values between invokes with two traces, sweeps with model.edit(), taps, and what is not supported.
+description: Run nnsight interventions inside the vLLM inference engine — continuous batching, tensor parallelism, CUDA-graph taps, async streaming, an engine-wide edit() and nnsight-serve. Use when an experiment needs throughput or many concurrent prompts, a model sharded across GPUs, streamed tokens with interventions, or a served engine that other clients hit. Covers what a block sees on vLLM (flat [tokens, hidden] rows, the (hidden, residual) layer-output pair, live buffers), model.logits/model.samples, one prompt per invoke, passing values between invokes with two traces, sweeps with model.edit(), taps, why .skip() can kill the engine, and what is not supported.
 ---
 
 # vLLM
@@ -46,10 +46,14 @@ assert not torch.equal(alias, resid) and alias.shape == resid.shape
    rows: the prefill serves every prompt token, each decode step serves one row.
    The last position is `[-1]`, never `[:, -1, :]`.
 2. **A decoder layer's `.output` is a pair `(hidden, residual)`.** vLLM fuses the
-   residual add into the next layer's norm, so `output[0]` is this layer's
-   sub-block output and `output[1]` the residual stream entering it; the residual
-   stream *after* the layer is `out[0] + out[1]`. Patching `output[0]` alone
-   changes almost nothing. Writing either element steers (the next norm adds them).
+   residual add into the next layer's norm, so `output[0]` is this layer's **MLP
+   output** and `output[1]` the residual stream **after this layer's attention** —
+   not the stream entering the layer, which is `layer.inputs[0][1] +
+   layer.inputs[0][2]` (measured on Llama-3.2-1B layers 6 and 15: `out[0]` matches
+   `mlp.output` exactly, `out[1]` differs from the layer's incoming stream by 0.98
+   and 2.4). The stream *after* the layer is `out[0] + out[1]`. Patching
+   `output[0]` alone changes almost nothing. Writing either element steers (the
+   next norm adds them).
 3. **Clone what you keep.** A served value is the model's live buffer, and the next
    layer's fused kernel rewrites it after your block returns — the un-cloned
    `alias` above comes back holding later data. Reduce or `.clone()` before saving.
@@ -321,6 +325,40 @@ model.clear_edits()
 - **[Tensor parallelism, MoE, hybrid trunks](references/parallel-and-architectures.md)**
   — what is gathered and what is a shard, the logit lens via `logits_processor`,
   router logits as a `(logits, bias)` pair, `linear_attn` vs `self_attn` layers.
+
+## `.skip()` can take the whole engine down
+
+`.skip()` is the one intervention that costs more than the request it is in. A
+skip has to supply a replacement for **every row of the step**, and a step's rows
+are whatever the scheduler put together — other traces of yours, other tenants'
+requests, and decodes of requests whose own block finished long ago. When the
+replacement does not tile them, the `ValueError` is raised outside the deferral
+that turns an intervention error into one failed request, so vLLM treats it as
+fatal: `EngineDeadError`, every in-flight request lost, the engine object unusable
+and only rebuildable (40-70 s).
+
+Whether that happens is the scheduler's decision, not your code's. A single-invoke
+skip is fine; two invokes where only the second skips is fine, because they are
+not co-scheduled; three invokes with the middle one skipping dies. **Treat
+`.skip()` as unsupported once more than one request can be in flight** — and note
+that "in flight" includes another client's traffic on a shared engine or
+`nnsight-serve`.
+
+If you use it anyway, on one prompt with nothing else running: **a decoder layer's
+`.input` is the positions tensor, not the hidden state.** vLLM calls
+`forward(positions, hidden_states, residual)`, so the pass-through idiom from the
+`nnsight` skill (`module.skip(module.input)`) feeds a `[tokens]` int64 vector in
+where a hidden state belongs and kills the engine. The pass-through here is:
+
+<!-- test: skip -->
+```python
+with model.trace(prompt, temperature=0.0, max_tokens=4):
+    args, _ = model.model.layers[10].inputs
+    model.model.layers[10].skip((args[1], args[2]))       # hidden, residual
+```
+
+To ablate a layer without skipping it, write its output instead — the compute is
+spent either way, but a write cannot kill the engine.
 
 ## Not supported on the vLLM path
 

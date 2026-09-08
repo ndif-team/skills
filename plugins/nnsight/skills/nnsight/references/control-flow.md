@@ -66,6 +66,11 @@ Rules:
   `skip` nor your module.
 - A skipped module's submodules never run, so reading their `.output` is out of
   order.
+- **`skip` advances the run past the module**, exactly as reading its `.output`
+  would. Anything earlier has to be read *above* the `skip` line: swapping the two
+  statements in the first example gives `OutOfOrderError:
+  'model.transformer.h.0.output.i0' was requested but the model already ran past
+  it`, which reads as a bug in the read rather than in the ordering.
 - In a batched trace, a skip must be applied in **every** invoke or none.
 - A skip is one-shot per module call; across generation steps, re-skip per step
   (`tracer.iter[...]`) or make it persistent with `edit`.

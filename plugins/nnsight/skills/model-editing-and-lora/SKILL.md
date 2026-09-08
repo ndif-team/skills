@@ -178,13 +178,23 @@ adapted = TransformersModel(
 )
 
 with adapted.trace("Hello"):
-    hidden = adapted.model.layers[16].output[0].save()
+    hidden = adapted.model.model.layers[16].output.save()
 ```
+
+Two traps in that one line. `adapted.model` is **not** the decoder stack: PEFT's
+attribute forwarding resolves it to the `LlamaForCausalLM`, which has no
+`.layers`, so the natural `adapted.model.layers[16]` raises `AttributeError:
+'Envoy' object (nor its module) has attribute 'layers'`. The stack is one level
+further down, at `adapted.model.model.layers` (equivalently
+`adapted.base_model.model.model.layers`). And a Llama decoder layer's `.output`
+is a bare tensor in transformers 5, so the `.output[0]` you may have copied from
+an older example selects **batch row 0** rather than a tuple element.
 
 The adapter's own modules appear in the envoy tree, so you can read *inside* the
 adapter — which is the point of doing this in nnsight rather than plain PEFT.
-Inspect the paths with `scripts/inspect_model.py --grep lora` from the `nnsight`
-skill.
+`scripts/inspect_model.py` from the `nnsight` skill takes a base repo, not an
+adapter, so list the adapter's own paths off the loaded model instead:
+`[p for p, _ in adapted.named_modules() if "lora" in p]`.
 
 **PEFT re-roots every path under `base_model.model`.** The wrapped module becomes
 a `PeftModelForCausalLM`, so a GPT-2 block that was `model.transformer.h.0` is now

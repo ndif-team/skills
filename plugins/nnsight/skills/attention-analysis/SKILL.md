@@ -309,7 +309,10 @@ with model.trace(prompt):
 assert torch.equal(by_projection, by_source)
 ```
 
-For a `.heads` accessor you can read and write like any other activation, see
+For a `.heads` accessor you can read and write like any other activation, see the
+`nnsight` skill's [modules-and-architectures.md](../nnsight/references/modules-and-architectures.md)
+("Adding your own served value"), which builds one with `eproperty` and attaches
+it to the attention modules with `envoys=`, and
 `nnsight/docs/patterns/per-head-attention.md` — an `eproperty` on `c_proj`'s
 input reproduces the ablation exactly, and one on the attention module's output
 does not.

@@ -6,7 +6,7 @@ most common source of "why is my output empty / not text / not reproducible".
 | Method | Runs | `tracer.result` is | Sampling |
 |---|---|---|---|
 | `model.trace(x)` | one forward pass | the forward's output object | n/a |
-| `model.generate(x, max_new_tokens=N)` | the model's `generate` | **token ids** `[batch, seq]` | **greedy** unless asked |
+| `model.generate(x, max_new_tokens=N)` | the model's `generate` | **token ids** `[batch, seq]` | the checkpoint's `generation_config` — instruct models sample |
 | `model.pipe(x, ...)` | the whole task pipeline | the pipeline's **records** (decoded text, labels) | the checkpoint's `task_specific_params` — often sampled |
 
 <!-- test: setup -->
@@ -34,9 +34,17 @@ reading it afterwards raises `ValueError: Cannot access 'result' outside of
 interleaving`. `model.generator.output` hands back the identical tensor and warns
 that `tracer.result` is the way to ask for it.
 
-Generation through the model is **greedy by default**, so it is reproducible
-without passing anything. Ask for sampling explicitly (`do_sample=True, top_k=50`);
-all kwargs are forwarded to the underlying `generate`.
+Generation through the model uses the **checkpoint's own `generation_config`**,
+which is not the same as greedy. It is greedy on a base model that ships no
+sampling defaults (gpt2, SmolLM2-135M), and *sampled* on most instruct
+checkpoints: Qwen3-8B ships `do_sample=True, temperature=0.6, top_p=0.95`,
+Llama-3.2-1B-Instruct `do_sample=True, temperature=0.6, top_p=0.9`. Pass
+`do_sample=False` when you need determinism; all kwargs are forwarded to the
+underlying `generate`.
+
+This is worth a habit rather than a check. Two runs of the same prompt
+disagreeing, or a per-step reading that disagrees with the tokens that came out,
+is sampling far more often than it is a bug in the intervention.
 
 Called without a `with` block it simply returns the ids: `ids = model.generate(prompt, max_new_tokens=3)`.
 

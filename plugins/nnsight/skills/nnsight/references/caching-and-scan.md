@@ -200,6 +200,12 @@ write the loop, not because it is faster. Always pass `modules=`: unfiltered is
 no kernels run, and **the model is never dispatched**. Use it to check indexing
 before spending a forward pass — or before downloading weights at all.
 
+`scan` belongs to the wrappers that load from a repo id — `TransformersModel`,
+`DiffusionModel`, `VLLM` — because it is the meta-build machinery that makes a
+weightless forward possible. A plain `NNsight(my_module)` has no `.scan`, and
+asking for one raises `AttributeError: 'NNsight' object (nor its module) has
+attribute 'scan'`. Your own module is already built, so trace it instead.
+
 ```python
 meta = TransformersModel("openai-community/gpt2")     # no dispatch=True
 print(meta.dispatched)                                # False

@@ -13,9 +13,10 @@ nnsight-serve Qwen/Qwen3-8B --port 8000 --enable-prefix-caching False \
   is forwarded to vLLM's `EngineArgs` as `flag=value`. Booleans take a literal:
   `--enable-prefix-caching False`, **not** vLLM's `--no-enable-prefix-caching`
   (that crashes the engine with an unexpected keyword).
-- **Short flags are dropped silently.** `-tp 2` prints `Ignoring unknown argument:
-  -tp` to stderr and the server comes up at `tensor_parallel_size=1`. Spell every
-  flag long.
+- **Short flags are dropped silently.** `-tp 2` prints *two* lines to stderr —
+  `Ignoring unknown argument: -tp` and `Ignoring unknown argument: 2`, one per
+  token that is not a `--flag` — and the server comes up at
+  `tensor_parallel_size=1`. Spell every flag long.
 - **`taps=` has no CLI spelling.** A value is always parsed as a scalar, so
   `--taps model.layers.*.output` reaches the engine as a string, which it iterates
   per character and refuses with `ValueError: Tap 'm' names no module`. A tapped
@@ -52,6 +53,14 @@ The server returns saved values only; save `tracer.result` to get the
 `RequestOutput` back. `serve=` is accepted by `trace` and `edit`; a with-less
 `model.generate(..., serve=url)` is not routed and would try to dispatch a local
 engine. Build and runtime errors come back with their real type and traceback.
+
+**`n > 1` does not survive the round trip.** Locally, a name saved under
+`n=3` comes back as a list of three — one entry per sampled sequence. Over
+`serve=` the same trace returns **sequence 0's value alone**, with no error and no
+list, while `tracer.result.outputs` still shows all three sequences: the serve
+route returns the request's saves and never reads its per-sequence ones. Nothing
+about the value looks wrong, so check `len()` against `n` if you sample more than
+one sequence, or run `n > 1` on a local engine.
 
 ## An installed block, seen by every request
 

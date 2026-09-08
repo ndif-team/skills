@@ -26,7 +26,7 @@ batch with `tracer.invoke(...)` blocks.
 | Method | Runs | `tracer.result` |
 |---|---|---|
 | `model.trace(*inputs, **kw)` | one forward pass | the forward's return value |
-| `model.generate(*inputs, max_new_tokens=N)` | the model's `generate` (greedy default) | **token ids** `[batch, seq]` |
+| `model.generate(*inputs, max_new_tokens=N)` | the model's `generate` (sampling per the checkpoint's `generation_config`) | **token ids** `[batch, seq]` |
 | `model.pipe(*inputs, **kw)` | the whole task pipeline | pipeline **records** (text, labels) |
 | `model.scan(*inputs)` | one forward under fake tensors — no weights, no compute | (read shapes inside) |
 | `model.edit(*, inplace=False)` | captures interventions as replayed defaults | `as (tracer, edited)` / `as tracer` |

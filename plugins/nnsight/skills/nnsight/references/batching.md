@@ -124,6 +124,52 @@ print(a.shape[0], b.shape[0], whole.shape[0])       # 1 2 3
 print(torch.equal(torch.cat([a, b]), whole))        # True
 ```
 
+## Which values are scoped to your rows
+
+"Index as if that input were alone" holds for every value nnsight can find your
+rows in, and scoping is decided by a value's **leading dimension**, not by where it
+came from. A tensor is narrowed to the invoke when its leading dim is the combined
+batch size **or a whole multiple of it**. The multiple is what covers a model that
+folds tokens into the batch axis before a module — every transformers MoE block
+does that ahead of its router, so `mlp.gate.output` and `mlp.experts.input` are
+`(batch*seq, ...)` and an invoke owns `seq` of those rows per row of batch it
+contributed. Values reached through `.source` below such a reshape are scoped the
+same way. A leading dim that is a multiple by coincidence (four experts, two
+invokes) is sliced too; the shape is all there is to go on.
+
+Anything else is handed to every invoke **whole**. That is right for a value that
+is not batched at all — a causal mask, rotary `cos`/`sin`, a constant built inside
+the forward — and wrong for one batched on an axis nnsight cannot recognize: a
+time-major `(seq, batch, hidden)` activation, a vision tower's `(patches, hidden)`,
+or a list of per-sequence tensors (a container is not split, only the tensors in
+it). For those:
+
+- a **read** sees the whole batch rather than this invoke's part of it;
+- an **in-place edit** applies to every invoke;
+- a **replacement** is dropped — there is nowhere to splice it.
+
+Both writes warn, naming the location, its leading dim and the batch size:
+
+```
+UserWarning: An in-place edit to `model.visual.merger.output` applies to every
+invoke: its leading dimension (256) is neither the batch size (2) nor a multiple
+of it, so nnsight served the whole batch rather than this invoke's rows.
+```
+
+A read does not warn — from the shape alone, a value that is not batched looks
+exactly like one batched on an unreadable axis, and most are the former. When the
+warning fires, run that input in its own trace.
+
+## Forward keywords belong to the batch, not the invoke
+
+Every invoke reaches the model in **one** forward call, so keywords are merged
+into that one call and the last invoke to pass one decides it for every row.
+Disagreeing invokes warn; agreeing ones are quiet. Anything that has to differ per
+row belongs in the invoke's *input* — pass `{"input_ids": ..., "attention_mask":
+...}` positionally, which collates per row, rather than `attention_mask=` as a
+keyword, which replaces the collated mask for the whole batch. `max_new_tokens`
+and the other generation parameters are the batch's too.
+
 ## Mixing input formats
 
 Strings, lists of strings, token-id lists, and tensors can all be mixed across
@@ -267,6 +313,8 @@ producer binds, and nothing errors.
 | A trace with no input needs an invoke | `with model.trace():` and nothing else is a `ValueError`. |
 | One invoke is not "narrowed" | A lone invoke *is* the whole batch, so its write may change the leading dim and widen the run. |
 | A batched write must keep its rows | With two or more invokes, a replacement is spliced back into the combined batch as given — nothing checks its height. One with the wrong leading dim builds a batch that is no longer the model's; the mismatch surfaces in a later module, or not at all. |
+| Only recognizable layouts are scoped | A value whose leading dim is neither the batch size nor a multiple of it goes to every invoke whole; a write to it warns and lands batch-wide, or is dropped. See [above](#which-values-are-scoped-to-your-rows). |
+| Forward keywords are batch-wide | The invokes become one forward call; the last invoke to pass a keyword sets it for every row, and disagreement warns. |
 | `tracer.stop()` is not per-invoke | It halts the shared forward, so a sibling parked on a later location dies with `OutOfOrderError`. |
 | Direct input and invokes don't mix | `with model.trace(x)` plus `tracer.invoke(y)` raises `Cannot invoke while the model is already running.` |
 

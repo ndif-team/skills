@@ -20,10 +20,14 @@ The output is a (layer × position) map of recovered probability. Compared to th
 the right tool when you have a natural minimal pair; causal tracing corrupts with
 noise and works on any single prompt.
 
-**This protocol needs a model of roughly 7B parameters or more.** Everything below
-is measured on Qwen3-8B. The same code on GPT-2 small produces no subject site at
-all — see "Model size" at the end, which reports that measurement rather than
-asking you to take it on faith.
+**This protocol needs a model that holds the fact confidently and has the depth to
+separate the two sites** — not a particular parameter count. Everything below is
+measured on Qwen3-8B, but Llama-3.2-1B gives a textbook two-site trace on the same
+prompt (clean P(` Paris`) 0.9495; the `' Tower'` site peaks at 0.768 recovery at
+layer 3 of 16, the final-position site at 0.922 by layer 9). GPT-2 small, on the
+same prompt, produces no subject site at all — see "When a trace comes back empty"
+at the end, which reports both measurements rather than asking you to take them on
+faith.
 
 <!-- test: setup gpu slow -->
 ```python
@@ -366,8 +370,9 @@ own states, which must leave the metric where it was.
 **Corruption must be at the embeddings.** Corrupting later layers conflates "the
 subject was unreadable" with "the computation was disturbed".
 
-**Model size.** The same protocol on GPT-2 small, same prompt, same ten seeds,
-produces no early site. Its subject row, averaged over the seeds, is
+**When a trace comes back empty.** The same protocol on GPT-2 small, same prompt,
+same ten seeds, produces no early site. Its subject row, averaged over the seeds,
+is
 
 ```
  L0     L1     L2     L3     L4     L5     L6     L7     L8     L9     L10    L11
@@ -377,9 +382,25 @@ produces no early site. Its subject row, averaged over the seeds, is
 — a hump topping out at 3.4% recovery, against 116% at the same site on Qwen3-8B,
 and each individual seed peaks somewhere between layer 0 and layer 7 with a
 recovery between 0.01 and 0.08. The last-token column does reach 1.000, at layer 11,
-which is the identity described above rather than a site. Absent structure at that
-scale is a fact about the measurement, not evidence that the fact is distributed.
-Use a model in the 7B range or larger.
+which is the identity described above rather than a site. Absent structure like
+that is a fact about the measurement, not evidence that the fact is distributed.
+
+**It is not a size threshold.** The same script on Llama-3.2-1B — a model with
+*fewer* parameters than GPT-2 medium — separates cleanly: clean P(` Paris`) 0.9495,
+the `' Tower'` subject row peaking at 0.768 at layer 3 (0.656 and 0.567 at layers
+4-5), and the final `' of'` position reaching 0.922 at layer 9 of 16, well before
+the last block, so it is a site and not the identity. Llama-3.2-3B behaves the
+same. What GPT-2 small lacks is confidence in the fact and depth to place the two
+sites apart, and both are things to check directly:
+
+- run the clean prompt first and read P(answer). Below ~0.5 the denominator of
+  `(restored − corrupt) / (clean − corrupt)` is small and the whole grid is noise.
+  The `logit-lens` skill's wiring check is the cheap way to ask.
+- check that the last-token site lands **before** the final block. A site only at
+  the last layer is the architectural identity described above.
+
+If either fails, change the prompt or the model — a bigger model is one way to fix
+it, not the requirement.
 
 **A trace is a localization, not a mechanism.** It says restoring these states
 suffices. To claim a component *computes* the fact, follow with editing (does
