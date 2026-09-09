@@ -6,13 +6,10 @@ and [NDIF](https://ndif.us/).
 Compatible with both **Claude Code** and **OpenAI Codex** via the
 [Agent Skills Specification](https://agentskills.io/).
 
-These skills target **nnsight 0.8** and **transformers ≥ 5**. Every code example is
-executed by the test suite against a real model, so what an agent reads is what
-actually runs.
+Every code example is executed by the test suite against a real model, so what an
+agent reads is what actually runs.
 
-The transformers floor is not cosmetic: in 4.x a GPT-2 block returns
-`(hidden_states,)` and its attention dropout is `module.attn_dropout(...)`, so the
-`.output` and `.source` examples throughout these skills are wrong on 4.x.
+**Requires** nnsight 0.8 and transformers ≥ 5.
 
 ## Installation
 
@@ -25,7 +22,10 @@ claude
 /plugin marketplace add https://github.com/ndif-team/skills.git
 
 # Install all skills
-/plugin install nnsight@skills
+/plugin install nnsight@ndif-team
+
+# Check it worked — the nnsight skills should be listed
+/plugin
 ```
 
 ### OpenAI Codex
@@ -33,8 +33,17 @@ claude
 ```bash
 codex
 
-skill-installer install https://github.com/ndif-team/skills.git
+$skill-installer install https://github.com/ndif-team/skills
+
+# Check it worked — the nnsight skills should be listed
+$skill-installer list
 ```
+
+## Using them
+
+You do not invoke a skill by name. Both Claude Code and Codex read every installed
+skill's `description` and load the ones that match what you are asking for, so you
+just describe the task — see [Example prompts](#example-prompts) below.
 
 ## Skills
 
@@ -136,7 +145,8 @@ pre-0.8 API appears in a runnable example.
 
 2. Put depth in `references/*.md` and runnable tools in `scripts/`; keep
    `SKILL.md` to what an agent should read every time.
-3. Link it: `cd .codex/skills && ln -s ../../plugins/nnsight/skills/<skill-name> .`
+3. Link it into both Codex trees:
+   `for d in .agents/skills .codex/skills; do ln -s ../../plugins/nnsight/skills/<skill-name> $d/; done`
 4. Add a row to the table above.
 5. `make test`.
 
@@ -145,7 +155,8 @@ pre-0.8 API appears in a runnable example.
 ```text
 skills/
 ├── .claude-plugin/marketplace.json   # Claude Code marketplace
-├── .codex/skills/                    # Codex skills (symlinks)
+├── .agents/skills/                   # Codex skills (symlinks)
+├── .codex/skills/                    # Codex skills, older CLI path (symlinks)
 ├── .github/workflows/test.yml        # CPU CI
 ├── plugins/nnsight/
 │   ├── .claude-plugin/plugin.json

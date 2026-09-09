@@ -10,7 +10,9 @@ import pytest
 
 from docblocks import REPO_ROOT, SKILLS_ROOT, extract_blocks, markdown_files, skill_dirs
 
-CODEX_SKILLS = REPO_ROOT / ".codex" / "skills"
+# Codex reads `.agents/skills` (the cross-tool path its docs give) and, on some
+# CLI builds, `.codex/skills`. Both trees are symlinks to the same skills.
+CODEX_SKILLS = [REPO_ROOT / ".codex" / "skills", REPO_ROOT / ".agents" / "skills"]
 MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 PLUGIN = REPO_ROOT / "plugins" / "nnsight" / ".claude-plugin" / "plugin.json"
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
@@ -46,17 +48,20 @@ def test_frontmatter(skill: Path):
     assert len(description) <= 1024, f"description is {len(description)} chars (max 1024)"
 
 
+@pytest.mark.parametrize("root", CODEX_SKILLS, ids=lambda p: p.name)
 @pytest.mark.parametrize("skill", skill_dirs(), ids=lambda p: p.name)
-def test_codex_symlink(skill: Path):
-    link = CODEX_SKILLS / skill.name
-    assert link.is_symlink(), f"missing Codex symlink: .codex/skills/{skill.name}"
+def test_codex_symlink(skill: Path, root: Path):
+    link = root / skill.name
+    rel = root.relative_to(REPO_ROOT)
+    assert link.is_symlink(), f"missing Codex symlink: {rel}/{skill.name}"
     assert link.resolve() == skill.resolve(), f"{link} points at {link.resolve()}"
 
 
-def test_no_stale_codex_symlinks():
+@pytest.mark.parametrize("root", CODEX_SKILLS, ids=lambda p: p.name)
+def test_no_stale_codex_symlinks(root: Path):
     names = {skill.name for skill in skill_dirs()}
-    stale = [p.name for p in CODEX_SKILLS.iterdir() if p.name not in names]
-    assert not stale, f"stale Codex symlinks: {stale}"
+    stale = [p.name for p in root.iterdir() if p.name not in names]
+    assert not stale, f"stale symlinks in {root.relative_to(REPO_ROOT)}: {stale}"
 
 
 def test_manifests():
@@ -67,6 +72,18 @@ def test_manifests():
     for source in sources:
         assert (REPO_ROOT / source).is_dir(), f"marketplace source {source} does not exist"
     assert plugin["name"] == "nnsight"
+
+
+def test_readme_install_command_matches_the_manifests():
+    """The install line a new user copies has to name the real marketplace and plugin.
+
+    Nothing else catches this: the command is prose, and a wrong one fails only on
+    the reader's machine.
+    """
+    readme = (REPO_ROOT / "README.md").read_text()
+    marketplace = json.loads(MARKETPLACE.read_text())["name"]
+    plugin = json.loads(PLUGIN.read_text())["name"]
+    assert f"/plugin install {plugin}@{marketplace}" in readme
 
 
 def test_readme_lists_every_skill():
