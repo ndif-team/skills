@@ -256,7 +256,7 @@ Design the experiment to fit, using the `nnsight` skill's primitives:
 | only layers 0..L matter | `tracer.stop()` after L |
 | the donor run is reused | cache it once, outside the sweep |
 | every component, large model | attribution first, verify the top-K |
-| model too large to host | NDIF — see `nnsight-remote` |
+| model too large to host | NDIF — see `remote` |
 
 The pattern that changes an experiment's feasibility most is the sweep-in-invokes
 one: a 144-condition head scan is 12 batched traces, not 144.
@@ -300,4 +300,4 @@ re-running.
 - `nnsight` — the primitives every experiment is built from
 - `activation-patching`, `ablation`, `probing`, `circuit-discovery` — techniques,
   each with its own controls section
-- `nnsight-debugging` — when the code, rather than the design, is the problem
+- `debugging` — when the code, rather than the design, is the problem

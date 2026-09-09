@@ -82,7 +82,7 @@ layers is N forward passes (and, remotely, N network round-trips).
 **5. Old nnsight code is everywhere and it is wrong here.** `.value`,
 `nnsight.list()`, `tracer.next()`, `with tracer.all():`, `LanguageModel`,
 "proxies" — all pre-0.8. If you are adapting code from a tutorial or a paper repo,
-convert it first; see the `nnsight-debugging` skill.
+convert it first; see the `debugging` skill.
 
 ## Picking a run method
 
@@ -175,7 +175,7 @@ print(last.shape)
 
 Anything beyond one trace (loops, sweeps, multi-step experiments) should be a
 `model.session(remote=True)` — one job instead of N round-trips. See the
-`nnsight-remote` skill before writing remote code.
+`remote` skill before writing remote code.
 
 ## References
 
@@ -216,7 +216,7 @@ Scripts (run them, don't read them):
 
 ## Related skills
 
-- `nnsight-debugging` — an error, a hang, an empty result, or pre-0.8 code to port
-- `nnsight-remote` — running on NDIF: sessions, batching requests, download size
+- `debugging` — an error, a hang, an empty result, or pre-0.8 code to port
+- `remote` — running on NDIF: sessions, batching requests, download size
 - `logit-lens`, `activation-patching`, `attribution-patching`, `causal-tracing`,
   `model-steering` — techniques built on this API

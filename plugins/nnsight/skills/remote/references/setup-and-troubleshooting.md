@@ -141,4 +141,4 @@ log streaming entirely with `CONFIG.APP.REMOTE_LOGGING = False`.
 ## Related
 
 - [sessions-and-jobs.md](sessions-and-jobs.md)
-- the `nnsight-debugging` skill for non-remote errors
+- the `debugging` skill for non-remote errors

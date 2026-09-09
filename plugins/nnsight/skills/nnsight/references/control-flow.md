@@ -151,7 +151,7 @@ print([round(n.item(), 1) for n in norms])
 ```
 
 Sessions matter most **remotely**, where a session is one job instead of N — see
-the `nnsight-remote` skill.
+the `remote` skill.
 
 ## model.edit() — interventions that persist
 

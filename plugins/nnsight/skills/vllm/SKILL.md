@@ -402,11 +402,11 @@ real message is in the `(EngineCore pid=...)` lines above it.
 | one prompt, gradients, attribution, `.source`, `scan` | `TransformersModel` |
 | hundreds of prompts, or a served engine | `VLLM`; sweeps through `model.edit()` |
 | model larger than one GPU, locally | `VLLM` with `tensor_parallel_size` (declare `taps`) |
-| model larger than your machine | NDIF — the `nnsight-remote` skill |
+| model larger than your machine | NDIF — the `remote` skill |
 | token-by-token streaming | `VLLM` with `mode="async"`: `async for output in tracer.backend` |
 
 ## Related skills
 
 - `nnsight` — the intervention API that carries over unchanged
 - `tensor-parallel` — the `transformers` + `torchrun` alternative for sharding
-- `nnsight-debugging` — reading the re-raised worker errors
+- `debugging` — reading the re-raised worker errors

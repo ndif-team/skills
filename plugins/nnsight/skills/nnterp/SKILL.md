@@ -304,7 +304,7 @@ print(a.shape, c.shape)
 ## Notes
 
 - nnterp is on NDIF's remote import whitelist, so `StandardizedTransformer(...,
-  remote=True)` works inside remote traces — see the `nnsight-remote` skill.
+  remote=True)` works inside remote traces — see the `remote` skill.
 - Under eager attention the attention module returns `(output, weights)`, and
   `weights` is bit-identical to `attention_probabilities[i]` on every family
   tested — a label-free second reading to sanity-check against when a label

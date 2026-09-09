@@ -1,5 +1,5 @@
 ---
-name: nnsight-debugging
+name: debugging
 description: Diagnose and fix nnsight code that errors, hangs, returns nothing, or silently does the wrong thing — OutOfOrderError, save() outside a trace, "Cannot access outside of interleaving", WithBlockNotFoundError, empty saved lists, interventions with no effect, shape mismatches, batching and barrier errors. Also use when porting nnsight code written for older versions (0.4/0.5/0.6 idioms like .value, nnsight.list(), tracer.next(), LanguageModel, proxies), which is most of the nnsight code on the internet and fails in specific, recognizable ways on 0.8.
 ---
 
@@ -31,7 +31,7 @@ idioms are the single most common cause.
 | Saved list is empty **when run remotely** | saved the elements, not the container | `nnsight.save([])` then append raw values |
 | `NameError` on a value from another invoke | read before the producer ran, or a `tracer.barrier(n)` whose `n` is too small released it early | `tracer.barrier(n)` with the true block count, then call it: `b()` |
 | `NotImplementedError: ... batching multiple invokes` | base `NNsight` with 2+ input invokes | one invoke, or implement `_batch_size`/`_batch` |
-| Remote job errors or returns nothing | serialization / save rules differ remotely | the `nnsight-remote` skill |
+| Remote job errors or returns nothing | serialization / save rules differ remotely | the `remote` skill |
 
 Full catalogue with exact messages: [references/error-catalogue.md](references/error-catalogue.md).
 
@@ -353,4 +353,4 @@ from `__main__`.
 ## Related skills
 
 - `nnsight` — the API itself and how tracing works
-- `nnsight-remote` — remote-specific failures and performance
+- `remote` — remote-specific failures and performance

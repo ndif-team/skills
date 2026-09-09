@@ -113,7 +113,7 @@ Removed in 0.8: `nnsight.list/dict/int/float/bool`, `nnsight.apply`, `nnsight.co
 | `"local"` | serialize/deserialize and run in-process — an offline dry run |
 | `"http://host:port"` | same as `True` against that host |
 
-See the `nnsight-remote` skill.
+See the `remote` skill.
 
 ## Config
 
@@ -143,4 +143,4 @@ environment.
 | `ValueError: save() was called outside a trace` | move the save inside |
 | `ValueError: Cannot access ... outside of interleaving` | `.output` read outside a trace — also what an input-less `trace()` with no `invoke` says |
 
-Full diagnosis: the `nnsight-debugging` skill.
+Full diagnosis: the `debugging` skill.

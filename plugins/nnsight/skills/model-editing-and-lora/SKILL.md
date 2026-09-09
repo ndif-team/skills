@@ -215,7 +215,7 @@ nnsight's interleaved backward means an adapter inserted at any layer trains wit
 ordinary torch. The model's parameters never move; only the adapter's do.
 
 **Training against a *remote* model? This recipe does not work — see the
-`nnsight-remote` skill and `nnsight/docs/patterns/remote-training.md`.** Both of the
+`remote` skill and `nnsight/docs/patterns/remote-training.md`.** Both of the
 ways it fails are silent:
 
 - The adapter and the optimizer must be built **inside** `model.session(remote=True)`.
@@ -420,5 +420,5 @@ broken specificity is a bug you have installed on purpose.
 - `causal-tracing` — finding the layer worth editing
 - `nnsight` — `edit`, attaching modules, gradients
 - `model-steering` — inference-time behavior change without touching weights
-- `nnsight-debugging` — the in-place/autograd error above and others
-- `nnsight-remote` — training against NDIF, where this skill's recipe silently no-ops
+- `debugging` — the in-place/autograd error above and others
+- `remote` — training against NDIF, where this skill's recipe silently no-ops

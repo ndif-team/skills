@@ -1,5 +1,5 @@
 ---
-name: nnsight-remote
+name: remote
 description: Write and optimize nnsight code that runs on NDIF — remote=True, model.session(remote=True), non-blocking jobs, and models too large to run locally (Llama-70B/405B, DeepSeek). Use whenever remote execution is involved even if the user did not ask for optimization: naive remote code is routinely 100x slower and thousands of times larger in transfer than it needs to be, and both causes (too many requests, too much downloaded) have mechanical fixes. Also covers NDIF setup, API keys, model availability, the import whitelist, shipping local helper code, and diagnosing remote-only failures.
 ---
 
@@ -245,4 +245,4 @@ useful for confirming a transfer really did shrink.
 ## Related skills
 
 - `nnsight` — the API these patterns are written in
-- `nnsight-debugging` — errors that are not remote-specific
+- `debugging` — errors that are not remote-specific

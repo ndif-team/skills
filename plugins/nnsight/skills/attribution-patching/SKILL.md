@@ -263,4 +263,4 @@ The last row is the recommended workflow.
 - `activation-patching` — the ground truth this approximates, and the verification step
 - `circuit-discovery` — edge attribution and automated circuit search
 - `nnsight` — gradients, ordering rules, batching
-- `nnsight-remote` — running the two passes on a model you cannot host
+- `remote` — running the two passes on a model you cannot host

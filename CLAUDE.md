@@ -99,7 +99,7 @@ pre-0.8 API ban.
 - Lead with what breaks, not with what exists — agents need the failure modes.
 - Every example runs; no pseudo-code presented as code.
 - Prefer verified claims ("a GPT-2 block returns a plain tensor") over hedges.
-- Cross-link between skills by name (`the nnsight-debugging skill`) so an agent
+- Cross-link between skills by name (`the debugging skill`) so an agent
   knows where to go next.
 
 ## Source material

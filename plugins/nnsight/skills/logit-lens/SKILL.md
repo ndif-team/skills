@@ -295,4 +295,4 @@ skill.
 - `nnsight` — the tracing API, module paths, batching
 - `activation-patching` — turning "the answer appears at layer 10" into a causal claim
 - `attribution-patching` — the same question at scale via gradients
-- `nnsight-remote` — running this on a model too large to host locally
+- `remote` — running this on a model too large to host locally

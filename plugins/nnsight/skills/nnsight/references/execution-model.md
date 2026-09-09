@@ -161,7 +161,7 @@ Inside a trace body you can use ordinary Python — `if`, `for`, function calls,
 list comprehensions — and it runs in the worker greenlet against real values.
 The cost is that anything you touch must be reachable there: for **remote**
 execution the body is serialized and shipped, so locals from your file need
-`nnsight.register(...)`. See the `nnsight-remote` skill.
+`nnsight.register(...)`. See the `remote` skill.
 
 ## Mental checklist when something misbehaves
 
@@ -174,4 +174,4 @@ execution the body is serialized and shipped, so locals from your file need
 | Everything after a loop vanished | unbounded `tracer.iter[:]` / `tracer.all()` — see [generation.md](generation.md) |
 | `NameError` on a cross-invoke value | needs `tracer.barrier(n)` — see [batching.md](batching.md) |
 
-Full error catalogue: the `nnsight-debugging` skill.
+Full error catalogue: the `debugging` skill.

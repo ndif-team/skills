@@ -1,7 +1,7 @@
 """Debugging tasks — the agent is given broken code plus the symptom.
 
 Every bug here is one I reproduced against nnsight 0.8 while writing the
-`nnsight-debugging` skill, so the symptoms are the real messages, not invented
+`debugging` skill, so the symptoms are the real messages, not invented
 ones. A few are *silent* failures (wrong results, no exception), which are the
 ones documentation most needs to prevent.
 """

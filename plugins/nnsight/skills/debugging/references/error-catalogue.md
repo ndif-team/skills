@@ -140,7 +140,7 @@ Common remote-only causes: a helper function from your own file that wasn't
 registered (`nnsight.register(...)`), an import that isn't on NDIF's whitelist, a
 model that is COLD rather than RUNNING, a missing API key, or a version skew
 between your machine and the server. `python scripts/check_env.py --remote` (in the
-`nnsight` skill) checks all of those at once. See the `nnsight-remote` skill.
+`nnsight` skill) checks all of those at once. See the `remote` skill.
 
 ## Warnings
 

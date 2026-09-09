@@ -52,8 +52,8 @@ just describe the task — see [Example prompts](#example-prompts) below.
 | Skill | Use when... |
 | --- | --- |
 | `nnsight` | Anything touching model internals: tracing, reading and modifying activations, batching interventions, gradients, caching, generation, module paths. Start here. |
-| `nnsight-debugging` | Code errors, hangs, returns nothing, or silently misbehaves — and for porting pre-0.8 nnsight code. |
-| `nnsight-remote` | Running on NDIF: sessions, request batching, download size, non-blocking jobs. |
+| `debugging` | Code errors, hangs, returns nothing, or silently misbehaves — and for porting pre-0.8 nnsight code. |
+| `remote` | Running on NDIF: sessions, request batching, download size, non-blocking jobs. |
 
 **Techniques**
 
@@ -165,7 +165,7 @@ skills/
 │       │   ├── SKILL.md
 │       │   ├── references/*.md
 │       │   └── scripts/*.py
-│       ├── nnsight-debugging/
+│       ├── debugging/
 │       └── ...
 ├── tests/                            # executes every code block
 └── Makefile
