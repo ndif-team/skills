@@ -57,6 +57,11 @@ assert not torch.equal(alias, resid) and alias.shape == resid.shape
 3. **Clone what you keep.** A served value is the model's live buffer, and the next
    layer's fused kernel rewrites it after your block returns — the un-cloned
    `alias` above comes back holding later data. Reduce or `.clone()` before saving.
+   `NNSIGHT_VLLM_CLONE_READS=1` in the environment (before `VLLM(...)`, which builds
+   the worker that makes the copies) serves every read as a private copy instead, so
+   nothing needs a clone at the call site — at the cost of in-place edits, which then
+   write to the copy and never reach the model. Under it, write by assignment
+   (`layer.output = out`), not `layer.output[0][:] += v`. Off by default.
 4. **Where tensors live.** A tensor referenced from outside the block (a steering
    vector) travels with the block; move it onto the served value with
    `v.to(h.device, h.dtype)`. Saved tensors come back on the worker's device unless
