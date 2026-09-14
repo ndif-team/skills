@@ -36,7 +36,7 @@ moment a second person can reach port 8001. Before anyone else can:
 |---|---|---|
 | **1. Published image** | `docker run --gpus all ndif/ndif` | You want an NDIF, not a checkout. One container runs redis, minio, ray and the API. |
 | **2. Compose dev stack** | `just up` from a clone | You are changing NDIF, or want Postgres and the telemetry tier (Loki/Influx/Prometheus/Grafana) alongside. |
-| **3. From source** | `pip install`, then `ndif start` | No Docker on the box, or you want the services as ordinary host processes. |
+| **3. From source** | `pip install "ndif[api,ray]"`, then `ndif start` | No Docker on the box, or you want the services as ordinary host processes. |
 
 All three come up with **no configuration at all** — every service has a working
 single-host default. Full per-route detail: `docs/operating/quickstart.md`.
@@ -71,7 +71,6 @@ docker run --rm --gpus all ndif/ndif doctor
 docker run -d --name ndif --gpus all --shm-size 4g \
     -p 8001:8001 -p 9000:9000 \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
-    -e HF_TOKEN \
     ndif/ndif
 ```
 
@@ -80,7 +79,8 @@ docker run -d --name ndif --gpus all --shm-size 4g \
   (4 MiB) comes back as a presigned URL the *client* fetches. Unpublished, large
   results complete server-side and then fail to download.
 - The **HF cache mount** is what makes weights survive `docker rm`.
-- `HF_TOKEN` is only needed for gated checkpoints (Llama, Gemma).
+- Serving gated checkpoints (Llama, Gemma)? Add `-e HF_TOKEN` to pass your token
+  through from the shell. Nothing else needs it.
 
 The image's `ENTRYPOINT` is the `ndif` CLI and `NDIF_SERVICE` defaults to `all`,
 which is redis + minio + ray + api in one container. `NDIF_SERVICE="all dashboard"`
@@ -88,12 +88,21 @@ adds the admin UI on 8081 (`-e NDIF_DASHBOARD_DEV_MODE=true` to skip its login o
 a machine only you can reach). Everything else about the image is in
 `docker/README.md`.
 
-Manage it through `docker exec`, since the CLI is already installed there:
+Manage it through `docker exec`, since the CLI is already installed there, or
+over HTTP — `GET /status` returns the same payload as `ndif status
+--json-output`, `GET /env` the server's package versions, and `/docs` is the
+FastAPI page:
 
 ```bash
 docker exec ndif ndif status
 docker exec ndif ndif deploy openai-community/gpt2
+curl -s localhost:8001/status | python3 -m json.tool | head
 ```
+
+Shutting it down: `docker stop ndif` is enough — nothing needs draining, and
+`ndif evict --all` first is tidy but not required. `docker rm` throws away the
+deployment set (what was HOT) but not the weights, which live in the mounted
+cache. Bring it back with the same `docker run` and models load again on demand.
 
 ## Route 2 — the compose dev stack
 
@@ -125,19 +134,35 @@ Two things that are only true here:
 
 ## Route 3 — from source, no Docker
 
+No checkout is needed; the package is on PyPI and pins the 0.8 nnsight itself.
+
 ```bash
-pip install -r requirements.txt
-pip install torch --index-url https://download.pytorch.org/whl/cu126   # match your driver
-pip install ".[api,ray,metrics,postgres,dashboard]"
+pip install torch --index-url https://download.pytorch.org/whl/cu126   # FIRST — match your driver
+pip install "ndif[api,ray]"                       # add metrics,postgres,dashboard as needed
 ndif doctor        # versions, binaries, GPU, connectivity — read this before starting
 ndif start         # redis, minio, ray, api — detached, PID files under ~/.ndif
 ndif info
 ndif logs api -f
-ndif stop
+ndif stop          # also runs `ray stop` for the daemons ray start left behind
 ```
 
-torch is deliberately not in `requirements.txt`: the right wheel is a property of
-your driver, not of the repo.
+torch first: nnsight pulls torch in, and with no wheel present pip takes PyPI's
+default, which is the CUDA 13 build. From a checkout, `pip install -r
+requirements.txt` before `pip install ".[api,ray]"` gives you the exact pinned
+set the image is built from; the sdist on PyPI also ships `requirements.txt`
+and `docs/`.
+
+Two traps on this route that nothing else warns about:
+
+- **`NDIF_RAY_TEMP_DIR` must be a short path** (40 characters or fewer): Ray
+  puts unix sockets under `<dir>/session_<ts>_<pid>/sockets/` and AF_UNIX
+  paths cap at 107 bytes. Too long, and `ray start` dies at once with
+  `validate_socket_filename failed`; `ray/start.sh` now refuses such a path
+  up front, on older installs it just looks like a Ray that never boots.
+- **A ✓ from `ndif start` means the process was alive two seconds later, no
+  more.** If `/connected` is still `reconnecting` after a minute or two,
+  `ndif info` (is `ray` `stopped`?) and `$NDIF_HOME/logs/ray.log` — do not
+  keep waiting.
 
 **The MinIO binary is the awkward part.** `ndif doctor` checks for `redis-server`
 and `minio` on `PATH`, and MinIO publishes no standalone server binaries any more
@@ -146,7 +171,7 @@ and `minio` on `PATH`, and MinIO publishes no standalone server binaries any mor
 work:
 
 ```bash
-conda install -c conda-forge minio-server        # verified
+conda install --override-channels -c conda-forge redis-server minio-server   # verified; --override-channels skips the anaconda ToS prompt a stock miniconda raises
 ```
 
 ```bash
@@ -169,9 +194,12 @@ curl localhost:8001/connected    # {"status":"connected"} — the real readiness
 ndif status                      # what the controller thinks is deployed, and on which GPUs
 ```
 
-**Ray takes roughly 60–90 seconds to boot.** Until it does, `/connected` says
-`reconnecting`, `/request` 503s, and the api log prints `Error connecting to Ray`
-tracebacks about once a second. That is normal during boot, not a fault. In the
+**Ray takes 15–90 seconds to boot, depending on the host.** Until it does,
+`/connected` says `reconnecting`, `/request` 503s, and the api log prints `Error
+connecting to Ray` tracebacks about once a second. That is normal during boot,
+not a fault — but if it is still `reconnecting` after two minutes, stop waiting
+and read the ray log; a Ray that died at start looks exactly like one that is
+slow. In the
 ray log you want `Starting Ray head node with resources: {"head": 10,
 "cuda_memory_bytes": ..., ...}` followed by `Starting NDIF controller...` — a
 `cuda_memory_bytes` of `0` means torch cannot see a GPU.
@@ -196,7 +224,14 @@ print(hidden.shape)   # torch.Size([1, 10, 768])
 
 No API key is needed, because auth is off. The model is never dispatched
 locally — the client builds it on the meta device only to resolve module paths
-and mint the model key.
+and mint the model key. The client shows `PROVISIONING` even when the model is
+already HOT; only the timing (no `DEPLOYING` wait) tells you a pre-deploy took.
+
+**`ndif status` on a fresh server may list hundreds of COLD models.** COLD is
+nothing more than the Hugging Face cache directory listing: bind-mount a cache
+that other projects have filled and every checkpoint in it shows up as COLD,
+whether NDIF has ever run it or not. HOT is what is loaded; COLD is what could
+be.
 
 ## Configuration
 
@@ -240,8 +275,10 @@ and exhaustively in `docs/reference/env-vars.md` and `docs/reference/ports.md`.
 - **`NDIF_DEPLOYMENTS` takes model keys, not repo ids.** Entries are used
   verbatim as keys, so `openai-community/gpt2` there becomes a bogus key that
   fails to evaluate. Get real ones from
-  `ndif status --json-output | jq -r '.deployments[].model_key'`. (Note that
-  `docker/README.md` shows bare checkpoints here; the code disagrees.)
+  `ndif status --json-output | jq -r '.deployments[] | select(.model_key) | .model_key'`
+  (the `select` skips COLD stubs, which carry no key). `jq` is not in the
+  image: pipe on the host, or use `python3 -c 'import json,sys; [print(d["model_key"]) for d in json.load(sys.stdin)["deployments"].values() if "model_key" in d]'`.
+  For one checkpoint by name, `ndif deploy <repo-id>` after start is simpler.
 - **Inside the ray container, `localhost:6379` is Ray's GCS, not Redis.** NDIF
   moves Ray's head port to 6385 for exactly this reason, but a provider that
   falls back to the `redis://localhost:6379` default in that container reaches
@@ -250,6 +287,9 @@ and exhaustively in `docs/reference/env-vars.md` and `docs/reference/ports.md`.
   `Starting Ray client server failed` after ~40 s. `ray/start.sh` exports
   `GRPC_ENABLE_FORK_SUPPORT=0` before `ray start`, which removes it; if you see
   it, something overrode that variable.
+- **A prompt longer than the model's context dies as `CUDA error: device-side
+  assert triggered` in `masking_utils`,** not as an index error naming the
+  limit (gpt2: 1024 positions). The actor survives it; the next request runs.
 - **A list built by comprehension or `.append()` inside a trace block is not
   bound after the block** — only plain `name = value.save()` assignments come
   back. That is nnsight behaviour, not a server fault; send users to the nnsight

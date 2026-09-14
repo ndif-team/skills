@@ -58,6 +58,9 @@ in that service's `start.sh` or its first import.
 |---|---|
 | Nothing at all, the container never runs | A `depends_on: service_healthy` gate — `api` waits on `postgres` **and** `influxdb` even though it can run without either |
 | `ERROR: Cannot write to Ray temp directory` | `NDIF_RAY_TEMP_DIR` is not writable |
+| `validate_socket_filename failed: AF_UNIX path length cannot exceed 107 bytes` (ray log), or `ERROR: NDIF_RAY_TEMP_DIR is N characters` | `NDIF_RAY_TEMP_DIR` is too long for Ray's socket paths; use a short one such as `/tmp/ndif-ray` |
+| `ndif start` said ✓ but `ndif info` says `stopped` | The service died after the 2 s liveness check; read `$NDIF_HOME/logs/<service>.log` |
+| `ndif stop` said stopped but `gcs_server` / `raylet` still run | ndif 0.1.0's `stop` only killed the `start.sh` process group; run `ray stop --force` (0.1.1 does it for you) |
 | `Waiting for Ray head at ...` forever | A worker node's `NDIF_RAY_HEAD_ADDRESS` cannot be reached. Check the port — 6385, not 6379 |
 | A Python `ImportError` for an extra | The image installs its extras with `--no-deps`; a new dependency needs a `requirements.txt` entry |
 | `queue/config.py` raising at import | A non-integer or non-positive `NDIF_QUEUE_*` / `NDIF_AUTOSCALING_*` value — deliberate: a typo fails the process rather than silently defaulting |
@@ -93,7 +96,7 @@ never mentions shm.
 
 ## Ray is still booting — or is not
 
-Ray takes about **60–90 seconds**. Until it is up, `/connected` answers
+Ray takes **15–90 seconds** depending on the host. Until it is up, `/connected` answers
 `reconnecting`, `/request` 503s with `Service temporarily unavailable: compute
 backend is reconnecting.`, and the api log prints `Error connecting to Ray`
 tracebacks roughly once a second. **That is expected during boot.**
@@ -282,7 +285,10 @@ block needs the container **recreated** (`just up api`), not restarted.
 ## Telemetry missing
 
 Both providers are **fail-open**: nothing errors when they are unconfigured, so
-"no data" is the only symptom.
+"no data" is the only symptom. (On ndif 0.1.0 the metrics provider defaulted to
+`localhost:8086`; a down server showed up in the *client's* console as a
+`LOG` line, `The batch item wasn't processed successfully ... Connection
+refused`. Harmless; `NDIF_INFLUX_ENABLED=false` silences it, 0.1.1 fixes it.)
 
 ```bash
 just logs api | grep "Loki telemetry enabled"      # Loki is opt-in on NDIF_LOKI_URL

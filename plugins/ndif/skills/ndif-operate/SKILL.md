@@ -56,7 +56,7 @@ ndif evict openai-community/gpt2 --replica a1b2c
 ndif evict --all                               # every HOT deployment, pinned included
 ndif restart openai-community/gpt2 --replica a1b2c
 ndif export -f models.yaml       # snapshot the current HOT set
-ndif queue                       # per-model processors, depth, in-flight requests
+ndif queue                       # per-model processors, depth, in-flight requests — a model gets a processor on its FIRST REQUEST, so a freshly pre-deployed one is absent here; `ndif status` is the readiness surface
 ndif kill <request_id>           # cancel a queued or executing request
 ndif env                         # the cluster's python + packages (vs `--local`)
 ```
@@ -90,7 +90,10 @@ Redis is up and the **API** (or its dispatcher) is not.
 `NDIF_DEPLOYMENTS` is a pipe-separated list of **model keys**, not checkpoints —
 entries are used verbatim, so a bare repo id there becomes a bogus key that fails
 to evaluate. Get real ones from
-`ndif status --json-output | jq -r '.deployments[].model_key'`.
+`ndif status --json-output | jq -r '.deployments[] | select(.model_key) | .model_key'`
+— `select` because COLD stubs carry no key, and on the host, because `jq` is
+not in the image. `ndif deploy <repo-id>` after start is the simpler way to
+pre-load one checkpoint by name.
 
 ### models.yaml
 
@@ -251,8 +254,17 @@ Detail: `docs/operating/dashboard.md`.
 | **Grafana** | queries the other three, plus Postgres | http://localhost:3000 |
 
 Both telemetry providers are **fail-open**: unconfigured, uninstalled, or down,
-nothing errors and "no data" is the only symptom. The console handler is always
-installed, so `just logs` never goes quiet.
+nothing errors and "no data" is the only symptom. (Before ndif 0.1.1 the
+metrics provider defaulted to `localhost:8086` and a down server's
+connection-refused traceback was streamed to the client as a LOG event
+mid-trace; set `NDIF_INFLUX_ENABLED=false` on 0.1.0 to silence it.) The
+console handler is always installed, so `just logs` never goes quiet.
+
+An unpinned deployment's status record carries `schedule.end_time`: the end of
+its minimum-deployment window (`NDIF_MINIMUM_DEPLOYMENT_TIME_SECONDS`, one
+hour). It is not a teardown time. After it the model is *evictable* when the
+placer needs the space; pin it (`--pinned`, `NDIF_DEPLOYMENTS`, or a schedule
+entry) to keep it regardless.
 
 The one label that catches everyone: **model actor logs are `service="model"`,
 not `service="ray"`** — the controller overrides `NDIF_SERVICE` in each actor's
