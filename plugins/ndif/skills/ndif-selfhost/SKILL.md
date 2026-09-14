@@ -1,0 +1,272 @@
+---
+name: ndif-selfhost
+description: Stand up your own NDIF server — the backend that nnsight's remote=True talks to — on your own GPUs. Use for "run my own NDIF", "self-host NDIF", "docker run ndif/ndif", "local NDIF server", "point nnsight at my server", "ndif start", "install NDIF from source", "NDIF docker compose", or any question about NDIF prerequisites, ports, volumes, tags, or configuration. Covers all three routes (the published ndif/ndif image, the compose dev stack from a checkout, and a from-source install with the ndif CLI), how to prove it works, and the one default that matters — an NDIF with no Postgres runs every caller's Python inside the model process. NOT for using the public ndif.us service; that is the nnsight plugin's `remote` skill.
+---
+
+# Self-hosting NDIF
+
+NDIF is the server behind nnsight. It holds the weights on your GPUs, receives a
+serialized `with model.trace(...)` block from a client, runs it against the real
+forward pass, and sends the saved values back. Self-hosting it means your own
+`remote=True` runs on hardware you control.
+
+Using the public **ndif.us** service instead — API keys, model availability,
+writing efficient remote code — is the nnsight plugin's `remote` skill. Nothing
+below duplicates it.
+
+## Read this before you start
+
+**An NDIF with no `NDIF_POSTGRES_URL` has no authentication, and no
+authentication means every request is *trusted*.** All three routes default to
+that. A trusted request:
+
+- runs the caller's traced block **in-process inside the model actor**, in the
+  same process as the weights — no runner subprocess, no isolation;
+- loads models with **`trust_remote_code=True`**, so a request naming any
+  Hugging Face repo can execute that repo's code on your GPU node.
+
+That is the right default for an NDIF you run for yourself, and the wrong one the
+moment a second person can reach port 8001. Before anyone else can:
+`docs/runbooks/enable-auth.md`, then `docs/operating/production.md`. The
+`ndif-operate` skill covers what turning it on changes.
+
+## Pick a route
+
+| Route | Command | Take it when |
+|---|---|---|
+| **1. Published image** | `docker run --gpus all ndif/ndif` | You want an NDIF, not a checkout. One container runs redis, minio, ray and the API. |
+| **2. Compose dev stack** | `just up` from a clone | You are changing NDIF, or want Postgres and the telemetry tier (Loki/Influx/Prometheus/Grafana) alongside. |
+| **3. From source** | `pip install`, then `ndif start` | No Docker on the box, or you want the services as ordinary host processes. |
+
+All three come up with **no configuration at all** — every service has a working
+single-host default. Full per-route detail: `docs/operating/quickstart.md`.
+
+## Prerequisites
+
+| Requirement | Why |
+|---|---|
+| An NVIDIA GPU and a CUDA driver | The controller only manages Ray nodes that report a `GPU` resource. A CPU-only node joins Ray and is then ignored; `/ping` answers but `/request` cannot be served. |
+| NVIDIA Container Toolkit (routes 1 and 2) | `docker run --gpus all` must work, or the container fails to create. |
+| `--shm-size 4g` (routes 1 and 2) | Ray's plasma object store lives in `/dev/shm`; Docker's 64 MB default makes Ray spill to disk or fail, and the error never mentions shm. |
+| Disk for weights, plus host RAM | Checkpoints download at deploy time (gpt2 ~0.5 GB, a 70B ~140 GB). Evicted models are held in host RAM as WARM. |
+| Python 3.12 or 3.13 (route 3) | `requires-python = ">=3.12,<3.14"`; `ndif doctor` fails below 3.12. |
+
+**Match the tag to your driver.** `ndif/ndif:0.1.0-cu126` (= `0.1.0` = `latest`)
+is the default line and runs on any CUDA 12.x driver >= 525;
+`ndif/ndif:0.1.0-cu130` is for CUDA 13 drivers (580+) and Blackwell (RTX 50xx, B200). There is no cu128 tag — PyTorch's cu130 index stopped at torch 2.11. A wheel built for a
+CUDA line your driver predates does not fail loudly — `torch.cuda.is_available()`
+just returns `False` and Ray starts with `cuda_memory_bytes: 0`.
+
+`0.1.0` carries nnsight 0.8.0rc1, torch 2.14, transformers 5.17, ray 2.55.1,
+Python 3.12. Ask an image directly, with no GPU or volume needed:
+
+```bash
+docker run --rm ndif/ndif version
+docker run --rm --gpus all ndif/ndif doctor
+```
+
+## Route 1 — the published image
+
+```bash
+docker run -d --name ndif --gpus all --shm-size 4g \
+    -p 8001:8001 -p 9000:9000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -e HF_TOKEN \
+    ndif/ndif
+```
+
+- **8001** is the API — the only port a client posts to.
+- **9000** is MinIO. Publish it: a result over `NDIF_MAX_SOCKET_RESULT_BYTES`
+  (4 MiB) comes back as a presigned URL the *client* fetches. Unpublished, large
+  results complete server-side and then fail to download.
+- The **HF cache mount** is what makes weights survive `docker rm`.
+- `HF_TOKEN` is only needed for gated checkpoints (Llama, Gemma).
+
+The image's `ENTRYPOINT` is the `ndif` CLI and `NDIF_SERVICE` defaults to `all`,
+which is redis + minio + ray + api in one container. `NDIF_SERVICE="all dashboard"`
+adds the admin UI on 8081 (`-e NDIF_DASHBOARD_DEV_MODE=true` to skip its login on
+a machine only you can reach). Everything else about the image is in
+`docker/README.md`.
+
+Manage it through `docker exec`, since the CLI is already installed there:
+
+```bash
+docker exec ndif ndif status
+docker exec ndif ndif deploy openai-community/gpt2
+```
+
+## Route 2 — the compose dev stack
+
+```bash
+git clone https://github.com/ndif-team/ndif.git && cd ndif
+just up            # builds the image on first run (~10 min), then starts everything
+just ps            # container status and health
+just logs ray      # follow one service; Ctrl-C detaches without stopping it
+```
+
+Ten containers: redis, minio, api, ray (required), postgres and influxdb
+(health-gated — the API waits on them but uses neither unless configured), loki,
+prometheus, grafana, dashboard (optional). `docs/operating/compose-stack.md` has
+the service-by-service reading.
+
+Two things that are only true here:
+
+- **`just up` bind-mounts an *editable* nnsight over the image's copy.** It
+  resolves `NNSIGHT_PATH` from your shell's Python; a non-editable nnsight under
+  site-packages is deliberately **not** mounted, and no nnsight at all skips the
+  mount and uses the image's pinned copy. `just nnsight` prints which applies. A
+  mismatched client/server nnsight or transformers shows up as
+  `The model architecture on this server doesn't match...` or
+  `Your request payload could not be read (AttributeError: Can't get attribute ...)`.
+- **`just up` after a code change runs the stale image.** The source is baked in
+  and compose only builds when the image is missing. Use `just ta`
+  (down → build → up). nnsight is the exception — its bind mount picks up changes
+  without a rebuild.
+
+## Route 3 — from source, no Docker
+
+```bash
+pip install -r requirements.txt
+pip install torch --index-url https://download.pytorch.org/whl/cu126   # match your driver
+pip install ".[api,ray,metrics,postgres,dashboard]"
+ndif doctor        # versions, binaries, GPU, connectivity — read this before starting
+ndif start         # redis, minio, ray, api — detached, PID files under ~/.ndif
+ndif info
+ndif logs api -f
+ndif stop
+```
+
+torch is deliberately not in `requirements.txt`: the right wheel is a property of
+your driver, not of the repo.
+
+**The MinIO binary is the awkward part.** `ndif doctor` checks for `redis-server`
+and `minio` on `PATH`, and MinIO publishes no standalone server binaries any more
+(`dl.min.io` returns 410, the GitHub releases carry no assets), so doctor's
+"install the MinIO server binary" hint has nothing to point at. Two options that
+work:
+
+```bash
+conda install -c conda-forge minio-server        # verified
+```
+
+```bash
+cid=$(docker create quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z)
+docker cp "$cid:/usr/bin/minio" /usr/local/bin/minio && docker rm "$cid"
+```
+
+quay.io, not Docker Hub — `minio/minio` on the Hub no longer resolves at all.
+Already have an S3-compatible store? Point `NDIF_OBJECT_STORE_URL` at it and run
+`ndif start redis ray api`; you need no binary.
+
+## Prove it works
+
+The checks are the same whichever route you took; only how you list the processes
+differs (`docker ps`, `just ps`, `ndif info`).
+
+```bash
+curl localhost:8001/ping         # "pong" — only proves the web process is alive
+curl localhost:8001/connected    # {"status":"connected"} — the real readiness signal
+ndif status                      # what the controller thinks is deployed, and on which GPUs
+```
+
+**Ray takes roughly 60–90 seconds to boot.** Until it does, `/connected` says
+`reconnecting`, `/request` 503s, and the api log prints `Error connecting to Ray`
+tracebacks about once a second. That is normal during boot, not a fault. In the
+ray log you want `Starting Ray head node with resources: {"head": 10,
+"cuda_memory_bytes": ..., ...}` followed by `Starting NDIF controller...` — a
+`cuda_memory_bytes` of `0` means torch cannot see a GPU.
+
+Then the first remote trace. Nothing needs to be deployed first: the queue is
+lazy, so the first request for a checkpoint downloads and loads it while the
+client sits in `QUEUED`/`DEPLOYING`.
+
+<!-- test: skip -->
+```python
+import nnsight
+nnsight.CONFIG.API.HOST = "http://localhost:8001"
+
+from nnsight.modeling.transformers import TransformersModel
+model = TransformersModel("openai-community/gpt2", task="text-generation")
+
+with model.trace("The Eiffel Tower is in the city of", remote=True):
+    hidden = model.transformer.h[-1].output.save()
+
+print(hidden.shape)   # torch.Size([1, 10, 768])
+```
+
+No API key is needed, because auth is off. The model is never dispatched
+locally — the client builds it on the meta device only to resolve module paths
+and mint the model key.
+
+## Configuration
+
+**There is no config file.** Every knob is an `NDIF_*` environment variable, read
+once at process start, and every one has a working single-host default. Changing
+a value means restarting the process that reads it; for anything baked into a
+compose image, a `just ta`. Config is additive — you set variables to move *away*
+from single-host, not to get started.
+
+The handful you are most likely to need:
+
+| Variable | Default | Set it when |
+|---|---|---|
+| `HF_TOKEN` | unset | You serve gated checkpoints. |
+| `NDIF_OBJECT_STORE_PUBLIC_URL` | falls back to `NDIF_OBJECT_STORE_URL` (`http://localhost:9000`) | Clients are on another machine. This is the address presigned result URLs are **signed with**, and it must be the one the client resolves. |
+| `NDIF_DEFAULT_PADDING_FACTOR` | `0.15` | Blocks die with `CUDA out of memory ... N MiB allowed` on a nearly empty card. |
+| `NDIF_DEPLOYMENTS` | unset | You want models loaded at controller start. pipe-separated **model keys**, not checkpoints — see the gotcha below. |
+| `NDIF_MIN_NNSIGHT_VERSION` | unset | You want an old client to get a clear 400 instead of failing deep in deserialization. The cheapest operational improvement available to a self-hoster. |
+| `NDIF_RAY_TEMP_DIR` | `/tmp/ray` | The filesystem holding it can exceed 95% full — Ray's file-system monitor then refuses to schedule any work. |
+| `NDIF_SERVICE` | `all` in the image | You want one role per container, or `all dashboard`. |
+
+Full tables — every variable with the line that reads it, every port, and the
+volumes worth keeping — in [references/configuration.md](references/configuration.md),
+and exhaustively in `docs/reference/env-vars.md` and `docs/reference/ports.md`.
+
+## Gotchas
+
+- **Results over 4 MiB come back as a presigned MinIO URL.** Under
+  `NDIF_MAX_SOCKET_RESULT_BYTES` they ride on the response itself and port 9000
+  is never touched; above it — and for *every* non-blocking request — the client
+  fetches the URL directly, so it needs to reach 9000 and the signature has to
+  name a host it can resolve.
+- **A block that allocates a lot of GPU memory dies with `CUDA out of memory ...
+  N MiB allowed` even on an almost-empty card.** The actor caps per-process GPU
+  memory at the model's size × `NDIF_DEFAULT_PADDING_FACTOR` (plus
+  `NDIF_DEFAULT_PADDING_BIAS`), so a runaway request hits its own limit instead
+  of trampling a co-tenant. Raise the factor or save less.
+- **`NDIF_MODEL_CACHE_PERCENTAGE` is host RAM, not GPU memory.** It is the WARM
+  cache budget. It is the variable people reach for during a GPU OOM and it does
+  nothing for one.
+- **`NDIF_DEPLOYMENTS` takes model keys, not repo ids.** Entries are used
+  verbatim as keys, so `openai-community/gpt2` there becomes a bogus key that
+  fails to evaluate. Get real ones from
+  `ndif status --json-output | jq -r '.deployments[].model_key'`. (Note that
+  `docker/README.md` shows bare checkpoints here; the code disagrees.)
+- **Inside the ray container, `localhost:6379` is Ray's GCS, not Redis.** NDIF
+  moves Ray's head port to 6385 for exactly this reason, but a provider that
+  falls back to the `redis://localhost:6379` default in that container reaches
+  the wrong server — compose sets `NDIF_REDIS_URL` explicitly there.
+- **Fresh `ray://` connections used to fail about half the time** with
+  `Starting Ray client server failed` after ~40 s. `ray/start.sh` exports
+  `GRPC_ENABLE_FORK_SUPPORT=0` before `ray start`, which removes it; if you see
+  it, something overrode that variable.
+- **A list built by comprehension or `.append()` inside a trace block is not
+  bound after the block** — only plain `name = value.save()` assignments come
+  back. That is nnsight behaviour, not a server fault; send users to the nnsight
+  plugin's `debugging` skill.
+
+## References
+
+- [references/routes.md](references/routes.md) — the three routes in full:
+  per-route commands, what each one installs, adding a GPU node, the MinIO
+  binary, and what `ndif doctor` does and does not check.
+- [references/configuration.md](references/configuration.md) — the env-var model,
+  the variables that must change off single-host, ports, volumes, and what
+  survives a restart.
+
+## Related skills
+
+- `ndif-operate` — deploying and sizing models, the dashboard, auth, production.
+- `ndif-troubleshoot` — when it does not come up, or a request hangs.
+- `ndif-develop` — changing the server's code.
+- nnsight plugin `remote` — writing the client-side code that talks to it.

@@ -6,8 +6,11 @@ and [NDIF](https://ndif.us/).
 Compatible with both **Claude Code** and **OpenAI Codex** via the
 [Agent Skills Specification](https://agentskills.io/).
 
-Every code example is executed by the test suite against a real model, so what an
-agent reads is what actually runs.
+Two plugins: **nnsight**, for writing interpretability code, and **ndif**, for
+running your own NDIF server.
+
+Every code example in the nnsight skills is executed by the test suite against a
+real model, so what an agent reads is what actually runs.
 
 **Requires** nnsight 0.8 and transformers ≥ 5.
 
@@ -21,10 +24,13 @@ claude
 # Add the marketplace (one time)
 /plugin marketplace add https://github.com/ndif-team/skills.git
 
-# Install all skills
+# Install the interpretability skills
 /plugin install nnsight@ndif-team
 
-# Check it worked — the nnsight skills should be listed
+# Install the NDIF self-hosting skills (optional — only if you run your own server)
+/plugin install ndif@ndif-team
+
+# Check it worked — the skills should be listed
 /plugin
 ```
 
@@ -45,7 +51,7 @@ You do not invoke a skill by name. Both Claude Code and Codex read every install
 skill's `description` and load the ones that match what you are asking for, so you
 just describe the task — see [Example prompts](#example-prompts) below.
 
-## Skills
+## nnsight skills
 
 **Foundation**
 
@@ -94,6 +100,35 @@ python plugins/nnsight/skills/nnsight/scripts/inspect_model.py meta-llama/Llama-
 python plugins/nnsight/skills/nnsight/scripts/check_env.py --remote
 ```
 
+## NDIF (self-hosting)
+
+A second plugin, for people and agents who run their **own** NDIF server — the
+backend behind nnsight's `remote=True` — rather than using the public
+[ndif.us](https://ndif.us/) service. (For that, the `remote` skill above is what
+you want.)
+
+```bash
+/plugin install ndif@ndif-team
+```
+
+| Skill | Use when... |
+| --- | --- |
+| `ndif-selfhost` | Standing a server up: the published `ndif/ndif` image, the compose dev stack, or a from-source `ndif start`. Prerequisites, tags, ports, volumes, configuration, and the first remote trace. |
+| `ndif-operate` | Running models on it: deploy, evict, pin, scale, `models.yaml`, sizing and padding, HOT/WARM/COLD, the dashboard, telemetry, turning on auth. |
+| `ndif-troubleshoot` | It won't start, requests hang, a deploy OOMs, a result won't download, versions disagree — symptom to cause to fix, and where the logs actually are. |
+| `ndif-develop` | Changing the server itself: the request lifecycle, the process map, trusted vs untrusted execution, the model-actor hooks, the test suite, release mechanics. |
+
+These skills document a server, so — unlike the nnsight ones — their code blocks
+are reference material rather than executed examples.
+
+Example prompts:
+
+- "Run NDIF on my own GPU with docker"
+- "Point nnsight at my local NDIF instead of ndif.us"
+- "Deploy Llama-3.1-8B on my NDIF and pin it"
+- "My NDIF says the compute backend is reconnecting"
+- "Why does my trace OOM with 'MiB allowed' on an empty GPU?"
+
 ## Example prompts
 
 Once installed, ask naturally:
@@ -106,9 +141,9 @@ Once installed, ask naturally:
 
 ## Development
 
-Every fenced `python` block in every skill is executed by the test suite. Blocks
-in one file share a namespace and run in document order; directives control
-execution:
+Every fenced `python` block in every **nnsight** skill is executed by the test
+suite (`tests/docblocks.py` sets `SKILLS_ROOT`). Blocks in one file share a
+namespace and run in document order; directives control execution:
 
 ```markdown
 <!-- test: skip -->                   don't run (still syntax-checked)
@@ -128,13 +163,19 @@ make test-skill SKILL=nnsight
 make report            # per-file table of blocks run / skipped
 ```
 
-`tests/test_structure.py` also enforces packaging: frontmatter matches directory
-names, Codex symlinks resolve, manifests are valid, relative links work, and no
-pre-0.8 API appears in a runnable example.
+`tests/test_structure.py` enforces packaging for **every** plugin listed in
+`.claude-plugin/marketplace.json`: the plugin manifest exists and its name
+matches, frontmatter matches directory names, Codex symlinks resolve, relative
+links work, and (for the nnsight plugin) no pre-0.8 API appears in a runnable
+example.
+
+The ndif skills document a server rather than a library, so their `python` blocks
+are all marked `<!-- test: skip -->` and are reference material, not examples the
+suite runs.
 
 ### Adding a skill
 
-1. Create `plugins/nnsight/skills/<skill-name>/SKILL.md` with frontmatter:
+1. Create `plugins/<plugin>/skills/<skill-name>/SKILL.md` with frontmatter:
 
    ```yaml
    ---
@@ -146,7 +187,7 @@ pre-0.8 API appears in a runnable example.
 2. Put depth in `references/*.md` and runnable tools in `scripts/`; keep
    `SKILL.md` to what an agent should read every time.
 3. Link it into both Codex trees:
-   `for d in .agents/skills .codex/skills; do ln -s ../../plugins/nnsight/skills/<skill-name> $d/; done`
+   `for d in .agents/skills .codex/skills; do ln -s ../../plugins/<plugin>/skills/<skill-name> $d/; done`
 4. Add a row to the table above.
 5. `make test`.
 
@@ -158,15 +199,23 @@ skills/
 ├── .agents/skills/                   # Codex skills (symlinks)
 ├── .codex/skills/                    # Codex skills, older CLI path (symlinks)
 ├── .github/workflows/test.yml        # CPU CI
-├── plugins/nnsight/
-│   ├── .claude-plugin/plugin.json
-│   └── skills/
-│       ├── nnsight/
-│       │   ├── SKILL.md
-│       │   ├── references/*.md
-│       │   └── scripts/*.py
-│       ├── debugging/
-│       └── ...
+├── plugins/
+│   ├── nnsight/
+│   │   ├── .claude-plugin/plugin.json
+│   │   └── skills/
+│   │       ├── nnsight/
+│   │       │   ├── SKILL.md
+│   │       │   ├── references/*.md
+│   │       │   └── scripts/*.py
+│   │       ├── debugging/
+│   │       └── ...
+│   └── ndif/
+│       ├── .claude-plugin/plugin.json
+│       └── skills/
+│           ├── ndif-selfhost/
+│           ├── ndif-operate/
+│           ├── ndif-troubleshoot/
+│           └── ndif-develop/
 ├── tests/                            # executes every code block
 └── Makefile
 ```

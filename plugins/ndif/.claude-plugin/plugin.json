@@ -1,0 +1,8 @@
+{
+  "name": "ndif",
+  "version": "1.0.0",
+  "description": "Self-hosting NDIF, the server behind nnsight's remote=True - standing one up with docker run, compose, or the ndif CLI; deploying and sizing models; troubleshooting; and changing the server itself",
+  "author": {
+    "name": "NDIF Team"
+  }
+}
