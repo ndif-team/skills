@@ -8,13 +8,20 @@ from pathlib import Path
 
 import pytest
 
-from docblocks import REPO_ROOT, SKILLS_ROOT, extract_blocks, markdown_files, skill_dirs
+from docblocks import (
+    MARKETPLACE,
+    REPO_ROOT,
+    SKILLS_ROOT,
+    all_markdown_files,
+    all_skill_dirs,
+    extract_blocks,
+    markdown_files,
+    plugins,
+)
 
 # Codex reads `.agents/skills` (the cross-tool path its docs give) and, on some
 # CLI builds, `.codex/skills`. Both trees are symlinks to the same skills.
 CODEX_SKILLS = [REPO_ROOT / ".codex" / "skills", REPO_ROOT / ".agents" / "skills"]
-MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
-PLUGIN = REPO_ROOT / "plugins" / "nnsight" / ".claude-plugin" / "plugin.json"
 NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 LINK_RE = re.compile(r"\[[^\]]*\]\((?P<target>[^)#\s]+)(?:#[^)]*)?\)")
 
@@ -38,7 +45,7 @@ def frontmatter(path: Path) -> dict[str, str]:
     return fields
 
 
-@pytest.mark.parametrize("skill", skill_dirs(), ids=lambda p: p.name)
+@pytest.mark.parametrize("skill", all_skill_dirs(), ids=lambda p: p.name)
 def test_frontmatter(skill: Path):
     fields = frontmatter(skill / "SKILL.md")
     assert fields.get("name") == skill.name, "frontmatter name must match the directory name"
@@ -49,7 +56,7 @@ def test_frontmatter(skill: Path):
 
 
 @pytest.mark.parametrize("root", CODEX_SKILLS, ids=lambda p: p.name)
-@pytest.mark.parametrize("skill", skill_dirs(), ids=lambda p: p.name)
+@pytest.mark.parametrize("skill", all_skill_dirs(), ids=lambda p: p.name)
 def test_codex_symlink(skill: Path, root: Path):
     link = root / skill.name
     rel = root.relative_to(REPO_ROOT)
@@ -59,22 +66,32 @@ def test_codex_symlink(skill: Path, root: Path):
 
 @pytest.mark.parametrize("root", CODEX_SKILLS, ids=lambda p: p.name)
 def test_no_stale_codex_symlinks(root: Path):
-    names = {skill.name for skill in skill_dirs()}
+    names = {skill.name for skill in all_skill_dirs()}
     stale = [p.name for p in root.iterdir() if p.name not in names]
     assert not stale, f"stale symlinks in {root.relative_to(REPO_ROOT)}: {stale}"
 
 
-def test_manifests():
+def test_marketplace_sources_exist():
     marketplace = json.loads(MARKETPLACE.read_text())
-    plugin = json.loads(PLUGIN.read_text())
-    sources = [p["source"] for p in marketplace["plugins"]]
-    assert "./plugins/nnsight" in sources
-    for source in sources:
-        assert (REPO_ROOT / source).is_dir(), f"marketplace source {source} does not exist"
-    assert plugin["name"] == "nnsight"
+    assert marketplace["plugins"], "the marketplace lists no plugins"
+    for entry in marketplace["plugins"]:
+        assert (REPO_ROOT / entry["source"]).is_dir(), (
+            f"marketplace source {entry['source']} does not exist"
+        )
 
 
-def test_readme_install_command_matches_the_manifests():
+@pytest.mark.parametrize("name,plugin_dir", plugins(), ids=lambda v: v if isinstance(v, str) else "")
+def test_plugin_manifest(name: str, plugin_dir: Path):
+    """Each marketplace plugin ships a manifest whose name matches its listing."""
+    manifest = plugin_dir / ".claude-plugin" / "plugin.json"
+    assert manifest.is_file(), f"{plugin_dir.name}: missing .claude-plugin/plugin.json"
+    assert json.loads(manifest.read_text())["name"] == name
+    assert (plugin_dir / "skills").is_dir(), f"{plugin_dir.name}: no skills/ directory"
+    assert list((plugin_dir / "skills").glob("*/SKILL.md")), f"{plugin_dir.name}: no skills"
+
+
+@pytest.mark.parametrize("name,plugin_dir", plugins(), ids=lambda v: v if isinstance(v, str) else "")
+def test_readme_install_command_matches_the_manifests(name: str, plugin_dir: Path):
     """The install line a new user copies has to name the real marketplace and plugin.
 
     Nothing else catches this: the command is prose, and a wrong one fails only on
@@ -82,17 +99,16 @@ def test_readme_install_command_matches_the_manifests():
     """
     readme = (REPO_ROOT / "README.md").read_text()
     marketplace = json.loads(MARKETPLACE.read_text())["name"]
-    plugin = json.loads(PLUGIN.read_text())["name"]
-    assert f"/plugin install {plugin}@{marketplace}" in readme
+    assert f"/plugin install {name}@{marketplace}" in readme
 
 
 def test_readme_lists_every_skill():
     readme = (REPO_ROOT / "README.md").read_text()
-    missing = [skill.name for skill in skill_dirs() if f"`{skill.name}`" not in readme]
+    missing = [skill.name for skill in all_skill_dirs() if f"`{skill.name}`" not in readme]
     assert not missing, f"skills missing from the README table: {missing}"
 
 
-@pytest.mark.parametrize("path", markdown_files(), ids=lambda p: str(p.relative_to(REPO_ROOT)))
+@pytest.mark.parametrize("path", all_markdown_files(), ids=lambda p: str(p.relative_to(REPO_ROOT)))
 def test_relative_links_resolve(path: Path):
     broken = []
     for match in LINK_RE.finditer(path.read_text()):
@@ -115,7 +131,11 @@ def test_scripts_compile(script: Path):
 
 @pytest.mark.parametrize("path", markdown_files(), ids=lambda p: str(p.relative_to(REPO_ROOT)))
 def test_no_pre_08_api(path: Path):
-    """These skills target nnsight 0.8. Catch idioms from older versions."""
+    """The nnsight skills target nnsight 0.8. Catch idioms from older versions.
+
+    Scoped to `markdown_files()` — the nnsight plugin — because it is a rule about
+    client-library examples, not about every plugin in the repo.
+    """
     banned = {
         r"\.value\b": "0.8 saves return the value itself — no .value",
         r"\bnnsight\.(list|dict|int|float|bool|apply|cond|log|local)\(": "removed in 0.8",

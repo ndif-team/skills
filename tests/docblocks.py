@@ -19,12 +19,19 @@ Multiple flags may appear in one comment, space separated.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SKILLS_ROOT = REPO_ROOT / "plugins" / "nnsight" / "skills"
+PLUGINS_ROOT = REPO_ROOT / "plugins"
+MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
+
+# Code-block *execution* is deliberately limited to the nnsight plugin: those
+# examples are checked against real models. The ndif plugin documents a server,
+# so its python blocks are all `test: skip` and only ever syntax-checked.
+SKILLS_ROOT = PLUGINS_ROOT / "nnsight" / "skills"
 
 DIRECTIVE_RE = re.compile(r"<!--\s*test:\s*(?P<body>.*?)\s*-->")
 FENCE_RE = re.compile(r"^(?P<indent>\s*)```(?P<lang>[\w+-]*)\s*$")
@@ -122,14 +129,37 @@ def extract_blocks(path: Path) -> list[Block]:
 
 
 def skill_dirs() -> list[Path]:
-    """Every skill directory (one SKILL.md each)."""
+    """Every skill directory whose blocks are executed (one SKILL.md each)."""
     return sorted(p.parent for p in SKILLS_ROOT.glob("*/SKILL.md"))
 
 
 def markdown_files() -> list[Path]:
     """Every markdown file that may contain runnable examples."""
+    return _markdown_under(skill_dirs())
+
+
+def plugins() -> list[tuple[str, Path]]:
+    """Every plugin listed in the marketplace, as (name, directory)."""
+    marketplace = json.loads(MARKETPLACE.read_text())
+    return [(p["name"], REPO_ROOT / p["source"]) for p in marketplace["plugins"]]
+
+
+def all_skill_dirs() -> list[Path]:
+    """Every skill directory in every marketplace plugin, executed or not."""
+    dirs: list[Path] = []
+    for _, plugin in plugins():
+        dirs.extend(p.parent for p in (plugin / "skills").glob("*/SKILL.md"))
+    return sorted(dirs)
+
+
+def all_markdown_files() -> list[Path]:
+    """Every skill markdown file in the repo, whether or not it is executed."""
+    return _markdown_under(all_skill_dirs())
+
+
+def _markdown_under(skills: list[Path]) -> list[Path]:
     files: list[Path] = []
-    for skill in skill_dirs():
+    for skill in skills:
         files.append(skill / "SKILL.md")
         files.extend(sorted((skill / "references").glob("*.md")))
     return files

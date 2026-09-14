@@ -9,6 +9,11 @@
       "name": "nnsight",
       "source": "./plugins/nnsight",
       "description": "Neural network interpretability with nnsight and NDIF - tracing and intervening on model internals, debugging, remote execution, logit lens, activation patching, attribution patching, causal tracing, and steering"
+    },
+    {
+      "name": "ndif",
+      "source": "./plugins/ndif",
+      "description": "Self-hosting NDIF, the server behind nnsight's remote=True - standing one up with docker run, compose, or the ndif CLI; deploying, pinning and sizing models; troubleshooting; and changing the server itself"
     }
   ]
 }
