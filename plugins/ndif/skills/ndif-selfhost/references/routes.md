@@ -158,7 +158,7 @@ knows about processes it started — it cannot stop a compose stack.
   hint has no download behind it. Verified alternative:
 
   ```bash
-  conda install -c conda-forge minio-server
+  conda install --override-channels -c conda-forge redis-server minio-server
   ```
 
   Or lift it out of the image the Dockerfile uses:
