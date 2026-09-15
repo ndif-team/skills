@@ -114,7 +114,7 @@ eviction and GPU accounting are
    against the execution timeout and a cancel event. `print()` becomes `LOG`
    responses, one per line.
 9. **Result back, by one of two routes.** At or under
-   `NDIF_MAX_SOCKET_RESULT_BYTES` (4 MiB) with a live socket it rides on the
+   `NDIF_MAX_SOCKET_RESULT_BYTES` (20 MiB) with a live socket it rides on the
    `COMPLETED` response with `pickled=True`; otherwise — and for every
    non-blocking request — it is PUT at `{request.id}.pt` and presigned for an hour.
 10. **Client collects** off the binary frame or the URL, decompresses,

@@ -98,7 +98,7 @@ docker run -d --name ndif --gpus all --shm-size 4g \
 
 - **8001** is the API — the only port a client posts to.
 - **9000** is MinIO. Publish it: a result over `NDIF_MAX_SOCKET_RESULT_BYTES`
-  (4 MiB) comes back as a presigned URL the *client* fetches. Unpublished, large
+  (20 MiB) comes back as a presigned URL the *client* fetches. Unpublished, large
   results complete server-side and then fail to download.
 - The **HF cache mount** is what makes weights survive `docker rm`.
 - Serving gated checkpoints (Llama, Gemma)? Add `-e HF_TOKEN` to pass your token
@@ -280,13 +280,13 @@ and exhaustively in `docs/reference/env-vars.md` and `docs/reference/ports.md`.
 
 ## Gotchas
 
-- **Results over 4 MiB *after compression* come back as a presigned MinIO
+- **Results over 20 MiB *after compression* come back as a presigned MinIO
   URL.** Under `NDIF_MAX_SOCKET_RESULT_BYTES` they ride on the response itself
   and port 9000 is never touched; above it — and for *every* non-blocking
   request — the client fetches the URL directly, so it needs to reach 9000 and
   the signature has to name a host it can resolve. The threshold is on the
-  serialized, compressed payload, not on the tensor bytes you count: 4.7 MiB of
-  bf16 activations can still ride the socket. The client prints a
+  serialized, compressed payload, not on the tensor bytes you count. (Before
+  ndif 0.1.2 the default was 4 MiB.) The client prints a
   `Downloading result` bar when MinIO was used.
 - **A block that allocates a lot of GPU memory dies with `CUDA out of memory ...
   N MiB allowed` even on an almost-empty card.** The actor caps per-process GPU

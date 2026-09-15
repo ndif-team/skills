@@ -66,7 +66,7 @@ does **not** run the same execution path as `just up`.
 | `NDIF_MINIMUM_DEPLOYMENT_TIME_SECONDS` | `3600` | How long a fresh replica is protected from automatic eviction. |
 | `NDIF_DEFAULT_EXECUTION_TIMEOUT_SECONDS` | **unset — no cap** | A block runs until it finishes and holds its replica. Set it before other people can submit. |
 | `NDIF_AUTOSCALING_MAX_REPLICAS` | `3` | Per-model replica ceiling for autoscaling, which never scales back down. |
-| `NDIF_MAX_SOCKET_RESULT_BYTES` | `4194304` (4 MiB) | Largest result (after compression) handed back on the COMPLETED response instead of through the object store. `0` removes the cap — don't, unless results are known to be small: past Redis's pubsub output-buffer limit the subscriber is disconnected and the response is silently lost. |
+| `NDIF_MAX_SOCKET_RESULT_BYTES` | `20971520` (20 MiB) | Largest result (after compression) handed back on the COMPLETED response instead of through the object store. `0` removes the cap — don't, unless results are known to be small: past Redis's pubsub output-buffer limit the subscriber is disconnected and the response is silently lost. |
 | `NDIF_SANDBOX_POOL_SIZE` | `7` | Runners pre-warmed per **sandboxed** model actor, each holding a few hundred MB whether or not anything is running. Turn it down on a node hosting several models. |
 | `NDIF_TP_MODEL_ACTOR_CLASS` | **unset — tensor parallelism off** | Not a fallback to a built-in: unset means no replica is ever placed tensor-parallel and per-model `max_tp` is inert. |
 | `NDIF_RAY_TEMP_DIR` | `/tmp/ray` | Ray refuses to schedule when the filesystem holding it is >95% full. |
