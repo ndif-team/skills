@@ -314,12 +314,15 @@ and exhaustively in `docs/reference/env-vars.md` and `docs/reference/ports.md`.
 - **A prompt longer than the model's context dies as `CUDA error: device-side
   assert triggered` in `masking_utils`,** not as an index error naming the
   limit (gpt2: 1024 positions). The actor survives it; the next request runs.
-- **Anything but a plain `name = value.save()` at block scope is not bound after
-  the block** — a list, dict or set comprehension, `.append()` into a list, a
-  value tucked into a container. The request reports `COMPLETED` with nothing
-  downloaded and the client then hits `NameError`. Write one assignment per
-  saved value. That is nnsight behaviour, not a server fault; send users to the
-  nnsight plugin's `debugging` skill.
+- **`.save()` goes on the object you assign, not on what you put inside it.**
+  `acts = [h[i].output.save() for i in ...]` and `acts = []` + `.append(...save())`
+  leave `acts` unbound after the block — the request reports `COMPLETED`, nothing
+  downloads, and the client hits `NameError`. Any of these work: save the
+  container (`acts = [h[i].output for i in ...].save()`, `{i: ... }.save()`),
+  save an empty one and append to it (`acts = list().save()` then
+  `acts.append(h[i].output)`), or create the list *before* the block and append
+  `.save()`d values into it. That is nnsight behaviour, not a server fault; the
+  nnsight plugin's `debugging` skill covers it.
 - **Multimodal checkpoints reshape the module tree.** A `*ForConditionalGeneration`
   model such as `google/gemma-3-27b-it` keeps its decoder under
   `model.model.language_model.layers[i]`, not `model.model.layers[i]`; print the
