@@ -193,7 +193,7 @@ and `docs/runbooks/model-oom-on-deploy.md`.
 ## COMPLETED but no result
 
 The job succeeded and the client cannot fetch it. A result **under**
-`NDIF_MAX_SOCKET_RESULT_BYTES` (4 MiB) rides back on the response itself and
+`NDIF_MAX_SOCKET_RESULT_BYTES` (20 MiB) rides back on the response itself and
 never touches the object store, so this only bites above that — and always for a
 non-blocking job.
 
