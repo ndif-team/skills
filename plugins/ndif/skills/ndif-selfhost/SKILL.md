@@ -154,11 +154,11 @@ and `docs/`.
 
 Two traps on this route that nothing else warns about:
 
-- **`NDIF_RAY_TEMP_DIR` must be a short path** (40 characters or fewer): Ray
-  puts unix sockets under `<dir>/session_<ts>_<pid>/sockets/` and AF_UNIX
-  paths cap at 107 bytes. Too long, and `ray start` dies at once with
-  `validate_socket_filename failed`; `ray/start.sh` now refuses such a path
-  up front, on older installs it just looks like a Ray that never boots.
+- **Keep `NDIF_RAY_TEMP_DIR` short.** Ray puts unix sockets under
+  `<dir>/session_<ts>_<pid>/sockets/` and AF_UNIX paths cap at 107 bytes, so
+  a long temp dir makes `ray start` die at once with `validate_socket_filename
+  failed` in the ray log — which from outside looks like a Ray that never
+  boots. `/tmp/ndif-ray` is fine; a deep project path is not.
 - **A ✓ from `ndif start` means the process was alive two seconds later, no
   more.** If `/connected` is still `reconnecting` after a minute or two,
   `ndif info` (is `ray` `stopped`?) and `$NDIF_HOME/logs/ray.log` — do not
