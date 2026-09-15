@@ -58,7 +58,7 @@ in that service's `start.sh` or its first import.
 |---|---|
 | Nothing at all, the container never runs | A `depends_on: service_healthy` gate — `api` waits on `postgres` **and** `influxdb` even though it can run without either |
 | `ERROR: Cannot write to Ray temp directory` | `NDIF_RAY_TEMP_DIR` is not writable |
-| `validate_socket_filename failed: AF_UNIX path length cannot exceed 107 bytes` (ray log), or `ERROR: NDIF_RAY_TEMP_DIR is N characters` | `NDIF_RAY_TEMP_DIR` is too long for Ray's socket paths; use a short one such as `/tmp/ndif-ray` |
+| `validate_socket_filename failed: AF_UNIX path length cannot exceed 107 bytes` in the ray log | `NDIF_RAY_TEMP_DIR` is too long for Ray's socket paths; use a short one such as `/tmp/ndif-ray` |
 | `ndif start` said ✓ but `ndif info` says `stopped` | The service died after the 2 s liveness check; read `$NDIF_HOME/logs/<service>.log` |
 | `ndif stop` said stopped but `gcs_server` / `raylet` still run | ndif 0.1.0's `stop` only killed the `start.sh` process group; run `ray stop --force` (0.1.1 does it for you) |
 | `Waiting for Ray head at ...` forever | A worker node's `NDIF_RAY_HEAD_ADDRESS` cannot be reached. Check the port — 6385, not 6379 |
