@@ -48,22 +48,44 @@ single-host default. Full per-route detail: `docs/operating/quickstart.md`.
 | An NVIDIA GPU and a CUDA driver | The controller only manages Ray nodes that report a `GPU` resource. A CPU-only node joins Ray and is then ignored; `/ping` answers but `/request` cannot be served. |
 | NVIDIA Container Toolkit (routes 1 and 2) | `docker run --gpus all` must work, or the container fails to create. |
 | `--shm-size 4g` (routes 1 and 2) | Ray's plasma object store lives in `/dev/shm`; Docker's 64 MB default makes Ray spill to disk or fail, and the error never mentions shm. |
+| Room on the filesystem under `NDIF_RAY_TEMP_DIR` (default `/tmp/ray`) | Ray's raylet stops scheduling once that filesystem passes 95 % full, and the only symptom is a server that comes up and never runs anything. On a full `/`, point it elsewhere (route 1: `-e NDIF_RAY_TEMP_DIR=/ndifray -v /big/disk/ray:/ndifray`). `ndif doctor` checks this from 0.1.2. |
 | Disk for weights, plus host RAM | Checkpoints download at deploy time (gpt2 ~0.5 GB, a 70B ~140 GB). Evicted models are held in host RAM as WARM. |
 | Python 3.12 or 3.13 (route 3) | `requires-python = ">=3.12,<3.14"`; `ndif doctor` fails below 3.12. |
 
-**Match the tag to your driver.** `ndif/ndif:0.1.0-cu126` (= `0.1.0` = `latest`)
-is the default line and runs on any CUDA 12.x driver >= 525;
-`ndif/ndif:0.1.0-cu130` is for CUDA 13 drivers (580+) and Blackwell (RTX 50xx, B200). There is no cu128 tag — PyTorch's cu130 index stopped at torch 2.11. A wheel built for a
+**Match the tag to your driver.** Every release is published as
+`ndif/ndif:<version>-cu126` and `<version>-cu130`; the bare `<version>` and
+`latest` point at the newest cu126. cu126 runs on any CUDA 12.x driver >= 525;
+cu130 is for CUDA 13 drivers (580+) and Blackwell (RTX 50xx, B200). There is no
+cu128 tag — PyTorch's cu128 index stopped at torch 2.11. A wheel built for a
 CUDA line your driver predates does not fail loudly — `torch.cuda.is_available()`
 just returns `False` and Ray starts with `cuda_memory_bytes: 0`.
 
-`0.1.0` carries nnsight 0.8.0rc1, torch 2.14, transformers 5.17, ray 2.55.1,
+The 0.1 line carries nnsight 0.8.0rc1, torch 2.14, transformers 5.17, ray 2.55,
 Python 3.12. Ask an image directly, with no GPU or volume needed:
 
 ```bash
 docker run --rm ndif/ndif version
 docker run --rm --gpus all ndif/ndif doctor
 ```
+
+## On a GPU box you share
+
+Every example here assumes the machine is yours. On a shared host three things
+change:
+
+- **Pin the cards.** `docker run --gpus '"device=0,1"'` (that exact quoting) for
+  routes 1 and 2, `CUDA_VISIBLE_DEVICES=0,1` for route 3. `ndif doctor` should
+  then report torch seeing exactly that many GPUs.
+- **The controller sizes from each card's *total* memory and never reads what
+  other people hold.** `ndif status` will say a 80 GB card is 80 GB free while a
+  colleague's job holds 25 GB of it, and the placer will put a model there.
+  Subtract other tenants' `nvidia-smi` usage yourself and force the placement
+  with `ndif deploy --gpus N` (or `--size-bytes`); see the `ndif-operate` skill's
+  sizing section for the arithmetic.
+- **The container runs as root**, so anything it writes into a bind mount — the
+  Ray temp dir, new files in the HF cache — is root-owned afterwards. Clean up
+  through a container (`docker run --rm -v /path:/v alpine rm -rf /v/...`) or
+  keep those mounts on directories you don't need to delete as yourself.
 
 ## Route 1 — the published image
 
@@ -166,9 +188,8 @@ Two traps on this route that nothing else warns about:
 
 **The MinIO binary is the awkward part.** `ndif doctor` checks for `redis-server`
 and `minio` on `PATH`, and MinIO publishes no standalone server binaries any more
-(`dl.min.io` returns 410, the GitHub releases carry no assets), so doctor's
-"install the MinIO server binary" hint has nothing to point at. Two options that
-work:
+(`dl.min.io` returns 410, the GitHub releases carry no assets). Doctor's hint
+names the conda-forge package; the two options that work:
 
 ```bash
 conda install --override-channels -c conda-forge redis-server minio-server   # verified; --override-channels skips the anaconda ToS prompt a stock miniconda raises
@@ -259,11 +280,14 @@ and exhaustively in `docs/reference/env-vars.md` and `docs/reference/ports.md`.
 
 ## Gotchas
 
-- **Results over 4 MiB come back as a presigned MinIO URL.** Under
-  `NDIF_MAX_SOCKET_RESULT_BYTES` they ride on the response itself and port 9000
-  is never touched; above it — and for *every* non-blocking request — the client
-  fetches the URL directly, so it needs to reach 9000 and the signature has to
-  name a host it can resolve.
+- **Results over 4 MiB *after compression* come back as a presigned MinIO
+  URL.** Under `NDIF_MAX_SOCKET_RESULT_BYTES` they ride on the response itself
+  and port 9000 is never touched; above it — and for *every* non-blocking
+  request — the client fetches the URL directly, so it needs to reach 9000 and
+  the signature has to name a host it can resolve. The threshold is on the
+  serialized, compressed payload, not on the tensor bytes you count: 4.7 MiB of
+  bf16 activations can still ride the socket. The client prints a
+  `Downloading result` bar when MinIO was used.
 - **A block that allocates a lot of GPU memory dies with `CUDA out of memory ...
   N MiB allowed` even on an almost-empty card.** The actor caps per-process GPU
   memory at the model's size × `NDIF_DEFAULT_PADDING_FACTOR` (plus
@@ -290,10 +314,17 @@ and exhaustively in `docs/reference/env-vars.md` and `docs/reference/ports.md`.
 - **A prompt longer than the model's context dies as `CUDA error: device-side
   assert triggered` in `masking_utils`,** not as an index error naming the
   limit (gpt2: 1024 positions). The actor survives it; the next request runs.
-- **A list built by comprehension or `.append()` inside a trace block is not
-  bound after the block** — only plain `name = value.save()` assignments come
-  back. That is nnsight behaviour, not a server fault; send users to the nnsight
-  plugin's `debugging` skill.
+- **Anything but a plain `name = value.save()` at block scope is not bound after
+  the block** — a list, dict or set comprehension, `.append()` into a list, a
+  value tucked into a container. The request reports `COMPLETED` with nothing
+  downloaded and the client then hits `NameError`. Write one assignment per
+  saved value. That is nnsight behaviour, not a server fault; send users to the
+  nnsight plugin's `debugging` skill.
+- **Multimodal checkpoints reshape the module tree.** A `*ForConditionalGeneration`
+  model such as `google/gemma-3-27b-it` keeps its decoder under
+  `model.model.language_model.layers[i]`, not `model.model.layers[i]`; print the
+  model once before naming a layer. Decoder layers on transformers 5.x return a
+  plain tensor, so `.output[0]` selects batch element 0, not a tuple slot.
 
 ## References
 

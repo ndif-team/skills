@@ -120,7 +120,10 @@ silently dropped. `--sync` evicts every HOT model key not in the file, trims
 replicas above the requested count, and deploys only the shortfall. Pair it with
 `ndif export` for a snapshot/restore loop — but note `padding_factor` does **not**
 round-trip: it is a deploy-time sizing input, never stored on the deployment, so
-a restored model falls back to `NDIF_DEFAULT_PADDING_FACTOR`.
+a restored model falls back to `NDIF_DEFAULT_PADDING_FACTOR`. `gpus` round-trips
+from 0.1.2; on 0.1.1 an export drops it, and restoring a two-card model from that
+file lets the placer put it on one card that cannot hold it — check the YAML
+before `--sync`.
 
 ## Sizing: how the controller decides a model fits
 
@@ -134,6 +137,10 @@ disagreed.
 padded = ceil(base + base * padding_factor + padding_bias)
 ```
 
+`ndif status`'s "GPU Memory ... free" line is this ledger (0.1.2 labels it
+"unreserved by NDIF"); COLD on 0.1.1 also lists datasets and adapters found in
+the HF cache, none of them deployable.
+
 `base` is parameters + buffers at the target dtype. Defaults: `padding_factor`
 0.15, `padding_bias` 500 MiB. That padding is the **entire** budget for
 activations, KV cache, CUDA workspaces and the CUDA context — and the actor
@@ -143,7 +150,15 @@ allocator cap at run time. This is why a block can die with
 
 Placement charges each card the replica's **share**, `ceil(size / gpus_needed)`,
 not the whole card — so a model 1% over one card's capacity takes two cards at
-about half each and the rest stays usable.
+about half each and the rest stays usable. On the default actor, `--gpus N`
+loads the model across N cards with an accelerate device map; it is not tensor
+parallelism and needs no `NDIF_TP_MODEL_ACTOR_CLASS`.
+
+Worked example, a 27B bf16 model on cards with 56 GB actually free of 80 GB:
+base = 27.4e9 × 2 B = 54.8 GB, padded = 54.8 × 1.15 + 0.5 = 63.5 GB. The ledger
+sees 80 GB free per card and would place it on one; the card cannot hold it.
+`ndif deploy google/gemma-3-27b-it --gpus 2` charges 31.8 GB to each card and
+loads 26.8 + 26.4 GB. An 8B model (16.06 GB base → 18.99 GB padded) fits one.
 
 What the ledger cannot see, in order of how often it bites: **anything NDIF did
 not place** (a stray training job, an actor left behind by a killed controller),
