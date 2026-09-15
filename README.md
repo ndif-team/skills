@@ -113,10 +113,10 @@ you want.)
 
 | Skill | Use when... |
 | --- | --- |
-| `ndif-selfhost` | Standing a server up: the published `ndif/ndif` image, the compose dev stack, or a from-source `ndif start`. Prerequisites, tags, ports, volumes, configuration, and the first remote trace. |
-| `ndif-operate` | Running models on it: deploy, evict, pin, scale, `models.yaml`, sizing and padding, HOT/WARM/COLD, the dashboard, telemetry, turning on auth. |
-| `ndif-troubleshoot` | It won't start, requests hang, a deploy OOMs, a result won't download, versions disagree — symptom to cause to fix, and where the logs actually are. |
-| `ndif-develop` | Changing the server itself: the request lifecycle, the process map, trusted vs untrusted execution, the model-actor hooks, the test suite, release mechanics. |
+| `selfhost` | Standing a server up: the published `ndif/ndif` image, the compose dev stack, or a from-source `ndif start`. Prerequisites, tags, ports, volumes, configuration, and the first remote trace. |
+| `operate` | Running models on it: deploy, evict, pin, scale, `models.yaml`, sizing and padding, HOT/WARM/COLD, the dashboard, telemetry, turning on auth. |
+| `troubleshoot` | It won't start, requests hang, a deploy OOMs, a result won't download, versions disagree — symptom to cause to fix, and where the logs actually are. |
+| `develop` | Changing the server itself: the request lifecycle, the process map, trusted vs untrusted execution, the model-actor hooks, the test suite, release mechanics. |
 
 These skills document a server, so — unlike the nnsight ones — their code blocks
 are reference material rather than executed examples.
@@ -212,10 +212,10 @@ skills/
 │   └── ndif/
 │       ├── .claude-plugin/plugin.json
 │       └── skills/
-│           ├── ndif-selfhost/
-│           ├── ndif-operate/
-│           ├── ndif-troubleshoot/
-│           └── ndif-develop/
+│           ├── selfhost/
+│           ├── operate/
+│           ├── troubleshoot/
+│           └── develop/
 ├── tests/                            # executes every code block
 └── Makefile
 ```
