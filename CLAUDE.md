@@ -148,10 +148,5 @@ Same rules, plus two of its own:
   `CLAUDE.md` routes to `docs/`)
 - nnterp: `/home/localjadenfk/wd/nnterp-0.8-refactor` (branch `0.8-refactor` of
   `ndif-team/nnterp`; `CLAUDE.md` routes to `docs/`; every docs snippet ran against the
-  tiny checkpoints in its `tests/families/`). The `ndif2` env has an older nnterp
-  installed editable for other projects; leave it alone and put the new one first on
-  `PYTHONPATH` through a directory whose path contains `lib/python` (a symlink
-  `<dir>/lib/python/nnterp -> /home/localjadenfk/wd/nnterp-0.8-refactor/nnterp`).
-  `remote="local"` drops every other non-site `sys.path` entry while it deserializes,
-  so a plain checkout path lets the old nnterp load mid-test.
+  tiny checkpoints in its `tests/families/`)
 - Tutorials and paper implementations: `/home/localjadenfk/wd/nnsight-website/docs`

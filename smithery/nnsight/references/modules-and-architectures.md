@@ -363,9 +363,9 @@ class Heads(Envoy):
         return hidden.view(b, s, self.num_heads, self.head_dim).transpose(1, 2)
 
     @heads.transform
-    def heads(self, value):                        # write: back to the model's layout
-        b, nh, s, hd = value.shape
-        return (value.transpose(1, 2).reshape(b, s, nh * hd), None)
+    def heads(self, value, raw):                   # write: back to the model's layout
+        b, nh, s, hd = value.shape                 # raw: the tuple as served, before the read
+        return (value.transpose(1, 2).reshape(b, s, nh * hd), *raw[1:])
 
 headed = TransformersModel("openai-community/gpt2", dispatch=True,
                            envoys={GPT2Attention: Heads})   # or {"attn": Heads} by suffix
@@ -390,8 +390,10 @@ Four things that bite:
 - **`self.<name>` inside a preprocess falls through to the module**, which is how
   `self.num_heads` and `self.head_dim` resolve above. Nothing checks they exist —
   GPT-NeoX spells the second one `head_size`.
-- **The transform must return a value shaped like the *location*.** The read
-  above indexes `value[0]`, so the write has to hand back the whole tuple.
+- **The transform must return a value shaped like the *location*.** It is
+  called with the edited view and `raw`, the value as served before the
+  preprocess; the read above indexes `value[0]`, so the write rebuilds the whole
+  tuple from `raw`.
 - **A preprocess that raises `AttributeError` is swallowed**, because an
   `eproperty` is a `property` and a raising getter falls through to
   `__getattr__`. You get `'Heads' object (nor its module) has attribute 'heads'`
