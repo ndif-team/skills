@@ -230,9 +230,10 @@ print(torch.equal(resid, same))
 ```
 
 An alias points at the *same* envoy, so cache keys and iteration are unaffected.
-For a maintained version of this idea across many architectures — with
-`layers_output[i]`, `attentions[i]`, `mlps[i]` and model validation — see the
-`nnterp` skill.
+For a maintained version of this idea across many architectures — one set of
+names (`model.layers[i].self_attn`, `.mlp`, `model.norm`) and standard values
+(`layer_output`, `attention_output`, `mlp_output`) on every family — see the
+nnterp plugin's `nnterp:nnterp` skill.
 
 ## Any PyTorch module
 

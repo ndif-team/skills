@@ -33,7 +33,7 @@ MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 # server, so its python blocks are all `test: skip` and only ever syntax-checked.
 # Each executed plugin names the package its blocks import; when it is not
 # installed, its blocks skip with that reason instead of failing.
-EXECUTED_PLUGINS = {"nnsight": "nnsight", "nnter": "nnter"}
+EXECUTED_PLUGINS = {"nnsight": "nnsight", "nnterp": "nnterp"}
 EXECUTED_ROOTS = [PLUGINS_ROOT / name / "skills" for name in EXECUTED_PLUGINS]
 SKILLS_ROOT = EXECUTED_ROOTS[0]
 

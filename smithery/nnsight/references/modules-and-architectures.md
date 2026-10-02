@@ -39,9 +39,33 @@ print(eager.config.model_type)
 ```
 
 Others worth knowing: `task=` (pipeline task, inferred if omitted — inference
-asks the Hub, so pass it when offline), `device_map=`, `dtype=`, `revision=`,
-`peft=<adapter repo id>`, `rename=` (below), and anything else HuggingFace
-accepts — it is forwarded.
+asks the Hub, so pass it when offline), `device=`, `device_map=`, `dtype=`,
+`revision=`, `peft=<adapter repo id>`, `rename=` (below), and anything else
+HuggingFace accepts — it is forwarded.
+
+**Pick one device with `device=`, not `device_map=`.** The model loads through
+`transformers.pipeline(...)`, which moves a model that sits on a single device to
+its own `device`, defaulting to the first GPU. Measured on transformers 5.17 with
+one GPU:
+
+| Argument | Model ends up on |
+|---|---|
+| none | `cuda:0` (CPU only without an accelerator) |
+| `device="cpu"` | `cpu` |
+| `device="cuda"` / `device=0` | `cuda:0` |
+| `device_map="cpu"` / `device_map={"": "cpu"}` | `cuda:0`, silently |
+| `device_map="cuda"` / `device_map="auto"` | `cuda:0` |
+| `device_map=` dict over two or more devices | as mapped |
+
+`dispatch=True` and a lazy model dispatched on first use behave the same.
+`device_map=` is for spreading a model across devices (`"auto"` on several GPUs,
+or a dict). `DiffusionModel` is the exception: diffusers honours
+`device_map="cuda"` and ignores `device=`.
+
+```python
+cpu_model = TransformersModel("openai-community/gpt2", device="cpu", dispatch=True)
+assert next(cpu_model.parameters()).device.type == "cpu"
+```
 
 `dtype=` also takes a quantization name (`"nf4"`, `"int8"`, ...) for a checkpoint
 too big for the GPU you have; load the `quantization` guide (`quantization.md`) before using one, since
@@ -205,8 +229,10 @@ print(torch.equal(resid, same))
 ```
 
 An alias points at the *same* envoy, so cache keys and iteration are unaffected.
-For a maintained version of this idea across many architectures — with
-`layers_output[i]`, `attentions[i]`, `mlps[i]` and model validation — see the `nnterp` guide (`nnterp.md`).
+For a maintained version of this idea across many architectures — one set of
+names (`model.layers[i].self_attn`, `.mlp`, `model.norm`) and standard values
+(`layer_output`, `attention_output`, `mlp_output`) on every family — see the
+nnterp plugin's `nnterp:nnterp` skill.
 
 ## Any PyTorch module
 

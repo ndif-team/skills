@@ -80,7 +80,11 @@ itself: it shifts every request one step later, and that only surfaces when a
 shifted request runs off the end of the run — at step 0 as this error, past it
 as the cut-short warning. A bound that stops short of the run's last step
 completes silently with its writes on the wrong steps — see
-[references/error-catalogue.md](debugging-error-catalogue.md).
+[references/error-catalogue.md](debugging-error-catalogue.md). A `.source` op whose
+module's `.source` is first touched inside the loop shifts even at step 0: read
+after `attn.output`, it returns steps 1, 2, … and comes up one entry short. The
+only signal is the closing "was never reached" warning, which blames the loop
+bound. Touching `attn.source` before the trace turns it back into this error.
 
 The same error appears when you request a module the run never reached — after
 `tracer.stop()`, on a `.skip()`ped module's children, or past the point where

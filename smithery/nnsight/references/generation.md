@@ -211,6 +211,47 @@ And inside a loop, a read followed by a write to a module *below* it parks the
 write on the next step, so every intervention lands one step late. Order the body
 the way the forward runs.
 
+### A wrong-order `.source` read lands on the next step
+
+A read the model already ran past raises `OutOfOrderError` at step 0, and past
+step 0 it binds to the next step instead. A `.source` op whose module's `.source`
+is first touched inside the loop binds to the next step **even at step 0**. Reading
+`attn.output` and then an op inside `attn` therefore gives the op's steps 1, 2, …,
+one entry short. The only signal is the closing "was never reached" warning, and
+it blames the loop bound:
+
+```python
+import warnings
+
+attn = model.transformer.h[3].attn          # its .source is not touched before this loop
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    with model.generate(prompt, max_new_tokens=4, min_new_tokens=4) as tracer:
+        outs, ops = nnsight.save([]), nnsight.save([])
+        for step in tracer.iter[:4]:
+            outs.append(attn.output[0])                              # fires last in attn
+            ops.append(attn.source.attention_interface_1.output[0])  # already ran this step
+
+assert len(outs) == 4 and len(ops) == 3     # one short...
+assert ops[0].shape[1] == 1                 # ...and it starts at step 1, not the 10-token prefill
+assert any("was never reached" in str(w.message) for w in caught)
+```
+
+Once a module's `.source` has been touched (here, by the loop above), the same
+body raises at step 0, as a module read would:
+
+```python
+with model.generate(prompt, max_new_tokens=4, min_new_tokens=4) as tracer:
+    for step in tracer.iter[:4]:
+        late = attn.output[0]
+        early = attn.source.attention_interface_1.output[0]
+```
+
+So: read ops before the module output that contains them, touch `.source` once
+outside the trace (`attn.source`), and assert that parallel lists have the same
+length. For a per-step check, a shape that grows with the step helps: an
+attention pattern's key axis is `prompt_len + step`.
+
 ### Step 0 is the prefill
 
 `tracer.iter` counts forward passes, not generated tokens, and the first pass is

@@ -6,7 +6,7 @@ and [NDIF](https://ndif.us/).
 Compatible with both **Claude Code** and **OpenAI Codex** via the
 [Agent Skills Specification](https://agentskills.io/).
 
-Three plugins: **nnsight**, for writing interpretability code, **nnter**, for writing it
+Three plugins: **nnsight**, for writing interpretability code, **nnterp**, for writing it
 once against one module vocabulary that runs on every transformer family, and **ndif**,
 for running your own NDIF server.
 
@@ -28,8 +28,8 @@ claude
 # Install the interpretability skills
 /plugin install nnsight@ndif-team
 
-# Install the nnter skills (one vocabulary across transformer families, on nnsight)
-/plugin install nnter@ndif-team
+# Install the nnterp skills (one vocabulary across transformer families, on nnsight)
+/plugin install nnterp@ndif-team
 
 # Install the NDIF self-hosting skills (optional — only if you run your own server)
 /plugin install ndif@ndif-team
@@ -86,7 +86,6 @@ just describe the task — see [Example prompts](#example-prompts) below.
 
 | Skill | Use when... |
 | --- | --- |
-| `nnterp` | Writing one script that runs unchanged across GPT-2, Llama, Qwen, Gemma. |
 | `vllm` | Throughput, continuous batching, CUDA-graph taps, tensor parallelism, `model.edit()` sweeps, nnsight-serve, async streaming — and what a block sees differently on vLLM. |
 | `tensor-parallel` | A model too big for one GPU, sharded across several with `transformers` TP under `torchrun`. |
 | `quantization` | A model too big for one GPU, held in 4 or 8 bits — `dtype="nf4"`, `"int8"`, ... |
@@ -104,27 +103,28 @@ python plugins/nnsight/skills/nnsight/scripts/inspect_model.py meta-llama/Llama-
 python plugins/nnsight/skills/nnsight/scripts/check_env.py --remote
 ```
 
-## nnter (one vocabulary across families)
+## nnterp (one vocabulary across families)
 
-[nnter](https://github.com/JadenFiotto-Kaufman/nnter) is a layer on nnsight 0.8: a
+[nnterp](https://github.com/ndif-team/nnterp/tree/0.8-refactor) is a layer on nnsight 0.8: a
 `StandardizedTransformer` whose modules answer to Llama's names on every family
 (`model.layers[i].self_attn`, `model.layers[i].mlp`, `model.norm`, `model.lm_head`) and carry
 standard values (`layer_output`, `attention_output`, `mlp_output`, `attention_probabilities`,
 the attention interior, `logits`, the gated-DeltaNet state on hybrids) that mean the same thing
-everywhere, with `model.status()` saying what a checkpoint has before any trace.
+on all 92 transformer families it knows, with `model.support()` saying what a checkpoint has
+before any trace.
 
 ```bash
-/plugin install nnter@ndif-team
+/plugin install nnterp@ndif-team
 ```
 
 | Skill | Use when... |
 | --- | --- |
-| `nnter` | Writing code against model internals that must run on more than one architecture, or that wants the residual stream, sublayer contributions, attention pattern or DeltaNet state without per-family module paths and tuple unwrapping. Start here. |
-| `nnter-patterns` | Logit lens, steering, attention patterns, ablation, activation patching, direct logit attribution, probing, cross-family sweeps and DeltaNet state patching, written once against the standard values. |
-| `nnter-extending` | A checkpoint nnter does not know, a family whose value the base gets wrong, or a value of your own: writing a family module, overriding values, finding `.source` operation names, registering from outside the package. |
+| `nnterp` | Writing code against model internals that must run on more than one architecture, or that wants the residual stream, sublayer contributions, attention pattern or DeltaNet state without per-family module paths and tuple unwrapping. Start here. |
+| `patterns` | Logit lens, steering, attention patterns, ablation, activation patching, direct logit attribution, probing, cross-family sweeps and DeltaNet state patching, written once against the standard values. |
+| `extending` | A checkpoint nnterp does not know, a family whose value the base gets wrong, or a value of your own: writing a family module, overriding values, finding `.source` operation names, registering from outside the package. |
 
 Its code blocks are executed like the nnsight ones, against `openai-community/gpt2` and
-`HuggingFaceTB/SmolLM2-135M-Instruct`; they skip when `nnter` is not installed.
+`HuggingFaceTB/SmolLM2-135M-Instruct`; they skip when `nnterp` is not installed.
 
 ## NDIF (self-hosting)
 
@@ -167,8 +167,8 @@ Once installed, ask naturally:
 
 ## Development
 
-Every fenced `python` block in every **nnsight** skill is executed by the test
-suite (`tests/docblocks.py` sets `SKILLS_ROOT`). Blocks in one file share a
+Every fenced `python` block in every **nnsight** and **nnterp** skill is executed by
+the test suite (`tests/docblocks.py` lists them in `EXECUTED_PLUGINS`). Blocks in one file share a
 namespace and run in document order; directives control execution:
 
 ```markdown
@@ -235,6 +235,12 @@ skills/
 │   │       │   └── scripts/*.py
 │   │       ├── debugging/
 │   │       └── ...
+│   ├── nnterp/
+│   │   ├── .claude-plugin/plugin.json
+│   │   └── skills/
+│   │       ├── nnterp/
+│   │       ├── patterns/
+│   │       └── extending/
 │   └── ndif/
 │       ├── .claude-plugin/plugin.json
 │       └── skills/

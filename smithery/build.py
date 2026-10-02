@@ -6,7 +6,7 @@
 
 Smithery (smithery.ai) hosts one skill per bundle: a SKILL.md plus optional
 scripts/, references/ and assets/ directories, with no other skill to cross-load.
-The nnsight plugin is 18 skills that lean on each other by name, so this script
+The nnsight plugin is 19 skills that lean on each other by name, so this script
 folds them into one:
 
     plugins/nnsight/skills/nnsight/SKILL.md            -> SKILL.md
@@ -81,7 +81,6 @@ GUIDES: list[tuple[str, str, str]] = [
     ("sae-and-dictionary-learning", "Techniques", "feature-level analysis; attaching, training, and evaluating SAEs"),
     ("model-steering", "Techniques", "steering vectors, function vectors, persistent behavioral edits"),
     ("model-editing-and-lora", "Techniques", "weight edits, ROME-style updates, adapters trained through a frozen model"),
-    ("nnterp", "Runtimes and tooling", "one script that runs unchanged across GPT-2, Llama, Qwen, Gemma"),
     ("vllm", "Runtimes and tooling", "throughput, continuous batching, CUDA-graph taps, `model.edit()` sweeps, nnsight-serve"),
     ("tensor-parallel", "Runtimes and tooling", "a model too big for one GPU, sharded with transformers TP under `torchrun`"),
     ("quantization", "Runtimes and tooling", "a model too big for one GPU, held in 4 or 8 bits (`dtype=\"nf4\"`, `\"int8\"`)"),

@@ -271,9 +271,10 @@ The recipe is the same; the names are not.
 - **Gemma-2's eager attention is not plain softmax attention.** It softcaps the
   attention logits (`attn_logit_softcapping = 50.0`) between the matmul and the
   softmax, visible as `torch_tanh_0` in the implementation's operation list.
-- `nnterp`'s `StandardizedTransformer(..., enable_attention_probs=True)` gives
-  `model.attention_probabilities[i]` with no per-architecture names at all — see
-  the `nnterp` skill.
+- nnterp's `StandardizedTransformer(..., attn_implementation="eager")` gives
+  `model.layers[i].self_attn.attention_probabilities` with no per-architecture
+  names at all, on every family it knows — see the nnterp plugin's
+  `nnterp:nnterp` skill.
 
 ## Cautions
 
