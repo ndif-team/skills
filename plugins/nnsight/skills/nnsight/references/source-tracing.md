@@ -200,6 +200,10 @@ assert per_step == sorted(per_step) and per_step[0] < per_step[-1]   # key lengt
 print(per_step)
 ```
 
+Read ops before the module's own `.output` in the loop body. In the wrong order,
+a module whose `.source` is first touched inside the loop gives the op's *next*
+step rather than an error; see [generation.md](generation.md).
+
 ## Limits
 
 | Limit | What to do |
@@ -211,7 +215,7 @@ print(per_step)
 | The op is an **assignment** | No callee — `.source` on it raises `SourceNotAvailable` |
 | Recursive `.source` outside a trace | Raises; open a trace first |
 | Ops requested out of execution order | `OutOfOrderError`, same as modules |
-| **First** `.source` on a module, after something else in the block was read | `OutOfOrderError`. Instrumenting rewrites the forward, so it must happen before that forward runs — do `_ = module.source` outside the trace, once per module |
+| **First** `.source` on a module, after something else in the block was read | `OutOfOrderError`. Instrumenting rewrites the forward, so it must happen before that forward runs — do `_ = module.source` outside the trace, once per module. Inside a `tracer.iter` loop under `generate` it does **not** raise: the op binds to the next step, and the list comes up one short (see [generation.md](generation.md)) |
 | `op.source` asked for after `op.output` on the same op | `OutOfOrderError` on `...{op}.fn` — the drill is served one step earlier; ask for it first |
 | The op is on a **branch this config never takes** | `OutOfOrderError`, worded as though you were late. See below |
 

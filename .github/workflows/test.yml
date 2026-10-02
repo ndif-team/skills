@@ -46,6 +46,11 @@ jobs:
           # nnsight 0.8's attention_interface_1 label; the PyPI release predates
           # it. Switch to `pip install nnterp` once that ships.
           pip install "nnterp @ git+https://github.com/ndif-team/nnterp@nnsight-0.8"
+          # The nnter plugin's blocks need the nnter package; its repository is
+          # private, so the runner does not install it and those blocks skip
+          # with "needs the nnter package installed". Add
+          #   pip install "nnter @ git+https://github.com/JadenFiotto-Kaufman/nnter"
+          # once the repository is public.
       - name: Report versions
         run: python plugins/nnsight/skills/nnsight/scripts/check_env.py
       # No CUDA and no NDIF deployment on the runner, so `gpu` and `remote`

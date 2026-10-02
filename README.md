@@ -6,8 +6,9 @@ and [NDIF](https://ndif.us/).
 Compatible with both **Claude Code** and **OpenAI Codex** via the
 [Agent Skills Specification](https://agentskills.io/).
 
-Two plugins: **nnsight**, for writing interpretability code, and **ndif**, for
-running your own NDIF server.
+Three plugins: **nnsight**, for writing interpretability code, **nnter**, for writing it
+once against one module vocabulary that runs on every transformer family, and **ndif**,
+for running your own NDIF server.
 
 Every code example in the nnsight skills is executed by the test suite against a
 real model, so what an agent reads is what actually runs.
@@ -26,6 +27,9 @@ claude
 
 # Install the interpretability skills
 /plugin install nnsight@ndif-team
+
+# Install the nnter skills (one vocabulary across transformer families, on nnsight)
+/plugin install nnter@ndif-team
 
 # Install the NDIF self-hosting skills (optional — only if you run your own server)
 /plugin install ndif@ndif-team
@@ -99,6 +103,28 @@ python plugins/nnsight/skills/nnsight/scripts/inspect_model.py meta-llama/Llama-
 # versions, GPUs, NDIF key/host, deployed models, local-vs-NDIF package diff
 python plugins/nnsight/skills/nnsight/scripts/check_env.py --remote
 ```
+
+## nnter (one vocabulary across families)
+
+[nnter](https://github.com/JadenFiotto-Kaufman/nnter) is a layer on nnsight 0.8: a
+`StandardizedTransformer` whose modules answer to Llama's names on every family
+(`model.layers[i].self_attn`, `model.layers[i].mlp`, `model.norm`, `model.lm_head`) and carry
+standard values (`layer_output`, `attention_output`, `mlp_output`, `attention_probabilities`,
+the attention interior, `logits`, the gated-DeltaNet state on hybrids) that mean the same thing
+everywhere, with `model.status()` saying what a checkpoint has before any trace.
+
+```bash
+/plugin install nnter@ndif-team
+```
+
+| Skill | Use when... |
+| --- | --- |
+| `nnter` | Writing code against model internals that must run on more than one architecture, or that wants the residual stream, sublayer contributions, attention pattern or DeltaNet state without per-family module paths and tuple unwrapping. Start here. |
+| `nnter-patterns` | Logit lens, steering, attention patterns, ablation, activation patching, direct logit attribution, probing, cross-family sweeps and DeltaNet state patching, written once against the standard values. |
+| `nnter-extending` | A checkpoint nnter does not know, a family whose value the base gets wrong, or a value of your own: writing a family module, overriding values, finding `.source` operation names, registering from outside the package. |
+
+Its code blocks are executed like the nnsight ones, against `openai-community/gpt2` and
+`HuggingFaceTB/SmolLM2-135M-Instruct`; they skip when `nnter` is not installed.
 
 ## NDIF (self-hosting)
 

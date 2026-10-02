@@ -28,10 +28,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PLUGINS_ROOT = REPO_ROOT / "plugins"
 MARKETPLACE = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 
-# Code-block *execution* is deliberately limited to the nnsight plugin: those
-# examples are checked against real models. The ndif plugin documents a server,
-# so its python blocks are all `test: skip` and only ever syntax-checked.
-SKILLS_ROOT = PLUGINS_ROOT / "nnsight" / "skills"
+# Code-block *execution* is deliberately limited to the client-library plugins:
+# those examples are checked against real models. The ndif plugin documents a
+# server, so its python blocks are all `test: skip` and only ever syntax-checked.
+# Each executed plugin names the package its blocks import; when it is not
+# installed, its blocks skip with that reason instead of failing.
+EXECUTED_PLUGINS = {"nnsight": "nnsight", "nnter": "nnter"}
+EXECUTED_ROOTS = [PLUGINS_ROOT / name / "skills" for name in EXECUTED_PLUGINS]
+SKILLS_ROOT = EXECUTED_ROOTS[0]
 
 DIRECTIVE_RE = re.compile(r"<!--\s*test:\s*(?P<body>.*?)\s*-->")
 FENCE_RE = re.compile(r"^(?P<indent>\s*)```(?P<lang>[\w+-]*)\s*$")
@@ -130,7 +134,15 @@ def extract_blocks(path: Path) -> list[Block]:
 
 def skill_dirs() -> list[Path]:
     """Every skill directory whose blocks are executed (one SKILL.md each)."""
-    return sorted(p.parent for p in SKILLS_ROOT.glob("*/SKILL.md"))
+    return sorted(p.parent for root in EXECUTED_ROOTS for p in root.glob("*/SKILL.md"))
+
+
+def required_package(path: Path) -> str | None:
+    """The package a skill file's blocks import, from the plugin it lives in."""
+    for name, package in EXECUTED_PLUGINS.items():
+        if (PLUGINS_ROOT / name) in path.parents:
+            return package
+    return None
 
 
 def markdown_files() -> list[Path]:

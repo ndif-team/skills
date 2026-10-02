@@ -6,11 +6,12 @@ Guidance for Claude Code when working in this repository.
 
 Agent skills for the NDIF ecosystem, packaged for Claude Code
 (`.claude-plugin/`) and OpenAI Codex (`.codex/skills/` and `.agents/skills/`
-symlinks). **Two plugins**, with different audiences and different rules:
+symlinks). **Three plugins**, with different audiences and different rules:
 
 | Plugin | For | Skills | Code blocks |
 |---|---|---|---|
 | `nnsight` | writing interpretability code against model internals | 18 | **executed** against real models |
+| `nnter` | the same, once, against one module vocabulary that runs on every transformer family | 3 | **executed** against real models; skipped when `nnter` is not installed |
 | `ndif` | running your *own* NDIF server (the backend behind `remote=True`) | 4 | docs only — every block is `<!-- test: skip -->` |
 
 The split matters when you edit: a claim in an nnsight skill is proved by the
@@ -48,10 +49,11 @@ each skill directory — **both** trees, for every skill in every plugin.
 ## The rule that matters: everything in `plugins/nnsight` is executed
 
 Every fenced ```python block in every `SKILL.md` and `references/*.md` **under
-`plugins/nnsight`** is run by `tests/test_skills.py` against real models. Blocks
-in one file share a namespace and run in document order, so later blocks can
-build on earlier ones. `tests/docblocks.py` scopes this with `SKILLS_ROOT`; keep
-it that way.
+`plugins/nnsight` and `plugins/nnter`** is run by `tests/test_skills.py` against real
+models. Blocks in one file share a namespace and run in document order, so later
+blocks can build on earlier ones. `tests/docblocks.py` scopes this with
+`EXECUTED_PLUGINS`, which also names the package each plugin's blocks import; a
+plugin whose package is not installed skips with that reason. Keep it that way.
 
 `plugins/ndif` is outside that scope. Its python blocks carry
 `<!-- test: skip -->` anyway, so nothing would run if the harness were ever
@@ -144,5 +146,7 @@ Same rules, plus two of its own:
   router into `docs/`; `docs/concepts/request-lifecycle.md` is the keystone)
 - nnsight source and docs: `/home/localjadenfk/wd/nnsight` (branch `0.8`,
   `CLAUDE.md` routes to `docs/`)
+- nnter: `/home/localjadenfk/wd/nnter` (`CLAUDE.md` routes to `docs/`; every docs snippet ran
+  against the tiny checkpoints in its `tests/families/`)
 - nnterp (0.8 branch): `/home/localjadenfk/wd/nnterp`
 - Tutorials and paper implementations: `/home/localjadenfk/wd/nnsight-website/docs`

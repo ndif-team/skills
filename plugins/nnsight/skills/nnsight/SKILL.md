@@ -38,6 +38,12 @@ assert model.tokenizer.decode(edited[0, -1].argmax()) == " London"
 
 Install: `pip install nnsight` (needs `torch` and `transformers`).
 
+To choose one device pass `device=` (`device="cpu"`, `device="cuda:1"`). With no
+device the model lands on the first GPU, and so does `device_map="cpu"`: nnsight
+loads through `transformers.pipeline(...)`, which moves a single-device model to
+its own `device`. `device_map=` is for spreading a model across devices (`"auto"`,
+a dict). Check with `next(model.parameters()).device`.
+
 ## The five things that break agent-written nnsight code
 
 **1. `.save()` or it never existed.** Assignments inside a trace body do not escape
@@ -60,7 +66,11 @@ There is no `.value` in 0.8 — the saved variable *is* the tensor.
 `OutOfOrderError`: your code is a worker that parks until the model produces each
 value, and the model has already gone past. Within a block, the submodules
 (`ln_1`, `attn`, `mlp`) come before the block's own `.output`. This binds writes
-too — an edit at layer 0 goes above a read at layer 11, not below it.
+too — an edit at layer 0 goes above a read at layer 11, not below it. Inside a
+`tracer.iter` loop a wrong-order read can bind to the *next* step instead of
+raising (past step 0 for any location; at step 0 too for a `.source` op first
+touched in the loop), so per-step lists come back shifted and one short — see
+[references/generation.md](references/generation.md).
 
 **3. Don't guess module paths or output types.** `model.transformer.h[i]` is GPT-2;
 Llama is `model.model.layers[i]`; Gemma-3 is `model.model.language_model.layers[i]`.

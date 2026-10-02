@@ -7,13 +7,14 @@ directive syntax that controls skipping.
 
 from __future__ import annotations
 
+import importlib.util
 import runpy
 from pathlib import Path
 
 import pytest
 
 import conftest
-from docblocks import REPO_ROOT, Block, extract_blocks, markdown_files
+from docblocks import REPO_ROOT, Block, extract_blocks, markdown_files, required_package
 
 
 def _files_with_code() -> list[Path]:
@@ -21,6 +22,9 @@ def _files_with_code() -> list[Path]:
 
 
 def _skip_reason(block: Block, run_slow: bool) -> str | None:
+    package = required_package(block.path)
+    if package is not None and importlib.util.find_spec(package) is None:
+        return f"needs the {package} package installed"
     if "remote" in block.flags and not conftest.ndif_host():
         return "needs a reachable NDIF_HOST (e.g. NDIF_HOST=http://localhost:8001)"
     if "gpu" in block.flags and not conftest.cuda_available():

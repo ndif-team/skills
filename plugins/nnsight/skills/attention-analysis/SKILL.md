@@ -240,6 +240,12 @@ with model.generate(prompt, max_new_tokens=3) as tracer:
 print("key length per step:", per_step)
 ```
 
+Inside a generation loop, read a `.source` pattern before its module's `.output`.
+In the wrong order a `.source` op first touched in the loop does not raise: it
+binds to the next step, so the list starts at step 1 and comes up one short (see
+the `nnsight` skill's [generation.md](../nnsight/references/generation.md)). The key length is the check:
+step `k` has `prompt_len + k` keys.
+
 ## Other architectures
 
 The recipe is the same; the names are not.

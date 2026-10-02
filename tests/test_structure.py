@@ -9,9 +9,10 @@ from pathlib import Path
 import pytest
 
 from docblocks import (
+    EXECUTED_ROOTS,
     MARKETPLACE,
+    PLUGINS_ROOT,
     REPO_ROOT,
-    SKILLS_ROOT,
     all_markdown_files,
     all_skill_dirs,
     extract_blocks,
@@ -122,8 +123,8 @@ def test_relative_links_resolve(path: Path):
 
 @pytest.mark.parametrize(
     "script",
-    sorted(SKILLS_ROOT.glob("*/scripts/*.py")),
-    ids=lambda p: str(p.relative_to(SKILLS_ROOT)),
+    sorted(script for root in EXECUTED_ROOTS for script in root.glob("*/scripts/*.py")),
+    ids=lambda p: str(p.relative_to(PLUGINS_ROOT)),
 )
 def test_scripts_compile(script: Path):
     compile(script.read_text(), str(script), "exec")
