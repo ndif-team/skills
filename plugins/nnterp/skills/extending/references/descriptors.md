@@ -67,6 +67,11 @@ Dotted segments ending in `output`, `input` or `inputs`:
   attention). An alias there (`"../post_attention_layernorm.output"`) builds a location
   the model never serves, and the read fails as `OutOfOrderError` (below). Gemma-2's
   override works because its native name is the standard one.
+- **A leading `/`**: the model's root. The rest is walked down from `envoy.root` like a
+  path below the host, aliases and `source` included, for a value that lives far from its
+  host: `Vision.image_token_mask` is keyed `"/inputs"` (the model's inputs, read from the
+  tower), `"/norm.output"` on a GPT-2 block is the final norm's output, and
+  `"/projector.output"` from a tower is the projector's. A `../` right after it is refused.
 - **`"source.<op>.output"`**: an operation inside the current module's forward,
   instrumenting it for this run. A `source` after an operation drills into that call's
   callee: `"source.attention_interface_1.source.nn_functional_softmax_0.output"`. After
@@ -75,6 +80,12 @@ Dotted segments ending in `output`, `input` or `inputs`:
 - **A function of the host** returning such a path, run once per access inside the
   trace, for a forward that branches (Falcon's `by_alibi`, a `RecurrentMixer`'s
   `kernel("inputs")`; below).
+
+A value's code reaches beyond its host through nnsight's `Envoy.parent` and `Envoy.root`:
+`parent` is the envoy of the native parent module (`model.layers[3].parent` is
+`model.transformer.h` on GPT-2, `model.vision.parent` is the wrapper's inner `model` on
+Llava), and `root` is the top of the parent links, the `StandardizedTransformer`. The
+vision values read the wrapper's config, processor and `projector` through `self.root`.
 
 `select` applies to the last segment: with `inputs` an int is a positional argument and a
 str a keyword; with `output` an int indexes the returned tuple; `input` needs none. A

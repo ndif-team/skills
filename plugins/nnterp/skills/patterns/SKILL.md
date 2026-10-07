@@ -12,9 +12,9 @@ reason: the standard values do the normalization. A block's residual stream is
 layer_output`), the pattern is `attention_probabilities`, the per-head view is
 `attention_head_outputs`, and `project_on_vocab` is the model's own head. Nothing
 here indexes `.output[0]` or names `ln_f` versus `norm`. Verified on nnterp
-`5aba2f4` (branch `0.8-refactor`), nnsight 0.8 dev, transformers 5.17.0; the executed blocks run on
-`openai-community/gpt2` and `HuggingFaceTB/SmolLM2-135M-Instruct` (30 layers, 576
-hidden, 9 heads, 3 kv heads, bf16).
+`103f697` (branch `encyclopedia`), nnsight 0.8 dev `3553b930`, transformers 5.17.0; the executed blocks run on
+`openai-community/gpt2`, `HuggingFaceTB/SmolLM2-135M-Instruct` (30 layers, 576
+hidden, 9 heads, 3 kv heads, bf16) and `trl-internal-testing/tiny-LlavaForConditionalGeneration`.
 
 <!-- test: setup -->
 ```python
@@ -300,6 +300,83 @@ last few tokens). On Mamba decode steps read `state_output` before
 `references/sweeps-and-probing.md` and the `nnterp` skill's
 `references/recurrent-mixers.md`.
 
+## The image pathway
+
+On a vision-language model the image enters the text model once, at the image tokens:
+`vision.image_features` (`[image_tokens, hidden]`) is what the wrapper scatters there, so
+`layers[0].input[mask] == image_features` exactly, and `vision.image_token_mask`
+(`[batch, seq]`) says which positions are the image. Ablate or patch the features to
+change the image as the text model sees it (ran on the tiny Llava checkpoint, random
+weights, so shapes and identities only):
+
+```python
+from PIL import Image
+
+vlm = StandardizedTransformer("trl-internal-testing/tiny-LlavaForConditionalGeneration", task="image-text-to-text",
+                              device="cpu", dispatch=True, attn_implementation="eager")
+red, blue = Image.new("RGB", (64, 64), "red"), Image.new("RGB", (64, 64), "blue")
+messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What color is the square? Answer with one word."}]}]
+vprompt = vlm.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)   # places the image token
+
+with vlm.trace(vprompt, images=[red]):
+    mask = vlm.vision.image_token_mask.save()          # first: it comes off the inputs
+    red_features = vlm.vision.image_features.save()    # [576, hidden]
+    first = vlm.layers[0].input.save()
+    red_logits = vlm.logits.save()
+
+with vlm.trace(vprompt, images=[red]):
+    vlm.vision.image_features[:] = 0                   # the text model receives zeros at the image tokens
+    zeroed = vlm.logits.save()
+
+with vlm.trace(vprompt, images=[blue]):
+    vlm.vision.image_features[:] = red_features        # a saved tensor: the blue run sees the red image
+    patched = vlm.logits.save()
+
+assert mask.shape[0] == 1 and int(mask.sum()) == 576 and red_features.shape == (576, vlm.hidden_size)
+assert torch.equal(first[mask], red_features)          # the features are what enters the text model
+assert not torch.equal(zeroed, red_logits)
+assert torch.equal(patched, red_logits)                # same prompt, same features: the red run, bit for bit
+```
+
+Each text block's pattern has the image tokens as ordinary keys, so a head's mass on the
+image is the pattern summed over the mask's columns:
+
+```python
+masses = []                                            # made outside the block: a name bound inside does not survive it
+with vlm.trace(vprompt, images=[red]):
+    image = vlm.vision.image_token_mask                # read first, before any text-block value
+    for layer in vlm.layers:
+        masses.append(layer.self_attn.attention_probabilities[0, :, -1, image[0]].sum(-1).save())   # [heads]
+
+to_image = torch.stack(masses)                         # [layers, heads]: the last token's mass on the image
+assert to_image.shape == (vlm.num_layers, vlm.layers[0].self_attn.num_heads)
+```
+
+On `llava-hf/llava-1.5-7b-hf`, asked the color of a red square on white (clean: `Red` at
+0.990), zeroing `image_features` leaves `Red` at 0.010 with `''` on top, and the blue
+image's run with the red features assigned answers `Red` at 0.990. Zeroing the image rows
+of `layer_output` after block 4, 8, 16 and 24 leaves `Red` at 0.012, 0.114, 0.384 and
+0.994: the text positions have read the image out by the middle of the stack. The last
+token's mean mass on the image is 0.73 at block 0, under 0.1 from block 3, and 0.1 to 0.26
+across blocks 10 to 24, where single heads put up to 0.95 on it. It peaked at 14.6 GB in
+float16 under eager with `torch.no_grad()`.
+
+1. **Read the mask first, `image_features` after the tower's values and before the text
+   model's**; out of order raises `OutOfOrderError`. **One image-carrying invoke per
+   trace**: clean and ablated runs are two traces. Several images go in one invoke as a
+   list. `model.trace(prompt, images=[...])` refuses to batch two image-carrying invokes;
+   chat-message inputs that embed the image do run as one batch, but there
+   `image_features` is flat over the whole batch's image tokens in every invoke, and a
+   write in one invoke reaches every row.
+2. **A tower edit that changes nothing is at a block the wrapper does not read.** Llava's
+   projector reads `vision.layers[-2].layer_output`, so zeroing `tower_output` leaves the
+   logits unchanged; `model.projector.input` is what the projector receives.
+3. **On Qwen3-VL `image_features` is not the only way in**: the text model re-adds the image
+   after blocks 0 to 2 (`layers[k].deepstack_output`); zero those too.
+
+Inside the tower, patching part of an image, and editing the image positions of a text
+block: `references/image-pathway.md`.
+
 ## The same recipes on SmolLM2
 
 Nothing in the trace bodies changes; only the numbers do:
@@ -363,6 +440,8 @@ exact checks.
   `len(tokenizer(clean).input_ids) == len(tokenizer(corrupt).input_ids)`.
 - **Pick layers as depths** (`model.num_layers // 2`), never as constants, and
   attention layers from `attn_blocks`.
+- **On a vision-language model, read `vision.image_token_mask` first** and keep one
+  image-carrying invoke per trace; clean and ablated runs are two traces.
 - **Compare against a baseline in the same trace**: the clean row of a batched trace
   is not bit-equal to the prompt run alone (5e-7 apart on GPT-2), and in bf16 an
   edit in one invoke can move another invoke's logits by more than a small effect.
@@ -378,6 +457,9 @@ exact checks.
   sweeps, the layer×position map; pattern metrics and edits.
 - `references/sweeps-and-probing.md`: the cross-family loop, ridge probing with
   controls, recurrent state patching.
+- `references/image-pathway.md`: on a vision-language model, ablating the image at
+  `image_features` and inside the tower, patching one image into another's run, attention
+  onto the image, editing the image positions of a text block.
 - nnterp docs: `docs/patterns/index.md` and one page per technique under
   `docs/patterns/`.
 

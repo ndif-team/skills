@@ -152,6 +152,14 @@ assert eager.support(layer=0)["self_attn.attention_probabilities"] is None      
 | `read inside transformers' grouped_mm / batched_mm experts forward, but this model runs 'eager'; load with experts_implementation='grouped_mm' (the default) or 'batched_mm'` | `mlp.expert_outputs` | `experts_implementation="eager"` |
 | `this mixture has no shared expert` | `mlp.shared_expert_output` | a mixture without one |
 | `this checkpoint has no per-layer embeddings ...` | Gemma-4's `per_layer_output` | 26B-A4B, 31B |
+| `a text-only load: no processor, so no image reaches the model; load with task='image-text-to-text'` | every value of `model.vision` and its blocks | a vision-language wrapper loaded under the default `task="text-generation"` |
+| `a text-only load: no tower, so no deepstack feature reaches the text model; load with task='image-text-to-text'` | `layers[k].deepstack_output` (Qwen3-VL, Qwen3-VL-MoE) | the same load |
+| `the <family> family names no projector on this wrapper` | every tower value | the family does not name where the image enters the text model |
+| `the <family> family keys no ImageScatter on the '<model_type>' wrapper, so where its image features enter the text stream is unknown` | `vision.image_features` | the tower's names bind but the family does not say where the wrapper writes the features in |
+| `the config names no image_token_id` | `vision.image_token_mask`, `vision.image_features` | the wrapper's config has no image token id |
+| `<tower>.image_size is not available: the tower takes images of any resolution, each cut into its own patch grid by the processor; read the grid off the processor's output (image_grid_thw, image_sizes, image_position_ids)` | `vision.image_size` (a size: raised at the read, not a `support()` row) | the Qwen ViT, Pixtral, Gemma 4, Gemma 4 unified |
+| `the Qwen ViT's attention makes one interface call per image (attention_interface_2; ...` | the Qwen ViT's `attention_scores`, `attention_probabilities` | under every `attn_implementation` |
+| `flash attention runs every image in one call over cu_seqlens, with no concatenation to read; load with attn_implementation='eager' or 'sdpa'` | the Qwen ViT's `attention_head_outputs` | a flash load |
 
 BLOOM and MPT do their attention arithmetic themselves, so their pattern and
 interior need no eager load and are `None` under any implementation.
@@ -161,6 +169,40 @@ answer: `route_kernels(model.family, "torch")` turns a DeltaNet's `state` and
 `states` entries to `None` on the linear blocks. Reading a mixture's
 `num_experts`, `top_k` or `SCORING` on a dense block raises a bare
 `AttributeError`, not `Unavailable`; pick the blocks with `support()` first.
+
+## The `vision.` rows
+
+A vision-language wrapper loaded with `task="image-text-to-text"` adds its tower's rows
+to `model.support()` under `vision.` (`"vision.image_features"`,
+`"vision.self_attn.attention_probabilities"`), and `model.vision.support()` lists the same
+rows without the prefix, with `support(layer=i)` for one tower block. Like the text rows,
+they come from the config, so a meta build answers:
+
+```python
+TEXT_ONLY = "a text-only load: no processor, so no image reaches the model; load with task='image-text-to-text'"
+LLAVA = "trl-internal-testing/tiny-LlavaForConditionalGeneration"
+
+vlm = StandardizedTransformer(LLAVA, task="image-text-to-text")              # meta; the processor comes with the task
+rows = {key for key in vlm.support() if key.startswith("vision.")}
+assert {"vision.image_token_mask", "vision.patch_embeddings", "vision.tower_output", "vision.image_features",
+        "vision.layer_output", "vision.self_attn.attention_output", "vision.mlp.mlp_output"} <= rows
+assert vlm.vision.support()["image_features"] is None
+assert vlm.vision.support(layer=0)["self_attn.attention_probabilities"] == EAGER    # the tower's interior needs eager too
+
+wrapper = StandardizedTransformer(LLAVA, device="cpu", dispatch=True)            # the default task: no processor
+assert wrapper.processor is None and wrapper.vision.support() == {}
+assert not any(key.startswith("vision.") for key in wrapper.support())
+raised = None
+try:
+    wrapper.vision.image_features
+except Unavailable as error:
+    raised = str(error)
+assert raised.endswith(TEXT_ONLY)                                                  # every tower value, inside a trace too
+```
+
+A text-only checkpoint has no `model.vision` attribute at all: guard on
+`getattr(model, "vision", None)` first and on `support()` second. The full vision
+contract is [vision.md](vision.md).
 
 ## `SourceNotAvailable`: the forward took another path
 

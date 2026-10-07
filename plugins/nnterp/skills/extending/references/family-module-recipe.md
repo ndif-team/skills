@@ -3,8 +3,8 @@
 A family is one module under `nnterp/families/` named after `config.model_type`, plus
 one test file under `tests/families/`. This file quotes five complete modules as they
 ship (the two plain ones and the three classic kinds of override), excerpts for a
-mixture of experts, a recurrent mixer, class-keyed names and a family logit step, and
-the test file with every `FamilySuite` attribute. Quoted family code carries relative imports
+mixture of experts, a recurrent mixer, class-keyed names, a family logit step and a
+vision tower, and the test file with every `FamilySuite` attribute. Quoted family code carries relative imports
 (`from ..components import ...`) and is not executed here; the nnterp repo's
 `docs/extending/adding-a-family.md` and `docs/developing/testing.md` are the pages it
 mirrors.
@@ -24,7 +24,7 @@ print(len(families.known()), families.known()[:4])
 ```
 gpt2
 llama
-92 ['afmoe', 'apertus', 'arcee', 'bamba']
+98 ['afmoe', 'apertus', 'arcee', 'bamba']
 ```
 
 `families.known()` is the sorted list of shipped modules, read off the package directory
@@ -39,33 +39,37 @@ residual stream, so the standard contributions mean nothing there):
 ```python
 families.lookup("zamba2")
 # UnsupportedFamily: no standardization for model_type 'zamba2'; known: ['afmoe', 'apertus', ...].
-# Add nnterp/families/zamba2.py with MODEL_TYPES, RENAME and ENVOYS, or pass a module to nnterp.families.register().
+# Add nnterp/families/zamba2.py with RENAME and ENVOYS, or pass a family to nnterp.families.register(family, 'zamba2').
 ```
 
 ## The recipe
 
 1. `AutoConfig.from_pretrained(repo).model_type`; create `nnterp/families/<model_type>.py`.
    The file name is what `lookup` imports, so `gemma3_text.py` covers `gemma3_text` and
-   nothing else.
-2. `MODEL_TYPES = ("<model_type>",)`. The registry test asserts every shipped module
-   covers exactly the type it is named after.
-3. Write `RENAME`. Print the raw model (`TransformersModel(repo)`) or its
+   nothing else; the module declares no list of types. The registry test asserts every
+   shipped module is named after its type and is what `lookup` returns for it.
+2. Write `RENAME`. Print the raw model (`TransformersModel(repo)`) or its
    `named_modules()` for the native tree; map the containers and any block names that
    differ from Llama's.
-4. Subclass `Layer`, `Attention`, `Mlp` (and `Moe` for a mixture, a `RecurrentMixer`
+3. Subclass `Layer`, `Attention`, `Mlp` (and `Moe` for a mixture, a `RecurrentMixer`
    subclass for a hybrid), overriding only what the forward spells differently.
-5. Key them in `ENVOYS` on the transformers module classes.
-6. When the config spells a root size its own way (`n_inner`, `ffn_dim`, `v_head_dim`),
+4. Key them in `ENVOYS` on the transformers module classes.
+5. When the config spells a root size its own way (`n_inner`, `ffn_dim`, `v_head_dim`),
    define `def <size>(model)` at module level; when the model does something to the
    head's output (a scale, a cast), define `def project_on_vocab(model, hidden)`. The
    suite's `test_sizes_match_the_model` and `test_project_on_vocab_is_the_logit_lens`
    check them.
+6. A family whose checkpoints also load as an image-text-to-text wrapper adds the
+   wrapper's spellings and its tower ([A vision tower in a family](#a-vision-tower-in-a-family)).
 7. Add `tests/families/test_<model_type>.py` and run it.
 
 ## Two complete modules as they ship
 
-`llama.py`, the family the vocabulary is taken from. Mistral, Qwen2/3, Gemma 1, OLMo 1,
-Phi-3, SmolLM3 and StableLM are this file with the class names swapped:
+`llama.py`, the family the vocabulary is taken from, its text side. Mistral, Qwen2/3,
+Gemma 1, OLMo 1, Phi-3, SmolLM3 and StableLM are this file with the class names swapped.
+The shipped file also names the vision towers of the Llama-based wrappers; those lines
+are quoted in [A vision tower in a family](#a-vision-tower-in-a-family) and elided
+(`...`) here:
 
 <!-- test: skip -->
 ```python
@@ -74,19 +78,31 @@ Phi-3, SmolLM3 and StableLM are this file with the class names swapped:
 Block names (``input_layernorm``, ``self_attn``, ``post_attention_layernorm``,
 ``mlp``) and ``lm_head`` are already the standard ones. The only change is
 lifting the containers out of ``model.model``: ``model.layers`` instead of
-``model.model.layers``.
+``model.model.layers``. Multimodal wrappers around a Llama text model keep it at
+``model.language_model`` (Llava, DeepSeek-VL, Janus) or ``model.text_model``
+(Idefics 3, SmolVLM); ``RENAME`` carries those spellings too.
+...
 """
 
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaDecoderLayer, LlamaMLP
+# ... the towers' and wrappers' modeling imports
 
-from ..components import Attention, Layer, Mlp
-
-MODEL_TYPES = ("llama",)
+from ..components import Attention, ImageScatter, Layer, Mlp, Vision, VisionAttention, VisionLayer, VisionMlp
 
 RENAME = {
     "model.embed_tokens": "embed_tokens",
     "model.layers": "layers",
     "model.norm": "norm",
+    # The same text model inside a multimodal wrapper, loaded with task="image-text-to-text":
+    # Llava 1.5, VipLlava, LLaVA-NeXT, DeepSeek-VL, Janus ...
+    "model.language_model.embed_tokens": "embed_tokens",
+    "model.language_model.layers": "layers",
+    "model.language_model.norm": "norm",
+    # ... and Idefics 3 / SmolVLM.
+    "model.text_model.embed_tokens": "embed_tokens",
+    "model.text_model.layers": "layers",
+    "model.text_model.norm": "norm",
+    # ... the towers' and projectors' keys
 }
 
 
@@ -103,7 +119,10 @@ class Mlp(Mlp):
 
 
 #: Module type -> Envoy subclass, for nnsight's ``envoys=``.
-ENVOYS = {LlamaDecoderLayer: Layer, LlamaAttention: Attention, LlamaMLP: Mlp}
+ENVOYS = {
+    LlamaDecoderLayer: Layer, LlamaAttention: Attention, LlamaMLP: Mlp,
+    # ... the towers' module types and the wrappers' models
+}
 ```
 
 `gpt2.py` shows the rest of the template in use: block-level single-component aliases,
@@ -133,8 +152,6 @@ from ..components import Attention, Layer, Mlp
 
 if TYPE_CHECKING:
     from ..standardized import StandardizedTransformer
-
-MODEL_TYPES = ("gpt2",)
 
 RENAME = {
     "transformer.wte": "embed_tokens",
@@ -272,7 +289,7 @@ The root's sizes (`num_layers`, `hidden_size`, `vocab_size`, `num_heads`, `num_k
 module. So a family states its own spelling as a module-level `def <size>(model)` and
 nothing else: no registration, no subclass, and the function may read the other sizes
 off the model (`4 * model.hidden_size`). Falcon's two are quoted below; a family whose
-config uses the plain keys defines none (`llama.py`). Which of the 92 define which size
+config uses the plain keys defines none (`llama.py`). Which of the 98 define which size
 is in the nnterp repo's `docs/reference/families.md`, "Logits, scales and sizes"
 (DeepSeek-V2/V3/V3.2, GLM-MoE-DSA, GLM4-MoE-Lite, Youtu, MiMo-V2-Flash, GPT-BigCode,
 GPT-2, GPT-J, GPT-Neo, CodeGen, OPT, XGLM, GPT-NeoX-Japanese, MPT, BLOOM, Mamba-2,
@@ -322,8 +339,6 @@ point at the sibling norms. ``final_logit_softcapping`` applies to the logits af
 from transformers.models.gemma2.modeling_gemma2 import Gemma2Attention, Gemma2DecoderLayer, Gemma2MLP
 
 from ..components import Attention, EProperty, Layer, Mlp, Residual
-
-MODEL_TYPES = ("gemma2",)
 
 RENAME = {
     "model.embed_tokens": "embed_tokens",
@@ -402,8 +417,6 @@ from ..components import Attention, EProperty, HeadOutputs, Keys, Layer, Mlp, Pa
 
 if TYPE_CHECKING:
     from ..standardized import StandardizedTransformer
-
-MODEL_TYPES = ("bloom",)
 
 RENAME = {
     "transformer.word_embeddings": "embed_tokens",
@@ -541,8 +554,6 @@ from ..components import (
 
 if TYPE_CHECKING:
     from ..standardized import StandardizedTransformer
-
-MODEL_TYPES = ("falcon",)
 
 RENAME = {
     "transformer.word_embeddings": "embed_tokens",
@@ -807,6 +818,324 @@ The GraniteMoE families call `hand_residual_multiplier(self)` there, setting the
 block's `residual_multiplier` on its `Mlp` and `RecurrentMixer` children, whose modules
 keep no config. A family never looks its parent up through the interleaver's envoys.
 
+## A vision tower in a family
+
+An image-text-to-text checkpoint is a text model plus a vision tower, a projector, and a
+step that writes the projected features into the text stream. The family is chosen from
+`text_config.model_type`, so one family covers the text checkpoint and its wrappers. The
+root stays the text model's: `model.num_layers`, `model.hidden_size` and `model.layers`
+are the language model's, and the tower's sizes and the image values are on
+`model.vision`. The nnterp repo's `docs/developing/vision-design.md` is the page this
+condenses; `docs/usage/vision.md` is the user side and its wrappers table is the list of
+what is bound.
+
+### How the tower keys bind
+
+nnsight binds an alias on the envoy its key resolves from, so:
+
+- **The tower root and the projector are keyed from the model root**
+  (`"model.vision_tower": "vision"`, `"model.multi_modal_projector": "projector"`).
+  `projector` names the last module before the scatter; a pooling or merging step between
+  the tower and the projector keeps its native name (Llama 4's pixel shuffle is
+  `vision.vision_adapter`).
+- **The tower's inner names are keyed relative to the tower**: multi-component keys no text
+  model has (`"encoder.layers": "layers"`, `"embeddings.patch_embedding": "patch_embed"`) and
+  single names no text block has (`"post_layernorm": "norm"`,
+  `"layer_norm1": "input_layernorm"`). A bare name a text block also has is never a tower
+  key. On a text-only checkpoint none of them resolve, and a key that resolves nowhere is
+  skipped.
+- **Two paths for one tower** are two root keys, as the text spellings are (`llama`:
+  `model.vision_tower` and `model.vision_model`). Two towers with different inner names in
+  one family are both keyed; each binds only on its own tower (`mistral`: CLIP and Pixtral).
+- **A name a rename key cannot disambiguate** goes on a subclass. CLIP's `post_layernorm`
+  norms the pooled CLS token, SigLIP's norms the patches; `llama` keys `post_layernorm` on
+  neither and its `SiglipVision` serves `vision.norm` as a property.
+
+What `gemma3_text.py` carries for SigLIP:
+
+<!-- test: skip -->
+```python
+from transformers.models.gemma3.modeling_gemma3 import Gemma3Attention, Gemma3DecoderLayer, Gemma3ForCausalLM, Gemma3MLP, Gemma3Model
+from transformers.models.siglip.modeling_siglip import SiglipAttention, SiglipEncoderLayer, SiglipMLP, SiglipVisionModel
+
+from ..components import Attention, EProperty, ImageScatter, Layer, Mlp, Residual, Vision, VisionAttention, VisionLayer, VisionMlp
+
+RENAME = {
+    "model.embed_tokens": "embed_tokens",
+    "model.layers": "layers",
+    "model.norm": "norm",
+    # A Gemma3ForConditionalGeneration: the same text model under ``model.language_model``.
+    "model.language_model.embed_tokens": "embed_tokens",
+    "model.language_model.layers": "layers",
+    "model.language_model.norm": "norm",
+    # The wrapper's SigLIP tower and projector. The tower's inner keys are relative to the
+    # tower (multi-component, or names no text block has), so they bind on it alone.
+    "model.vision_tower": "vision",
+    "model.multi_modal_projector": "projector",
+    "embeddings.patch_embedding": "patch_embed",
+    "encoder.layers": "layers",
+    "post_layernorm": "norm",
+    "layer_norm1": "input_layernorm",
+    "layer_norm2": "post_attention_layernorm",
+}
+
+#: Module type -> Envoy subclass, for nnsight's ``envoys=``.
+ENVOYS = {
+    Gemma3DecoderLayer: Layer, Gemma3Attention: Attention, Gemma3MLP: Mlp,
+    # SigLIP's pre-norm blocks on the shared attention interface: the vision components hold as they are.
+    SiglipVisionModel: Vision, SiglipEncoderLayer: VisionLayer, SiglipAttention: VisionAttention, SiglipMLP: VisionMlp,
+    Gemma3Model: ImageScatter,  # the wrapper's forward scatters the image features: vision.image_features
+}
+```
+
+What `llama.py` carries for its towers (CLIP for Llava 1.5, VipLlava and LLaVA-NeXT; SigLIP
+for DeepSeek-VL; Idefics 3's and SmolVLM's ViT), text keys elided:
+
+<!-- test: skip -->
+```python
+RENAME = {
+    # ... the text stack, three spellings
+    # Llava's CLIP tower and projector; DeepSeek-VL's SigLIP and Idefics 3's ViT at model.vision_model.
+    # The tower's inner keys are relative to the tower (multi-component, or names no text block has),
+    # so they bind on it alone.
+    "model.vision_tower": "vision",
+    "model.vision_model": "vision",
+    "model.multi_modal_projector": "projector",
+    "model.aligner": "projector",
+    "model.connector": "projector",
+    "embeddings.patch_embedding": "patch_embed",
+    "encoder.layers": "layers",
+    "layer_norm1": "input_layernorm",
+    "layer_norm2": "post_attention_layernorm",
+}
+
+
+class SiglipVision(Vision):
+    """SigLIP's tower (DeepSeek-VL) and Idefics 3's and SmolVLM's: ``post_layernorm`` norms the patches, so it is ``norm``."""
+
+    @property
+    def norm(self):
+        """The final norm over the patches, ``post_layernorm``: a property, since in this family CLIP's is not one."""
+        return self.post_layernorm
+
+
+class InputsMerger(ImageScatter):
+    """Idefics 3's and SmolVLM's model: the features go in through ``inputs_merger(..., image_hidden_states=...)``."""
+
+    scatter = "self_inputs_merger_0"
+    scatter_argument = "image_hidden_states"
+
+
+#: Module type -> Envoy subclass, for nnsight's ``envoys=``.
+ENVOYS = {
+    LlamaDecoderLayer: Layer, LlamaAttention: Attention, LlamaMLP: Mlp,
+    # CLIP's pre-norm blocks on the shared attention interface: the vision components hold as they are.
+    CLIPVisionModel: Vision, CLIPEncoderLayer: VisionLayer, CLIPAttention: VisionAttention, CLIPMLP: VisionMlp,
+    SiglipVisionModel: SiglipVision, SiglipEncoderLayer: VisionLayer, SiglipAttention: VisionAttention, SiglipMLP: VisionMlp,
+    Idefics3VisionTransformer: SiglipVision, Idefics3EncoderLayer: VisionLayer, Idefics3VisionAttention: VisionAttention,
+    Idefics3VisionMLP: VisionMlp,
+    SmolVLMVisionTransformer: SiglipVision, SmolVLMEncoderLayer: VisionLayer, SmolVLMVisionAttention: VisionAttention,
+    SmolVLMVisionMLP: VisionMlp,
+    # The wrappers' models, whose forward writes the image features in: vision.image_features.
+    LlavaModel: ImageScatter, VipLlavaModel: ImageScatter, LlavaNextModel: ImageScatter, DeepseekVLModel: ImageScatter,
+    Idefics3Model: InputsMerger, SmolVLMModel: InputsMerger,
+}
+```
+
+A tower whose blocks are plain pre-norm attention + MLP on the shared attention interface
+(SigLIP, CLIP, Llama 4's ViT) needs no class of its own. One that differs (a sandwich block,
+a scaled residual) gets a subclass in the family file named as the base
+(`class VisionAttention(VisionAttention)`), keyed in place of it; Gemma 4's points its
+contributions at the post-norms. A subclass several families need (`QwenVision`,
+`QwenVisionAttention`, `PixtralVision`) lives in `nnterp/components/vision.py`.
+
+### The values
+
+The tower's values are `patch_embeddings` and `tower_output` on `vision`, and the text
+block values on `vision.layers[i]` re-annotated with the `Patches` layout
+(`[images, patches, vision_hidden]`). `tower_output` has one definition: the last block's
+stream after the final norm where there is one, before any pooling, CLS dropping or adapter.
+It is the tower's `last_hidden_state` unless a tower returns something after those; then
+the family's `Vision` subclass reads it elsewhere (Llama 4 at `layernorm_post`, Gemma 4 at
+the encoder's output). The tower's sizes are read off its own config on `model.vision`; a
+tower with no fixed resolution sets `image_size = property(variable_resolution)`.
+
+Every tower value is gated on `no_tower_run`, which asks `Vision.no_images()`: where the
+family names no `projector`, or the load has no processor (`task="text-generation"`), the
+read raises `Unavailable` with the reason (`"a text-only load: no processor, so no image
+reaches the model; load with task='image-text-to-text'"`) and `model.vision.support()` is
+empty. A subclass that redefines a tower value keeps the gate, as Llama 4's does:
+
+<!-- test: skip -->
+```python
+# nnterp/families/llama4_text.py
+from ..components.vision import no_tower_run
+
+class Vision(Vision):
+    """Llama 4's ViT: its ``last_hidden_state`` is the adapter's output, so ``tower_output`` is read at ``layernorm_post``."""
+
+    @EProperty("norm.output", description=Vision.tower_output.description, unavailable=no_tower_run)
+    def tower_output(self, value) -> Patches:
+        return value
+```
+
+### The image values: where `image_features` is read
+
+`image_token_mask` (`ImageTokenMask`, `[batch, seq]`) and `image_features` (`ImageFeatures`,
+`[image_tokens, hidden]`) are `EProperty`s on `Vision`, and neither is read inside the
+tower: each key is anchored at the model root with a leading `/`
+([descriptors.md](descriptors.md#the-path)).
+
+- `image_token_mask` is keyed `"/inputs"`: `input_ids == image_token_id` (`image_token_id`,
+  else `image_token_index`, off the wrapper's config). Assigning raises.
+- `image_features` is read **at the scatter**, the tensor the wrapper's forward writes into
+  the token embeddings at the image tokens, so it is what the text model receives whatever
+  the wrapper did after its projector (LLaVA-NeXT's unpadding and newline rows, Gemma 4
+  unified's stripped padding, Qwen2.5-VL's reorder). Its key is a function of the tower:
+  `scatter_host(model)` is the root's child the family keyed `ImageScatter` on, or the root
+  itself (path `""`) where the family sets `ROOT_SCATTER` and the load has a `projector`;
+  `scatter_call` gives the path (`"model.source.inputs_embeds_masked_scatter_0"` on Llava)
+  and the argument (`ImageScatter.scatter_argument`, 1). The value is that argument
+  flattened, a view, so in-place edits land; an assignment is reshaped back.
+- `ImageScatter` is `sourced`: its forward is instrumented at build, so the scatter is
+  served after the tower's values, which run inside the same forward. A wrapper whose family
+  keys no `ImageScatter` binds the tower's names, and `image_features` is `Unavailable`
+  there (`"the <family> family keys no ImageScatter on the '<model_type>' wrapper, ..."`).
+- **The root as the host.** `Llama4ForConditionalGeneration` scatters in its own forward, so
+  there is no inner model to key:
+
+<!-- test: skip -->
+```python
+# nnterp/families/llama4_text.py
+#: The wrapper's own forward scatters the image features (``Llama4ForConditionalGeneration`` has no inner
+#: model to key `ImageScatter` on): ``inputs_embeds.masked_scatter(mask, projected_vision_flat)``.
+ROOT_SCATTER = "inputs_embeds_masked_scatter_0"
+```
+
+  The key is then `"/source.inputs_embeds_masked_scatter_0.inputs"`, and
+  `StandardizedTransformer` instruments its own forward where the family names
+  `ROOT_SCATTER` and the load has a `projector`.
+
+On the tiny Llava, the support rows a tower serves and the scatter identity
+(random weights: shapes and identities only):
+
+```python
+import torch
+import nnterp
+from PIL import Image
+from nnterp import StandardizedTransformer
+from nnterp.components import ImageScatter
+from nnterp.components.vision import scatter_call, scatter_host
+
+vlm = StandardizedTransformer("trl-internal-testing/tiny-LlavaForConditionalGeneration", task="image-text-to-text",
+                              device="cpu", dispatch=True, attn_implementation="eager")
+support = vlm.vision.support()
+print(list(support)[:4])
+assert all(reason is None for reason in support.values())
+assert {f"vision.{name}" for name in support} <= set(vlm.support())        # the same rows under the vision host
+
+name, host = scatter_host(vlm)
+assert name == "model" and isinstance(host, ImageScatter)
+assert scatter_call(vlm) == ("model.source.inputs_embeds_masked_scatter_0", 1)
+
+image = Image.new("RGB", (64, 64), "red")
+messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What color is the square?"}]}]
+prompt = vlm.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+with vlm.trace(prompt, images=[image]):
+    mask = vlm.vision.image_token_mask.save()           # first: it comes off the inputs
+    projected = vlm.projector.output.save()             # the projector runs before the scatter
+    features = vlm.vision.image_features.save()
+    first = vlm.layers[0].input.save()
+
+assert mask.dtype == torch.bool and mask.shape == first.shape[:2]
+assert features.shape == (int(mask.sum()), vlm.hidden_size)
+assert torch.equal(first[mask], features)                                    # what enters the text model
+assert torch.equal(projected.reshape(-1, vlm.hidden_size), features)         # on Llava 1.5, the projector's output
+```
+
+```
+['image_token_mask', 'patch_embeddings', 'tower_output', 'image_features']
+```
+
+### Per-tower facts are documented exceptions
+
+A value means the same thing on every tower. Where a tower differs, the difference is a
+documented fact about the value (in the family's docstring and the nnterp repo's
+`docs/usage/vision.md`), not another definition of it:
+
+| tower | the fact |
+|---|---|
+| CLIP | the CLS token *first*, then the patches; `post_layernorm` norms the CLS only, so there is no `vision.norm`; Llava's projector reads `vision.layers[-2].layer_output` without the CLS, so a `tower_output` write does not reach the text model |
+| SigLIP | one row per image (per crop on LLaVA-OneVision); the patches only, in raster order |
+| Llama 4's ViT | one row per image tile, the CLS token *last*; the tower drops it after `vision.norm` |
+| Idefics 3, SmolVLM | one row per image tile; the features go in through `inputs_merger` (`InputsMerger`) |
+| Gemma 4's ViT | the patches padded to `max_soft_tokens * pooling_kernel_size**2` rows; the padded rows are masked as keys but run through every block, so they are rows of `layer_output` |
+| Pixtral, the Qwen ViT | *packed*: one row holding every image's patches, `[1, patches, vision_hidden]`; on the Qwen ViT the attention is called once per image, so its scores and pattern are `Unavailable` (`PER_IMAGE`) |
+| Qwen2.5-VL | the block values in the tower's window order; nnterp does not reorder |
+| Qwen3-VL | DeepStack: three tower blocks feed mergers whose output the text model adds after text blocks 0-2, served as `layers[k].deepstack_output` |
+
+The encoder-free Gemma 4 unified embedder is a `Vision` with no `layers` (`num_layers` 0),
+its `image_features` read at the scatter as on a tower. Mllama scatters nothing (its text
+model cross-attends to the projector's output) and is not bound; it needs its own family
+with a `CrossAttention` component.
+
+### The `VisionSuite` subclass
+
+Per wrapper, in the family's test file (`tests/families/vision_suite.py` holds the base):
+
+<!-- test: skip -->
+```python
+from vision_suite import VisionSuite, clip_rows
+
+from nnterp.families import llama
+
+
+class TestLlavaVision(VisionSuite):
+    """Llava 1.5's CLIP tower and projector, and the tower's image values."""
+
+    REPO = "trl-internal-testing/tiny-LlavaForConditionalGeneration"
+    FAMILY = llama
+    TEXT_REPO = TestLlama.REPO
+    VISION_NATIVE = clip_rows()
+```
+
+| attribute | meaning |
+| --- | --- |
+| `REPO` | The pinned tiny wrapper checkpoint, loaded with `task="image-text-to-text"`, eager. |
+| `FAMILY` | The family module it must resolve to. |
+| `VISION_NATIVE` | Standard path to native path for the tower and the projector; `siglip_rows()`, `clip_rows()`, `pixtral_rows()` build it for a tower at `model.vision_tower`. |
+| `TEXT_REPO` | A text-only checkpoint of the same family: it must list no image values. |
+| `DTYPE` | The load dtype: float32, unless the processor hands the tower another (Llama 4's bfloat16). |
+| `PATCHES_AT` | Where `vision.patch_embeddings` is read, from the tower. Default `"patch_embed.output"`; `"ln_pre.input"` on Pixtral. |
+| `EXPECTED_VISION_UNAVAILABLE` | Tower block values unavailable on every block, value to a substring of the reason. Default `{}`. |
+| `fix_processor(model)` | A static method that sets a tiny checkpoint's processor to its model where the two disagree (patch size, token count, `image_token_id`); `align_processor` does the setting. |
+| `patches_of(self, model, images)` | The length of the patches axis: the configured grid by default, `image_grid_thw` on Qwen, `image_sizes` on Pixtral, `image_position_ids` on Gemma 4. |
+
+What every subclass asserts:
+
+- the tower names alias the native modules; the tower's envoys are `Vision`, `VisionLayer`,
+  `VisionAttention`, `VisionMlp`; the scatter's host is an `ImageScatter` or the root; no
+  tower alias binds on a text block;
+- the tower's sizes are what its modules run with, and the root's are the text config's;
+- on every tower block, `input + attention_output + mlp_output == layer_output`, and under
+  eager the pattern's rows sum to one;
+- `vision.support()` lists the tower's four values and the block values, available except
+  `EXPECTED_VISION_UNAVAILABLE`, and `model.support()` carries them as `vision.*` rows;
+- `image_token_mask == (input_ids == image_token_id)`, its count is `image_features.shape[0]`,
+  and `layers[0].input[image_token_mask] == image_features` exactly, with one image and with
+  two images of different shapes in one invoke;
+- writes are causal: zeroing `image_features` lands at the image positions only and moves
+  the logits, an assignment lands, a tower block's `layer_output` write and a
+  `patch_embeddings` edit move `image_features`;
+- a text-only trace reads the mask all false; a text-only checkpoint and a
+  `text-generation` load list no `vision` host, and every tower value raises `Unavailable`
+  with the text-only reason.
+
+A family's test class adds its tower's own facts (`TestLlavaVision` asserts CLIP has no
+`vision.norm`). Every `FamilySuite` test also runs on the wrapper loaded under
+`image-text-to-text` (`TestLlavaWrapper`), so the text side is checked as loaded with the
+processor.
+
 ## The test file
 
 One file per family under `tests/families/`, subclassing `FamilySuite`
@@ -999,13 +1328,15 @@ checkout): `HF_HUB_OFFLINE=1 pytest tests/families/test_<model_type>.py`. A fail
 not have; [finding-source-ops.md](finding-source-ops.md) is how to find the one it does.
 
 The template above, written as a standalone module for `gpt2` and passed to
-`nnterp.families.register()` at the top of a test file that subclasses `FamilySuite`
+`nnterp.families.register(module, "gpt2")` at the top of a test file that subclasses `FamilySuite`
 with GPT-2's `NATIVE` and `REFUSES_IN_PLACE_QKV`, passes the whole suite on
 `hf-internal-testing/tiny-random-gpt2` with `model.family` being the standalone module.
 
 ## Gotchas
 
-- **The file name is the registry.** `MODEL_TYPES` must be `("<file stem>",)`.
+- **The file name is the registry.** `lookup("<model_type>")` imports
+  `nnterp.families.<model_type>`; a module under another name is reached only through
+  `register(module, "<model_type>")`.
 - **Import the modeling module only inside the family module.** An import at
   `nnterp/__init__.py` or in `components/` would load transformers modeling code on
   `import nnterp`.

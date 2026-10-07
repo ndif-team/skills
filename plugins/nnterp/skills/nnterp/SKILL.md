@@ -1,6 +1,6 @@
 ---
 name: nnterp
-description: Write interpretability code once against nnterp's StandardizedTransformer and run it on all 92 transformer families it knows (GPT-2, Llama, Qwen, Gemma-2/3/4, OLMo, Granite, Falcon, DeepSeek, Qwen3.5/Qwen3-Next DeltaNet hybrids, Mamba/Mamba-2/Jamba, 36 mixture-of-experts families): one vocabulary (model.layers[i].self_attn / .linear_attn / .mlp, model.norm, model.lm_head) and standard values (layer_output, attention_output, mlp_output, attention_probabilities and the attention interior, a mixture's expert_weights / expert_indices, a recurrent mixer's state, logits, next_token_probs), plus support(), skip_layers, steer, project_on_vocab. Load it for code that reads or edits the residual stream, a sublayer's contribution, an attention pattern, expert routing or a recurrent state on more than one architecture, or that would otherwise branch on per-family module paths and unwrap tuples; and when a result on Gemma-4, Granite, Doge, ZAYA or DeepSeek-V4 looks wrong (their blocks are not a plain sum).
+description: Write interpretability code once against nnterp's StandardizedTransformer and run it on its 98 transformer families (GPT-2, Llama, Qwen, Gemma, OLMo, Granite, DeepSeek, Kimi, DeltaNet and Mamba hybrids, 39 MoE families) and on vision-language models loaded with task="image-text-to-text" (model.vision, the tower blocks vision.layers[i], model.projector, vision.image_token_mask, vision.image_features): one vocabulary (model.layers[i].self_attn / .linear_attn / .mlp, model.norm, model.lm_head) and standard values (layer_output, attention_output, mlp_output, attention_probabilities, logits, ...), plus support(), skip_layers, steer, project_on_vocab. Load it for code that reads or edits the residual stream, a sublayer's contribution, attention, expert routing, recurrent state or an image's path into the text model on more than one architecture, or that would branch on per-family module paths; and when a result on Gemma-4, Granite, Doge, ZAYA or DeepSeek-V4 looks wrong (their blocks are not a plain sum).
 ---
 
 # nnterp
@@ -14,7 +14,7 @@ mean the same thing everywhere. Everything nnsight does (`trace`, `generate`,
 unchanged; this skill covers only what nnterp adds. Load the `nnsight` skill for
 the underlying API.
 
-Verified on nnterp `5aba2f4` (branch `0.8-refactor`, 92 families), nnsight 0.8 dev, transformers 5.17.0.
+Verified on nnterp `103f697` (branch `encyclopedia`, 98 families), nnsight 0.8 dev `3553b930`, transformers 5.17.0.
 
 ## Orientation
 
@@ -43,7 +43,7 @@ with model.trace(prompt):
     resid = model.layers[5].layer_output.save()                 # the stream leaving the block
     logits = model.logits.save()
 
-assert model.family.__name__ == "nnterp.families.gpt2" and len(nnterp.families.known()) == 92
+assert model.family.__name__ == "nnterp.families.gpt2" and len(nnterp.families.known()) == 98
 assert (model.num_layers, model.hidden_size, model.num_heads) == (12, 768, 12)
 assert x.shape == attn.shape == mlp.shape == resid.shape == (1, 10, 768)
 assert torch.equal(x + attn + mlp, resid)                       # the contribution identity, exact in fp32
@@ -183,6 +183,26 @@ a family envoy by keying on its type; `"layers.0.mlp"` matches nothing.
 **13. Import `nnterp` (or `nnsight`) before any `transformers.models...` module**;
 the reverse order segfaults at import.
 
+**14. A vision-language wrapper loaded without `task="image-text-to-text"` sees no image.**
+The default `task="text-generation"` load has no processor, so the tower never runs:
+`model.vision.support()` is `{}`, `model.support()` has no `vision.` rows, and every tower
+value raises `Unavailable`, inside a trace too, with the reason `a text-only load: no
+processor, so no image reaches the model; load with task='image-text-to-text'`.
+
+**15. Read `vision.image_token_mask` first and `vision.image_features` after the tower;
+one image-carrying invoke per trace.** The mask comes off the inputs, like `input_ids`;
+`image_features` is read at the scatter, after the tower's values and before
+`layers[0].input`. Two invokes of `model.trace(prompt, images=[...])` raise
+`NotImplementedError: Can't batch these inputs`. Chat-message inputs that embed the image do
+batch, and then `vision.image_features` is flat over the whole batch's image tokens in each
+invoke, so a write in one invoke reaches every row. Put several images in one invoke, and
+run clean and ablated as two traces.
+
+**16. Boolean indexing with the mask flattens the batch.** `out[mask]` is
+`[image_tokens, hidden]` over every row in row-major order (the order of `image_features`),
+not `[batch, ...]`. Index one row (`out[0, mask[0]]`) or mask instead of indexing
+(`out.masked_fill(~mask[..., None], 0)`) to keep the batch.
+
 ## The vocabulary
 
 Llama's block names, with the containers lifted out of the inner `.model`:
@@ -221,6 +241,10 @@ Mamba and Mamba-2 blocks have neither attention nor MLP.
 | `next_token_probs` | root | `NextTokenProbs` | `logits[:, -1].softmax(-1)`, in the model dtype; read-only |
 | `token_embeddings` | root | `Residual` | `embed_tokens.output`; `layers[0].input` is what enters block 0 |
 | `input_ids`, `attention_mask`, `input_size` | root | `Tokens` | read first; the first two assignable |
+| `layer_output`, `attention_output`, `mlp_output` | `vision.layers[i]` (`.self_attn`, `.mlp`) | `Patches` | the tower's stream and contributions, `[images, patches, vision_hidden]`; the interior as on a text block |
+| `patch_embeddings`, `tower_output` | `vision` | `Patches` | the patch embedding's output; the last block's stream after `vision.norm`, before pooling or adapter |
+| `image_token_mask` | `vision` | `ImageTokenMask` | `[batch, seq]` bool, `input_ids == image_token_id`; read first; read-only |
+| `image_features` | `vision` | `ImageFeatures` | `[image_tokens, hidden]`, flat: what the wrapper scatters in, `layers[0].input[mask] == image_features` |
 
 Every layout is a named `jaxtyping` alias (`nnterp.components.Residual`, `Pattern`,
 ...; the root's from `nnterp.standardized`): `value.layout` is that alias,
@@ -271,6 +295,51 @@ assert ll[0, -1].argmax() == lparis
 Same body, different family, no `[0]`. In bf16 the pattern's rows sum to 1
 within about 4e-3, and `next_token_probs` is a bf16 softmax (off by up to ~2e-3):
 compare with `atol`, and take `logits[:, -1].float().softmax(-1)` for metrics.
+
+## Vision-language models
+
+<!-- test: setup -->
+```python
+from PIL import Image
+
+vlm = StandardizedTransformer("trl-internal-testing/tiny-LlavaForConditionalGeneration",
+                              task="image-text-to-text", device="cpu", dispatch=True)   # the processor comes with the task
+image = Image.new("RGB", (64, 64), "red")
+messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What is this?"}]}]
+vprompt = vlm.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)   # places the image token
+```
+
+```python
+with vlm.trace(vprompt, images=[image]):
+    mask = vlm.vision.image_token_mask.save()            # [batch, seq] bool; first: it comes off the inputs
+    patches = vlm.vision.layers[0].layer_output.save()   # Patches: [images, patches, vision_hidden]
+    features = vlm.vision.image_features.save()          # [image_tokens, hidden], flat
+    first = vlm.layers[0].input.save()
+    out = vlm.layers[0].layer_output.save()
+    vlm.layers[1].layer_output[mask] = 0                 # a one-sided edit: the image positions only
+    edited = vlm.logits.save()
+
+assert vlm.family is nnterp.families.llama               # the family is the text model's
+assert mask.shape == (1, 592) and mask.sum() == 576
+assert patches.shape == (1, 577, 16)                     # CLIP: the CLS token first, then 576 patches
+assert features.shape == (576, 16)
+assert torch.equal(first[mask], features)                # the scatter identity, exact
+assert out[mask].shape == (576, 16) and out[~mask].shape == (16, 16)   # image rows, text rows
+assert edited.shape == (1, 592, 32064)
+```
+
+`model.vision` is the tower (a `Vision`), `vision.layers[i]` its blocks with
+`self_attn` and `mlp` and the same three boundary values, laid out `Patches`,
+and `model.projector` the last module before the image enters the text model;
+`model.layers` stays the text model's. The tower's sizes are on `model.vision`
+(`num_layers`, `hidden_size`, `num_heads`, `patch_size`, ...). The one rule for
+`vision.image_features`: it is read at the scatter, the tensor the wrapper writes
+into the token embeddings, so `layers[0].input[mask] == image_features` on every
+wrapper; ablate or patch the image there. `projector.output` differs from it on
+LLaVA-NeXT, LLaVA-OneVision, Gemma 4 unified and Qwen2.5-VL. Names per tower (SigLIP, CLIP,
+Pixtral, the Qwen ViT, Llama 4, Gemma 4), the Qwen ViT's packed row and DeepStack,
+`generate`, availability and the 16 host families:
+[references/vision.md](references/vision.md).
 
 ## Writing values
 
@@ -338,17 +407,20 @@ before the model runs. Reasons, `SourceNotAvailable`, guarding a script:
 
 Before writing against an unfamiliar checkpoint, run the script (meta device, no
 weights): it prints the family, the standard-name to native-path table, the
-sizes, `support()` and a block's repr:
+sizes, `support()` and a block's repr (with `--task image-text-to-text`, a
+vision-language wrapper's tower names, sizes and `model.vision.support()` too):
 
 ```
-python scripts/inspect_family.py <repo_id> [--layer N] [--eager]
+python scripts/inspect_family.py <repo_id> [--layer N] [--eager] [--task image-text-to-text]
 ```
 
 ## Families
 
-92 families, `nnterp.families.known()`; an unknown `model_type` raises
+98 families, `nnterp.families.known()`; an unknown `model_type` raises
 `UnsupportedFamily` before any weights load (the `extending` skill adds
-one). What a recipe must survive is grouped by quirk in
+one). 16 of them also host a vision tower on their image-text-to-text wrappers
+(the family is the text model's: Llava resolves to `llama`); the wrappers table
+is in [references/vision.md](references/vision.md#which-wrappers). What a recipe must survive is grouped by quirk in
 [references/api-reference.md](references/api-reference.md); the full per-family
 table is nnterp's `docs/reference/families.md`.
 
@@ -361,8 +433,9 @@ table is nnterp's `docs/reference/families.md`.
 | [references/mixture-of-experts.md](references/mixture-of-experts.md) | a `Moe`'s six values, usage / entropy / ablation / rerouting recipes with pad masking, bf16 and invoke caveats, per-family gaps |
 | [references/recurrent-mixers.md](references/recurrent-mixers.md) | `LinearAttention` (DeltaNet), `SelectiveScan` (Mamba-1), `StateSpace` (Mamba-2): what each name means on each, kernels, per-token state, read-order traps |
 | [references/availability-and-support.md](references/availability-and-support.md) | `support()` forms, the reasons, `Unavailable` vs `SourceNotAvailable`, guarding a script |
+| [references/vision.md](references/vision.md) | vision-language models: the tower names per tower, the image values and `Patches`, where the image meets the text model, image vs text positions, inputs and read order, `generate`, the Qwen ViT, availability, the wrappers |
 | [references/generation-and-helpers.md](references/generation-and-helpers.md) | values under `generate` with `tracer.iter`, `nnterp.prompt_utils`, `nnterp.nnsight_utils`, padding, `remote=True` |
-| [references/api-reference.md](references/api-reference.md) | every exported symbol, and the 92 families grouped by quirk |
+| [references/api-reference.md](references/api-reference.md) | every exported symbol, and the 98 families grouped by quirk |
 
 The nnterp repo's pages go deeper: `docs/usage/*.md` (one page per feature),
 `docs/reference/families.md`, `docs/patterns/*.md`.

@@ -427,6 +427,15 @@ where it is 2. "The last token" is `value[:, -1]` for a residual value,
 `value[:, :, -1]` for queries/keys/values, `pattern[:, :, -1, :]` for the last
 query row.
 
+A vision-language wrapper loaded with `task="image-text-to-text"` adds the tower's
+values: `layer_output`, `attention_output` and `mlp_output` on `vision.layers[i]`,
+and `patch_embeddings` and `tower_output` on `model.vision`, all laid out
+`Patches` (`images patches vision_hidden`; a row is an image, a crop, a tile or a
+packed run of images, per tower); `vision.image_token_mask` (`ImageTokenMask`,
+`batch seq`, bool) and `vision.image_features` (`ImageFeatures`,
+`image_tokens hidden`, flat over the batch). The text values cover the image
+positions too. What each means per tower: [vision.md](vision.md#the-values).
+
 ## Gotchas
 
 - Forward order within one trace: `input`, `attention_output`, `mlp_output`,

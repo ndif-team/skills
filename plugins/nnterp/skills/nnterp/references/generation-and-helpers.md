@@ -87,6 +87,52 @@ mixture the routing values are `[batch, 1, top_k]` per decode step. See
 [recurrent-mixers.md](recurrent-mixers.md) and
 [mixture-of-experts.md](mixture-of-experts.md).
 
+### Images under `generate`
+
+On a vision-language wrapper (`task="image-text-to-text"`,
+`model.generate(prompt, images=[image], ...)`) the tower runs on the prompt call only:
+
+| value | prompt call (step 0) | decode step |
+|---|---|---|
+| `vision.image_token_mask` | `[batch, prompt_len]`, the image tokens true | `[batch, 1]`, all false: the new token is text |
+| `vision.image_features`, the tower's values | the prompt call's, once | no occurrence |
+
+Read them under `tracer.iter[0]`, the mask first. An edit placed before any step lands
+on the prompt call, so the whole generation runs without (or with the edited) image:
+
+<!-- test: setup -->
+```python
+from PIL import Image
+
+vlm = StandardizedTransformer("trl-internal-testing/tiny-LlavaForConditionalGeneration",
+                              task="image-text-to-text", device="cpu", dispatch=True)
+image = Image.new("RGB", (64, 64), "red")
+messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What is this?"}]}]
+vprompt = vlm.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+```
+
+```python
+later_masks = []
+with vlm.generate(vprompt, images=[image], max_new_tokens=3, do_sample=False) as tracer:
+    for step in tracer.iter[0]:
+        mask = vlm.vision.image_token_mask.save()            # first: it comes off the inputs
+        features = vlm.vision.image_features.save()          # step 0 only
+    for step in tracer.iter[1:3]:
+        later_masks.append(vlm.vision.image_token_mask.save())
+    vids = tracer.result.save()
+
+with vlm.generate(vprompt, images=[image], max_new_tokens=3, do_sample=False) as tracer:
+    vlm.vision.image_features[:] = 0                         # before any step: lands on the prompt call
+    blind = tracer.result.save()
+
+assert mask.shape == (1, 592) and mask.sum() == 576 and features.shape == (576, 16)
+assert all(m.shape == (1, 1) and not m.any() for m in later_masks)
+assert vids.shape == blind.shape == (1, 595) and not torch.equal(vids, blind)
+```
+
+A read of `vision.image_features` bound to a decode step has no occurrence to bind,
+so keep it out of `tracer.iter[1:]`. See [vision.md](vision.md#under-generate).
+
 ## `nnterp.nnsight_utils`: activations over prompts
 
 Probing, steering vectors and logit lenses start the same way: the residual

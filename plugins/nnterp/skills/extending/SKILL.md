@@ -1,6 +1,6 @@
 ---
 name: extending
-description: Extend nnterp when a checkpoint or value is outside what it ships. Load for UnsupportedFamily on a model_type; a family whose attention_output, mlp_output or pattern the base classes locate wrongly (sandwich norms, residual added inside, own attention arithmetic, scaled residual); adding your own value to a block, attention or MLP; finding the .source op names an EProperty path needs; registering a family or overriding a shipped one; a root size or logit step the family spells its own way (`def <size>(model)`, `def project_on_vocab(model, hidden)`); MoE or recurrent-mixer (DeltaNet, Mamba) envoys in a new family; a transformers upgrade that moved op names. Covers the family module (MODEL_TYPES, RENAME incl. class keys, ENVOYS, Moe/RecurrentMixer subclasses, handing values to children), EProperty paths/select/unavailable/sourced, DerivedEProperty, TokenEProperty, StandardizedProperty/Capability, per-module sizes, layouts, envoys=, register() and FamilySuite. To use the standard values, load the nnterp skill.
+description: Extend nnterp when a checkpoint or value is outside what it ships. Load for UnsupportedFamily on a model_type; a family whose attention_output, mlp_output or pattern the base classes locate wrongly (sandwich norms, residual added inside, own attention arithmetic, scaled residual); adding your own value to a block, attention or MLP; finding the .source op names an EProperty path needs; registering a family or overriding a shipped one; a root size or logit step the family spells its own way (`def <size>(model)`, `def project_on_vocab(model, hidden)`); MoE, recurrent-mixer or vision envoys in a new family; a transformers upgrade that moved op names. Covers the family module (RENAME incl. class keys, ENVOYS, Moe/RecurrentMixer/Vision subclasses, ImageScatter, handing values to children), EProperty paths/select/unavailable/sourced, DerivedEProperty, TokenEProperty, StandardizedProperty/Capability, per-module sizes, layouts, envoys=, register() and FamilySuite. To use the standard values, load the nnterp skill.
 ---
 
 # Extending nnterp
@@ -9,7 +9,7 @@ nnterp gives every transformer family one vocabulary (`model.layers[i].self_attn
 `.linear_attn`, `model.norm`, ...) and standard values (`layer_output`,
 `attention_output`, `attention_probabilities`, `router_logits`, ...) through one module
 per family under `nnterp/families/`, named after `config.model_type`
-(`len(nnterp.families.known())` is 92). This skill is for when that is not enough: a
+(`len(nnterp.families.known())` is 98). This skill is for when that is not enough: a
 `model_type` nnterp does not ship, a forward that puts a value where the base classes do
 not look, or a value nnterp does not have. Verified on nnsight 0.8.0 / transformers
 5.17.0 against `openai-community/gpt2` and `HuggingFaceTB/SmolLM2-135M-Instruct`. The
@@ -47,7 +47,9 @@ and `docs/reference/families.md` (every family's overrides).
 9. **`inputs` serves `(args, kwargs)`; `input` the first argument.** `select=` names one
    element of `inputs` (int: positional, str: keyword) and repacks a write.
 10. **`register()` is process-wide, silent, and read at load.** A model built before it
-    keeps the shipped family; undo with `del families.REGISTRY[model_type]`.
+    keeps the shipped family; undo with `del families.REGISTRY[model_type]`. With no
+    types given it registers the one the family's `__name__` ends in, so a variant named
+    `my_gpt2` covers `my_gpt2`, not `gpt2`: name the types, `register(variant, "gpt2")`.
 
 <!-- test: setup -->
 ```python
@@ -66,8 +68,9 @@ print(type(model.layers[0]).__name__, type(model.layers[0].self_attn).__name__, 
 
 ## The shape of a family module
 
-One file, `nnterp/families/<model_type>.py`; the file name is the registry. A Llama-like
-family changes nothing but the container names:
+One file, `nnterp/families/<model_type>.py`; the file name is the registry: `lookup`
+imports the module named after the type, and the module declares no list of types. A
+Llama-like family changes nothing but the container names:
 
 <!-- test: skip nocompile -->
 ```python
@@ -75,7 +78,6 @@ family changes nothing but the container names:
 from transformers.models.<module>.modeling_<module> import <X>Attention, <X>DecoderLayer, <X>MLP
 from ..components import Attention, Layer, Mlp   # + Moe, LinearAttention, StateSpace, ... as needed
 
-MODEL_TYPES = ("<model_type>",)                   # exactly the file stem
 RENAME = {
     "model.embed_tokens": "embed_tokens",         # multi-component keys bind at the root
     "model.layers": "layers",
@@ -247,23 +249,80 @@ repr line is `(name) -> Layout [axes]: description`. A shape no standard value h
 an inline `jaxtyping` type. A value that must run on NDIF lives in an installed module,
 since remote traces carry envoy classes by reference.
 
+## A family whose checkpoints are vision-language wrappers
+
+The family is chosen from `text_config.model_type`, so a wrapper (`LlavaForConditionalGeneration`
+around a Llama) loads through the text model's family, and that family names the wrapper's
+parts too. What it adds, quoted from `llama.py` and `gemma3_text.py`:
+
+- **The wrapper's text spellings in `RENAME`**, beside the plain ones, so whichever the tree
+  has binds: `"model.language_model.layers": "layers"` (Llava, DeepSeek-VL, Gemma 3),
+  `"model.text_model.layers": "layers"` (Idefics 3, SmolVLM), and the same for
+  `embed_tokens` and `norm`.
+- **The tower's root and projector, keyed from the model root**:
+  `"model.vision_tower": "vision"`, `"model.multi_modal_projector": "projector"`
+  (`llama.py` also has `"model.vision_model": "vision"`, `"model.aligner": "projector"`,
+  `"model.connector": "projector"`). `projector` is the last module before the scatter.
+- **The tower's inner names, keyed relative to the tower**: multi-component keys no text
+  model has (`"encoder.layers": "layers"`, `"embeddings.patch_embedding": "patch_embed"`)
+  and single names no text block has (`"post_layernorm": "norm"`,
+  `"layer_norm1": "input_layernorm"`, `"layer_norm2": "post_attention_layernorm"`). A bare
+  name a text block also has is never a tower key.
+- **`Vision`, `VisionLayer`, `VisionAttention`, `VisionMlp`** from `nnterp.components`, keyed
+  in `ENVOYS` on the tower's module types:
+  `SiglipVisionModel: Vision, SiglipEncoderLayer: VisionLayer, SiglipAttention: VisionAttention, SiglipMLP: VisionMlp`.
+  A tower that differs (a sandwich block, a final norm a rename key cannot tell apart) gets a
+  subclass in the family file (`llama.py`'s `SiglipVision`).
+- **`ImageScatter` keyed on the wrapper's model type**, whose forward writes the image
+  features into the token embeddings: `Gemma3Model: ImageScatter`, `LlavaModel: ImageScatter`.
+  That is where `vision.image_features` is read. A wrapper that writes them through a helper
+  keys a subclass naming the call and its argument (`llama.py`'s `InputsMerger`). A wrapper
+  whose root forward scatters has no inner model to key, so the family sets
+  `ROOT_SCATTER = "inputs_embeds_masked_scatter_0"` (`llama4_text.py`).
+- **A `VisionSuite` subclass** in the family's test file, per wrapper (`TestLlavaVision` in
+  `tests/families/test_llama.py`).
+
+On `trl-internal-testing/tiny-LlavaForConditionalGeneration` (family `llama`, CLIP tower):
+
+```python
+from nnterp.components import ImageScatter
+
+vlm = StandardizedTransformer("trl-internal-testing/tiny-LlavaForConditionalGeneration", task="image-text-to-text",
+                              device="cpu", dispatch=True)
+assert vlm.family is families.llama
+assert vlm.get("model.vision_tower") is vlm.vision                      # a root key, bound from the model root
+assert vlm.get("model.multi_modal_projector") is vlm.projector
+assert vlm.get("model.vision_tower.encoder.layers.0") is vlm.vision.layers[0]   # an inner key, bound on the tower
+assert type(vlm.vision).__name__ == "Vision"
+assert [type(e).__name__ for e in (vlm.vision.layers[0], vlm.vision.layers[0].self_attn, vlm.vision.layers[0].mlp)] == [
+    "VisionLayer", "VisionAttention", "VisionMlp"]
+assert isinstance(vlm.get("model"), ImageScatter)                       # LlavaModel: where image_features is read
+assert "norm" not in vlm.vision._aliases                                # CLIP's post_layernorm norms the CLS token only
+assert vlm.get("model.language_model.layers.0") is vlm.layers[0]        # the wrapper's text spelling: the root stays the text model's
+```
+
+The rules, the per-tower exceptions, `ROOT_SCATTER` and the suite's attributes:
+[references/family-module-recipe.md](references/family-module-recipe.md#a-vision-tower-in-a-family).
+
 ## Registering a family from outside the package
 
-`families.register(module)` takes any module or object with `MODEL_TYPES`, `RENAME` and
-`ENVOYS`; `lookup` consults `REGISTRY` before the shipped modules. Size and
-`project_on_vocab` functions on it are read like a shipped module's:
+`families.register(family, *model_types)` puts any module or object with `RENAME` and
+`ENVOYS` into `REGISTRY` under those types, and `lookup` consults `REGISTRY` before the
+shipped modules. With no types given it takes the one the family's `__name__` ends in
+(`register(my_package.zamba)` covers `zamba`); a `types.SimpleNamespace` has no
+`__name__` and raises `TypeError`, so it always names them. It returns the family. Size
+and `project_on_vocab` functions on it are read like a shipped module's:
 
 ```python
 import types
 
 variant = types.ModuleType("my_gpt2")                    # or: import my_package.my_family
-variant.MODEL_TYPES = ("gpt2",)
 variant.RENAME = {**gpt2.RENAME, "mlp": ["mlp", "ffn"]}
 variant.ENVOYS = {**gpt2.ENVOYS, GPT2Attention: MyAttention}
 variant.hidden_size = lambda model: 999                  # a size spelled by the family: wins over config.hidden_size
 variant.intermediate_size = gpt2.intermediate_size       # a variant carries only what it defines
 variant.project_on_vocab = lambda model, hidden: model.lm_head(model.norm(hidden)) * 2
-families.register(variant)
+assert families.register(variant, "gpt2") is variant      # the name says my_gpt2: the type is passed
 try:
     registered = StandardizedTransformer("openai-community/gpt2", device="cpu", dispatch=True, attn_implementation="eager")
     assert registered.family is variant and type(registered.layers[0].self_attn) is MyAttention
@@ -275,15 +334,15 @@ try:
         logits = registered.logits.save()
     assert torch.allclose(lens, 2 * logits, atol=1e-4)                 # the family's function, bound in the root's place
     assert model.family is gpt2                                        # loaded before register: keeps what it resolved
-    assert "my_gpt2" not in families.known()                           # known() lists the shipped modules only
+    assert "gpt2" in families.REGISTRY and len(families.known()) == 98  # known() lists the shipped modules only
 finally:
     del families.REGISTRY["gpt2"]
 
 assert families.lookup("gpt2") is gpt2
 ```
 
-A family that will ship is the same module moved under `nnterp/families/` with the
-`register` line removed. `rename=` / `envoys=` on one load are the per-model alternative.
+A family that will ship is the same module saved as `nnterp/families/<model_type>.py`
+with the `register` line removed. `rename=` / `envoys=` on one load are the per-model alternative.
 
 ## The test file
 
@@ -299,7 +358,7 @@ its layout. Attributes and test groups: [references/family-module-recipe.md](ref
 
 | File | Covers |
 |---|---|
-| [references/family-module-recipe.md](references/family-module-recipe.md) | `known()`, `UnsupportedFamily`; llama, gpt2, gemma2, bloom, falcon quoted from source; MoE, recurrent-mixer, class-key and `project_on_vocab` excerpts; `RENAME`/`ENVOYS` rules; `FamilySuite` |
+| [references/family-module-recipe.md](references/family-module-recipe.md) | `known()`, `UnsupportedFamily`; llama, gpt2, gemma2, bloom, falcon quoted from source; MoE, recurrent-mixer, class-key and `project_on_vocab` excerpts; `RENAME`/`ENVOYS` rules; a vision tower in a family (tower keys, `ImageScatter`, `ROOT_SCATTER`, `no_tower_run`, per-tower exceptions, `VisionSuite`); `FamilySuite` |
 | [references/descriptors.md](references/descriptors.md) | `EProperty` paths, `select`, `unavailable`, `sourced`, `DerivedEProperty`, `TokenEProperty`, handing values down, per-module sizes, `StandardizedProperty`/`StandardizedCapability`, helpers |
 | [references/finding-source-ops.md](references/finding-source-ops.md) | operation naming, the GPT-2 and SmolLM2 listings, read order and the `.fn` error, dead branches, what cannot be drilled, what a release moves |
 

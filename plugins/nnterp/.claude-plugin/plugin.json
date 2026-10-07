@@ -1,7 +1,7 @@
 {
   "name": "nnterp",
   "version": "0.1.0",
-  "description": "Architecture-agnostic interpretability with nnterp on nnsight 0.8 - one module vocabulary and standard values (layer_output, attention_output, attention_probabilities, ...) across 92 transformer families, recipes written once for every family, and adding or overriding a family",
+  "description": "Architecture-agnostic interpretability with nnterp on nnsight 0.8 - one module vocabulary and standard values (layer_output, attention_output, attention_probabilities, ...) across 98 transformer families, the vision side of vision-language wrappers (model.vision, the tower blocks, the projector, image_token_mask, image_features), recipes written once for every family, and adding or overriding a family",
   "author": {
     "name": "NDIF Team"
   }

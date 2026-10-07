@@ -114,6 +114,21 @@ print(f"{len(image_positions)} image positions, "
 assert (image_positions.diff() == 1).all()        # one contiguous span
 ```
 
+One contiguous span is a fact about a single-image prompt. A prompt with text between
+images gives one span per image, so treat the positions as a mask, not as a slice
+`[start:end]`. The span is also not the only place image information enters on every
+model: Qwen3-VL adds features from its tower (DeepStack) at the image positions again
+after each of its first three text blocks.
+
+nnterp's `StandardizedTransformer` serves this split as values: `model.vision.image_token_mask`
+is the `[batch, seq]` bool mask, and `model.vision.image_features` is what the text model
+receives at those positions, `[image_tokens, hidden]`, read where the wrapper writes the
+features into the token embeddings. On every wrapper it names the tower of,
+`layers[0].input[image_token_mask] == image_features` holds exactly, so ablating or
+patching `image_features` edits the image as the text model sees it. The `nnterp` skill
+covers loading a wrapper (`task="image-text-to-text"`), the tower's own values, and the
+wrappers it covers.
+
 Those positions exist only because the **processor** built the ids. The template
 string holds a single `<image>`, and the processor expands it into 729 copies;
 the tokenizer on its own leaves the one. Ids from the tokenizer paired with

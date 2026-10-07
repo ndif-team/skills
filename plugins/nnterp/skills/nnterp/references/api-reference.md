@@ -1,7 +1,7 @@
 # API reference (nnterp on nnsight 0.8)
 
 Every name nnterp exports, with the value rows' layout, assignability and
-availability; then the 92 families grouped by the quirks a cross-family recipe
+availability; then the 98 families grouped by the quirks a cross-family recipe
 must survive. Everything nnsight's `TransformersModel` offers (`trace`,
 `generate`, `session`, `edit`, `tracer.iter`, `.save()`, `remote=`) is inherited
 unchanged; the `nnsight` skill covers it. nnterp's own page is
@@ -25,7 +25,8 @@ with model.trace(prompt):
 
 torch.testing.assert_close(x + attn + mlp, resid)
 assert pattern.shape == (1, 12, n, n)
-assert set(nnterp.__all__) >= {"StandardizedTransformer", "Moe", "SelectiveScan", "StateSpace", "route_kernels", "chunk_per_token"}
+assert set(nnterp.__all__) >= {"StandardizedTransformer", "Moe", "SelectiveScan", "StateSpace", "Vision", "route_kernels", "chunk_per_token"}
+assert len(nnterp.families.known()) == 98
 ```
 
 ## Top-level names
@@ -35,6 +36,7 @@ assert set(nnterp.__all__) >= {"StandardizedTransformer", "Moe", "SelectiveScan"
 | `StandardizedTransformer` | the model class: a `TransformersModel` renamed to the standard vocabulary and wrapped in the family's envoys |
 | `Layer`, `Attention`, `Mlp`, `Moe` | the base envoys a family subclasses; the hosts of the standard values |
 | `RecurrentMixer`, `LinearAttention`, `SelectiveScan`, `StateSpace` | the recurrent-mixer base and its DeltaNet, Mamba-1 and Mamba-2 subclasses |
+| `Vision` | a vision-language wrapper's tower root, `model.vision`; its block and wrapper envoys are in `nnterp.components` (below) |
 | `Standard` | the envoy base of them all: `values()`, `support()`, `sourced` |
 | `EProperty`, `DerivedEProperty`, `unavailable` | the descriptors a value is made of, and a value a family lacks (the `extending` skill); `TokenEProperty` is in `nnterp.components` |
 | `route_kernels`, `route_delta_rule`, `chunk_per_token` | the recurrent kernel switch (process-wide), its DeltaNet spelling, Mamba-2's per-token chunking (per model) |
@@ -103,6 +105,8 @@ Details: [values.md](values.md#sizes).
 | `model.layers`, `model.embed_tokens`, `model.norm`, `model.lm_head` | the vocabulary, as envoys |
 | `model.layers[i].self_attn` / `.linear_attn` / `.mlp` | the family's `Attention`, recurrent mixer, `Mlp` or `Moe`; absent where the block has none |
 | `model.add_prefix_false_tokenizer` | the tokenizer with `add_prefix_space=False`, loaded on first use |
+| `model.vision`, `model.projector` | a vision-language wrapper's tower (a `Vision`) and the last module before the scatter; present on the 16 host families' wrappers, absent on a text-only checkpoint ([vision.md](vision.md)) |
+| `model.processor` | the wrapper's processor, loaded with `task="image-text-to-text"`; `None` on the default `text-generation` load |
 
 ## Envoys and their values
 
@@ -113,6 +117,15 @@ Details: [values.md](values.md#sizes).
 | `Mlp` | `mlp_output` | [values.md](values.md) |
 | `Moe(Mlp)` | `router_logits`, `expert_weights`, `expert_indices`, `expert_outputs`, `routed_output`, `shared_expert_output` (each a `TokenEProperty`); `num_experts`, `top_k`, `SCORING`, `no_mixture()` | [mixture-of-experts.md](mixture-of-experts.md) |
 | `RecurrentMixer` | `attention_output`, `state`, `states`, `state_after(t)`, `set_state_after(t, v)`; subclasses add `attention_queries` / `_keys` / `_values`, `decays`, `betas`, `state_input`, `attention_head_outputs`, `state_output` | [recurrent-mixers.md](recurrent-mixers.md) |
+| `Vision` | `image_token_mask` (`ImageTokenMask`, read-only), `patch_embeddings`, `tower_output` (`Patches`), `image_features` (`ImageFeatures`, assignable); sizes `num_layers`, `hidden_size`, `num_heads`, `head_dim`, `intermediate_size`, `patch_size`, `image_size`; `support(layer=None)`, `no_images()` | [vision.md](vision.md) |
+| `PixtralVision(Vision)`, `QwenVision(Vision)` | Pixtral's tower (`patch_embeddings` is the packed row entering `ln_pre`); the Qwen ViT's (packed `[1, patches, vision_hidden]`, sizes add `spatial_merge_size`, `window_size`) | [vision.md](vision.md#the-qwen-vit) |
+| `VisionLayer(Layer)`, `VisionAttention(Attention)`, `VisionMlp(Mlp)` | a tower block's `layer_output`, `attention_output`, `mlp_output` as `Patches`; the attention interior as on a text block | [vision.md](vision.md#the-values) |
+| `QwenVisionAttention(VisionAttention)` | the Qwen ViT's attention: queries, keys, values whole before the per-image split, `attention_head_outputs` concatenated after it; scores and pattern unavailable (`PER_IMAGE`) | [vision.md](vision.md#the-qwen-vit) |
+| `ImageScatter` | keyed on the wrapper's inner model: the module whose forward writes the image features into the token embeddings (`scatter`, `scatter_argument`); where `image_features` is read. No values of its own | [vision.md](vision.md#availability) |
+
+The vision layouts are `Patches` (`[images, patches, vision_hidden]`), `ImageTokenMask`
+(`[batch, seq]`, bool) and `ImageFeatures` (`[image_tokens, hidden]`), all in
+`nnterp.components` beside the text layouts.
 
 Every value's descriptor exposes `.layout` (the named alias), `.dims`,
 `.description`, `.reason(envoy)`; `str(descriptor)` is its repr line,
@@ -123,8 +136,8 @@ Every value's descriptor exposes `.layout` (the named alias), `.dims`,
 | name | what |
 |---|---|
 | `lookup(model_type)` | the family module: a registered one, else `nnterp.families.<model_type>` imported on first use; `UnsupportedFamily` otherwise |
-| `register(module)` | add a family (anything with `MODEL_TYPES`, `RENAME`, `ENVOYS`); consulted before the shipped modules, so it also overrides one |
-| `known()` | the 92 shipped model types (registered ones are not listed) |
+| `register(family, *model_types)` | add a family (anything with `RENAME` and `ENVOYS`) for the given model types, or for the type its module name ends in; consulted before the shipped modules, so it also overrides one |
+| `known()` | the 98 shipped model types (registered ones are not listed) |
 | `all_families()` | every shipped family, imported |
 | `REGISTRY` | `model_type -> family` for what `register` added |
 
@@ -152,7 +165,7 @@ Every value's descriptor exposes `.layout` (the named alias), `.dims`,
 | `RuntimeError` (torch view error) | an in-place edit of a split view with grad on: GPT-2 / GPT-BigCode / MPT q/k/v, Mamba-1 / Mamba-2 kernel arguments |
 | `RuntimeError: Expected u.is_cuda()` | an unrouted Mamba-1 model on CPU with `mamba_ssm` installed |
 
-## The 92 families, by what a recipe must survive
+## The 98 families, by what a recipe must survive
 
 `nnterp.families.known()` lists them; nnterp's `docs/reference/families.md` has one
 row per family (native names, public and pinned checkpoints, relocations, what
@@ -173,18 +186,21 @@ Llama-shaped: the standard names and the base values hold as they are (`llama`,
 | not a plain sum | `gemma4_text`, `gemma4_unified_text` (`layer_scalar`), `doge`, `zaya` (stream gates), `deepseek_v4` (`Streams`) | weight each term before attributing ([values.md](values.md#blocks-that-are-not-a-plain-sum)) |
 | own attention arithmetic | `gptj`, `gpt_neo`, `codegen`, `gpt_neox_japanese`, `xglm`, `bloom`, `mpt`, `falcon` | same six interior names on the family's ops; different scale placement; `out_proj` / `dense` |
 | attention sink | `gpt_oss`, `deepseek_v4`, `mimo_v2_flash` (sliding blocks) in the pattern (`SINK`); `granite_swa`, `granitemoe_swa` scaling the head outputs | pattern rows sum below one, or the pattern does not control the output |
-| latent attention | `deepseek_v2`, `deepseek_v3`, `deepseek_v32`, `glm_moe_dsa`, `glm4_moe_lite`, `youtu` | `qk_head_dim` != `head_dim`; keys arrive `num_heads` wide |
+| latent attention | `deepseek_v2`, `deepseek_v3`, `kimi_k2`, `deepseek_v32`, `glm_moe_dsa`, `glm4_moe_lite`, `youtu`, `kimi_linear` (attention blocks) | `qk_head_dim` != `head_dim`; keys arrive `num_heads` wide |
 | sparse attention | `deepseek_v32`, `glm_moe_dsa` | the pattern is zero outside the indexer's selection (dense under 2048 tokens) |
 | borrowed keys / values | `gemma4_text`, `gemma4_unified_text` | in-place k/v edits spread to later blocks; skipping a source block fails |
 | gated query | `qwen3_next`, `qwen3_5_text`, `qwen3_5_moe_text` | `q_proj` is twice as wide; `attention_queries` is not |
-| DeltaNet hybrid | `qwen3_next`, `qwen3_5_text`, `qwen3_5_moe_text`, `olmo_hybrid` | `linear_attn` on three blocks in four |
+| DeltaNet hybrid | `qwen3_next`, `qwen3_5_text`, `qwen3_5_moe_text`, `olmo_hybrid`, `kimi_linear` | `linear_attn` on three blocks in four; Kimi-Linear's `decays` are `ChannelGates` (`[batch, seq, heads, key_dim]`, one decay per key channel) |
 | Mamba-1 | `mamba`, `falcon_mamba`, `jamba` | `linear_attn` is a `SelectiveScan`; `route_kernels` first |
 | Mamba-2 | `mamba2`, `nemotron_h`, `bamba`, `falcon_h1`, `granitemoehybrid` | `linear_attn` is a `StateSpace`; Nemotron-H names its one sublayer by class |
-| mixture of experts (36) | `mixtral`, `qwen2_moe`, `qwen3_moe`, `qwen3_next`, `qwen3_5_moe_text`, `olmoe`, `flex_olmo`, `gpt_oss`, `deepseek_v2`/`v3`/`v32`/`v4`, `glm4_moe`, `glm4_moe_lite`, `glm_moe_dsa`, `dots1`, `solar_open`, `mimo_v2_flash`, `ernie4_5_moe`, `minimax_m2`, `phimoe`, `hunyuan_v1_moe`, `jetmoe`, `dbrx`, `jamba`, `laguna`, `afmoe`, `llama4_text`, `gemma4_text`, `nemotron_h`, `granitemoe`, `granitemoe_swa`, `granitemoeshared`, `granitemoehybrid`, `zaya`, `doge` | `mlp` is a `Moe` (on some blocks); [mixture-of-experts.md](mixture-of-experts.md) |
+| mixture of experts (39) | `mixtral`, `qwen2_moe`, `qwen3_moe`, `qwen3_next`, `qwen3_5_moe_text`, `qwen3_vl_moe_text`, `olmoe`, `flex_olmo`, `gpt_oss`, `deepseek_v2`/`v3`/`v32`/`v4`, `kimi_k2`, `kimi_linear`, `glm4_moe`, `glm4_moe_lite`, `glm_moe_dsa`, `dots1`, `solar_open`, `mimo_v2_flash`, `ernie4_5_moe`, `minimax_m2`, `phimoe`, `hunyuan_v1_moe`, `jetmoe`, `dbrx`, `jamba`, `laguna`, `afmoe`, `llama4_text`, `gemma4_text`, `nemotron_h`, `granitemoe`, `granitemoe_swa`, `granitemoeshared`, `granitemoehybrid`, `zaya`, `doge` | `mlp` is a `Moe` (on some blocks); [mixture-of-experts.md](mixture-of-experts.md) |
 | no MLP module | `opt`, `xglm`, `mamba`, `falcon_mamba`, `mamba2` | no `mlp.*` key in `support()`; OPT/XGLM's `fc2.output` is what the block adds |
 | split-view q/k/v | `gpt2`, `gpt_bigcode`, `mpt` | assign, do not edit in place |
 | logits scaled after the head | softcap: `gemma2`, `gemma3_text` (when set), `gemma4_text`, `gemma4_unified_text`, `vaultgemma`; `cohere`, `cohere2`, `granite` line, `hyperclovax`, `falcon_h1`, `mamba2` / `nemotron_h` (float32), `deepseek_v4` (`hc_head`) | `logits` != `lm_head.output`; `project_on_vocab` applies the step |
 | per-block sizes | `gemma4_text`, `mimo_v2_flash`, `laguna` | read `layers[i].self_attn.*` / `.mlp.intermediate_size` |
+| multimodal rotary (M-RoPE) | `qwen2_vl_text`, `qwen2_5_vl_text`, `qwen3_vl_text`, `qwen3_vl_moe_text` | folded into one `cos`/`sin` before the blocks: `attention_queries` / `_keys` are the rotated ones, as on any rotary family |
+| DeepStack | `qwen3_vl_text`, `qwen3_vl_moe_text` | the text model adds image features at the image positions after blocks 0-2, outside the blocks: `layers[k].deepstack_output`, and `layers[k+1].input != layers[k].layer_output` there |
+| vision tower host | `gemma3_text`, `gemma`, `qwen2`, `cohere2`, `llama`, `mistral`, `ministral3`, `qwen2_vl_text`, `qwen2_5_vl_text`, `qwen3_vl_text`, `qwen3_vl_moe_text`, `qwen3_5_text`, `qwen3_5_moe_text`, `llama4_text`, `gemma4_text`, `gemma4_unified_text` | their image-text-to-text wrappers have `model.vision` and `model.projector` under `task="image-text-to-text"`; which wrappers and towers: [vision.md](vision.md#which-wrappers) |
 
 Not shipped: `zamba`, `zamba2` (a shared transformer's output is added to the
 mixer's input, not the stream, so the standard contributions mean nothing there).
