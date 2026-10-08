@@ -90,14 +90,20 @@ mixture the routing values are `[batch, 1, top_k]` per decode step. See
 ### Images under `generate`
 
 On a vision-language wrapper (`task="image-text-to-text"`,
-`model.generate(prompt, images=[image], ...)`) the tower runs on the prompt call only:
+`model.generate(prompt, images=[image], ...)`) the tower runs once, for the prompt:
 
 | value | prompt call (step 0) | decode step |
 |---|---|---|
 | `vision.image_token_mask` | `[batch, prompt_len]`, the image tokens true | `[batch, 1]`, all false: the new token is text |
 | `vision.image_features`, the tower's values | the prompt call's, once | no occurrence |
 
-Read them under `tracer.iter[0]`, the mask first. An edit placed before any step lands
+Read them under `tracer.iter[0]`. On transformers 5.18 and later `generate` encodes the images before the first forward
+(it hands the model `mm_encoder_outputs`), so there the tower's values come *before*
+`vision.image_token_mask`, which is read off the root's inputs; before 5.18, and on
+Qwen3.5 and Qwen3.5-MoE, whose classes do not list images among their `input_modalities`,
+the mask comes first. `vision.image_features`, at the scatter, is after both either way,
+so the mask and the features read in that order on every version; read the mask and a
+tower value in separate generates. An edit placed before any step lands
 on the prompt call, so the whole generation runs without (or with the edited) image:
 
 <!-- test: setup -->

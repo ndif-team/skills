@@ -192,7 +192,9 @@ processor, so no image reaches the model; load with task='image-text-to-text'`.
 **15. Read `vision.image_token_mask` first and `vision.image_features` after the tower;
 one image-carrying invoke per trace.** The mask comes off the inputs, like `input_ids`;
 `image_features` is read at the scatter, after the tower's values and before
-`layers[0].input`. Two invokes of `model.trace(prompt, images=[...])` raise
+`layers[0].input`. Under `generate` on transformers 5.18 and later the images are encoded
+before the first forward, so the tower's values come before the mask; mask then
+`image_features` holds on every version. Two invokes of `model.trace(prompt, images=[...])` raise
 `NotImplementedError: Can't batch these inputs`. Chat-message inputs that embed the image do
 batch, and then `vision.image_features` is flat over the whole batch's image tokens in each
 invoke, so a write in one invoke reaches every row. Put several images in one invoke, and

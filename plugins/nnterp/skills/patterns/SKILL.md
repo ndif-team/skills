@@ -440,7 +440,8 @@ exact checks.
   `len(tokenizer(clean).input_ids) == len(tokenizer(corrupt).input_ids)`.
 - **Pick layers as depths** (`model.num_layers // 2`), never as constants, and
   attention layers from `attn_blocks`.
-- **On a vision-language model, read `vision.image_token_mask` first** and keep one
+- **On a vision-language model, read `vision.image_token_mask` first** (under `generate` on
+  transformers 5.18 and later, after the tower's values) and keep one
   image-carrying invoke per trace; clean and ablated runs are two traces.
 - **Compare against a baseline in the same trace**: the clean row of a batched trace
   is not bit-equal to the prompt run alone (5e-7 apart on GPT-2), and in bf16 an

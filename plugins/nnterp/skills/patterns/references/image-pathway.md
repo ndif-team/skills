@@ -221,9 +221,12 @@ index one row (`out[0, mask[0]]`).
 
 ## Under generate
 
-The tower runs on the prompt call only. Read the mask and the features under
+The tower runs once, for the prompt. Read the mask and the features under
 `for step in tracer.iter[0]:`, the mask first; on every decode step the mask is `[batch, 1]`, all
-false. An edit before any step lands on the prompt call:
+false. A tower value is another matter: on transformers 5.18 and later `generate` encodes the
+images before the first forward, so the tower's values come before the mask there (and after
+it before 5.18); read the mask and a tower value in separate generates. An edit before any
+step lands on the prompt call:
 
 ```python
 with model.generate(prompt, images=[red], max_new_tokens=3, do_sample=False) as tracer:
@@ -242,7 +245,8 @@ assert not torch.equal(plain_ids, blind_ids)
 
 ## Gotchas
 
-- Read `vision.image_token_mask` first in every trace that uses it, and `image_features`
+- Read `vision.image_token_mask` first in every trace that uses it (under `generate` on
+  transformers 5.18 and later the tower's values precede it), and `image_features`
   after the tower's values and before the text model's; a later read raises
   `OutOfOrderError` in a plain trace.
 - One image-carrying invoke per trace, so clean and ablated runs are separate traces;
