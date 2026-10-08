@@ -54,6 +54,12 @@ layer  4: ' the'      layer 10: ' Paris'
 layer  5: ' the'      layer 11: ' Paris'
 ```
 
+These tokens come from a float32 run, and several are near-ties: layer 9's top two
+logits are 0.14 apart, layer 10's 0.05. Loaded in bfloat16 on a GPU — what NDIF
+serves — layer 9 reads `' Paris'` instead of `' London'`. Track one token's
+probability or rank ([below](#top-k-and-the-probability-trajectory-of-one-token))
+rather than asserting a layer's exact argmax.
+
 The whole sweep is **one forward pass**. Calling `model.lm_head(...)` inside the
 trace runs its `forward` directly — no hooks, no ordering constraint — so you can
 apply the unembedding to a layer-5 activation without re-running anything.

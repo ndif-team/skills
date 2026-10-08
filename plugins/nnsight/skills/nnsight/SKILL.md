@@ -36,6 +36,10 @@ assert model.tokenizer.decode(clean[0, -1].argmax()) == " Paris"
 assert model.tokenizer.decode(edited[0, -1].argmax()) == " London"
 ```
 
+Exact-token asserts like these hold for a float32 model. In bfloat16 an argmax
+whose top two logits nearly tie can flip between batched and solo runs, or between
+GPU and CPU — assert on a logit difference instead when the margin is small.
+
 Install: `pip install nnsight` (needs `torch` and `transformers`).
 
 To choose one device pass `device=` (`device="cpu"`, `device="cuda:1"`). With no

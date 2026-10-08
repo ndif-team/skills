@@ -125,7 +125,7 @@ away. For tensors you genuinely need, `.detach().cpu()` before saving.
 | Your own helpers must be shipped | `nnsight.register(my_module)` (cloudpickle by value), or inline the helper |
 | `print()` is your debugger | It comes back as log lines — far cheaper than saving a tensor to look at it (needs `CONFIG.APP.REMOTE_LOGGING`, on by default) |
 | Variables from outside the block **are** captured | Every name the block reads is pickled into the payload. They must be picklable, they arrive on CPU, and edits stay server-side unless you save them |
-| Match the server's device and dtype at runtime | You cannot know either client-side — read them off an activation: `vec.to(hidden.device, hidden.dtype)` |
+| Match the server's device and dtype at runtime | You cannot know either client-side — read them off an activation: `vec.to(hidden.device, hidden.dtype)`. Not off a module: inside a block on a standard key, `model.device`, `module.device` and every weight report `meta` |
 | `super()` needs its class named | A shipped class is recompiled outside any class body, so bare `super()` raises `super(): __class__ cell not found`. Write `super(MyClass, self).__init__()` |
 
 An outer variable comes back if you save it *inside* the block — the save pushes
@@ -155,6 +155,52 @@ with model.trace(prompt, remote=True):
 
 print(round(float(summary), 5))
 ```
+
+## Numerics on the server
+
+NDIF serves most models in bfloat16 and runs your block inside `torch.autocast` at
+that dtype. Ops autocast keeps in float32 — layer norms, softmax, reductions such as
+`.sum()` — hand you float32 tensors, so a saved `ln_f` output, `mlp.input` or
+`lm_head.input` arrives as float32 where a local bf16 model gives bf16. The values
+agree; only the dtype differs. The arithmetic you write runs under the same
+bracket: a matmul of two float32 tensors you created comes out bf16.
+
+<!-- test: remote -->
+```python
+with model.trace(prompt, remote=True):
+    dtypes = nnsight.save({
+        "block": str(model.transformer.h[5].output.dtype),
+        "ln_f": str(model.transformer.ln_f.output.dtype),
+        "logits": str(model.output.logits.dtype),
+    })
+
+print(dtypes)    # on a bf16 deployment: block bf16, ln_f float32, logits bf16
+```
+
+bf16 has about three significant digits, so a next-token argmax whose top two
+logits nearly tie can flip between a batched and a solo run, or between the server
+and a local float32 model. Compare a logit difference or a top-k margin rather than
+asserting one exact token.
+
+## What a standard key does not run
+
+A standard NDIF key runs your block in a sandbox process beside the model, not in
+the model's own process. Reading and editing activations behaves as it does
+locally. Four things do not:
+
+| Inside the block | What happens |
+|---|---|
+| `with loss.backward():` / `.grad` on an activation | `OutOfOrderError` naming a number rather than a module |
+| `loss.backward()` + an optimizer over a parameter injected into the forward (LoRA, a steering vector) | completes with no error and never trains: the loss repeats and the parameter stays where it started |
+| `module.weight`, `model.device`, `module.device` | `meta` — reading a weight raises `Cannot copy out of meta tensor`, writing one changes nothing |
+| recursive `.source` (`op.source.inner_op`) | `SourceNotAvailable` — read the outer op's `.output` instead |
+
+Gradients through the model, weight access and recursive `.source` need a key
+NDIF has marked trusted. What works on any key is training on activations:
+collect them inside a session, detached, and fit a probe there — its whole graph
+lives in your block.
+[references/sessions-and-jobs.md](references/sessions-and-jobs.md#training-inside-a-session)
+has both forms.
 
 ## Submitting without waiting
 
@@ -210,7 +256,8 @@ Walk these in order; the first two are usually worth orders of magnitude.
 | `.save()` on logits/hidden states followed by a client-side reduction | move the reduction into the trace |
 | Client-scope list appended to inside a trace | build it inside, `nnsight.save()` the container |
 | Optimizer or `nn.Module` built outside a remote session | move both inside the session — a client-side optimizer over a shipped module trains nothing, silently |
-| `.to(model.device)` on an undispatched model | that is `meta`, and `.to("meta")` drops the data with no error — read the device off `module.device` or an activation inside the block |
+| `.to(model.device)` or `.to(module.device)` | both are `meta` — on the client, and inside the block on a standard key — and `.to("meta")` drops the data with no error. Read the device off an activation inside the block (`hidden.device`) |
+| `backward()`, `.grad`, or an optimizer over the model's forward | needs a trusted key (see [What a standard key does not run](#what-a-standard-key-does-not-run)) |
 | Saved CUDA tensor without `.detach().cpu()` | add it |
 | A helper from the user's own file called inside a trace | `nnsight.register(...)` or inline it |
 | Session that could exceed an hour | split into several sessions |
@@ -229,7 +276,10 @@ to apply before they scale up.
 | `RemoteError` on submission | API key, host, model id, `nnsight.compare()` version skew |
 | Works locally, fails remotely | non-whitelisted import, or an unregistered local helper — reproduce with `remote="local"` |
 | Result missing a value | the save wasn't bound to a name, or you saved elements instead of a container |
-| Worker-side exception | re-raised at the client as `RuntimeError` carrying the original traceback |
+| Worker-side exception | re-raised at the client as `RemoteError` (`nnsight.intervention.backends.remote`), whose message is the worker's traceback ending in the original type and message. `except IndexError:` never matches — catch `RemoteError` and read the last line |
+| `OutOfOrderError` naming a number like `'1401…3376.grad.i0'` | gradients on a standard key — see below |
+| `Cannot copy out of meta tensor`, or a weight edit that changes nothing | weights are `meta` on a standard key — see below |
+| Loss repeats bit-identically across optimizer steps | training through the model on a standard key — see below |
 
 `CONFIG.APP.DEBUG = True` adds payload/result byte sizes and per-status logging —
 useful for confirming a transfer really did shrink.

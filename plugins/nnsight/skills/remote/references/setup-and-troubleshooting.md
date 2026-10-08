@@ -111,8 +111,29 @@ print(model.tokenizer.decode(top))
 | Runs locally, errors remotely | version skew, or a non-whitelisted import | `nnsight.compare()` |
 | Result is missing a key | the save wasn't bound to a name | bind it: `x = ....save()` |
 | Saved list is empty | saved the elements instead of the container | `nnsight.save([])` inside the trace |
-| `RuntimeError` with a foreign traceback | a worker-side exception re-raised at the client | read the embedded original traceback |
+| `RemoteError` carrying a worker traceback | an exception your block raised on the server | the message's last line is the original type and message |
+| `OutOfOrderError` on `'<number>.grad.i0'`, or a loss that never moves | gradients through the model on a standard key | needs a trusted key; train on activations instead (`sessions-and-jobs.md`) |
+| `Cannot copy out of meta tensor`, or a weight edit with no effect | weights and module devices are `meta` on a standard key | take the device off an activation; weight access needs a trusted key |
 | Job killed around an hour in | the per-request wall-clock limit | chunk into several sessions |
+
+A worker-side exception does not keep its class across the network. Whatever the
+block raised — `IndexError`, `ValueError`, `OutOfOrderError` — reaches you as
+`RemoteError`, so `except IndexError:` around a remote trace never fires. Catch
+`RemoteError` and read the original off the end of its message:
+
+<!-- test: remote -->
+```python
+from nnsight.intervention.backends.remote import RemoteError
+
+try:
+    with model.trace("The Eiffel Tower is in the city of", remote=True):
+        past_the_end = model.transformer.h[5].output[0, 99].save()   # 10 tokens
+except RemoteError as error:
+    original = str(error).strip().splitlines()[-1]
+
+print(original)      # IndexError: index 99 is out of bounds for dimension 1 with size 10
+assert original.startswith("IndexError")
+```
 
 ## Watching what a job actually does
 

@@ -215,8 +215,12 @@ nnsight's interleaved backward means an adapter inserted at any layer trains wit
 ordinary torch. The model's parameters never move; only the adapter's do.
 
 **Training against a *remote* model? This recipe does not work — see the
-`remote` skill and `nnsight/docs/patterns/remote-training.md`.** Both of the
-ways it fails are silent:
+`remote` skill and `nnsight/docs/patterns/remote-training.md`.** On NDIF,
+training through the model needs a key NDIF has marked trusted: on a standard key
+the gradient never reaches the adapter, and the loop runs to COMPLETED with a loss
+that repeats bit-identically. Weight edits are the same — weights are `meta` inside
+a standard-key block, so a write changes nothing. With a trusted key, two more ways
+it fails, both silent:
 
 - The adapter and the optimizer must be built **inside** `model.session(remote=True)`.
   A client-side optimizer over a shipped module is a no-op: `backward()` fills
@@ -224,8 +228,9 @@ ways it fails are silent:
   identical forward. No error — the tell is a loss that repeats bit-identically.
 - `.to(model.device)` is wrong on an undispatched model: `model.device` is `meta`,
   and `.to("meta")` **discards the tensor data**. It pickles fine, the job returns
-  COMPLETED, and the adapter contributes nothing. Read the device off `module.device`
-  *inside* the block, or off a live activation.
+  COMPLETED, and the adapter contributes nothing. Read the device off a live
+  activation inside the block — on a standard key `module.device` is `meta` there
+  too.
 
 Print a parameter norm next to the loss. If `|W|` never moves, one of the two above
 is happening.
@@ -421,4 +426,4 @@ broken specificity is a bug you have installed on purpose.
 - `nnsight` — `edit`, attaching modules, gradients
 - `model-steering` — inference-time behavior change without touching weights
 - `debugging` — the in-place/autograd error above and others
-- `remote` — training against NDIF, where this skill's recipe silently no-ops
+- `remote` — training against NDIF, which needs a trusted key; this skill's recipe silently no-ops there

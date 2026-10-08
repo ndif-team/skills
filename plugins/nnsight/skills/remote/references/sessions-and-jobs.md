@@ -143,26 +143,70 @@ print([round(s, 2) for s in scores])
 ## Training inside a session
 
 The optimizer loop goes in the session too, so a 500-step run is one job rather
-than 500. Parameters have to be created on the module's device — `torch.randn`
-gives CPU float32 even when the code is running next to the weights — and only
-plain tensors can come back, so hand back the trained weights rather than the
-adapter that holds them.
+than 500. Which loops can run depends on the key:
+
+- **Training on activations works on any key.** Collect the activations inside the
+  session, detached, and fit a probe there; the probe's whole graph lives in your
+  block.
+- **Training through the model needs a trusted key.** A gradient that has to flow
+  back through the model's forward — a LoRA adapter, a steering vector, anything
+  injected into a layer and optimized against the output — does not reach your
+  parameter on a standard key: the job completes, the loss repeats bit-identically,
+  and the parameter never moves. `.grad` on an activation raises `OutOfOrderError`.
+
+A probe, on any key:
+
+<!-- test: remote -->
+```python
+labels = [1.0, 0.0, 1.0, 0.0]
+
+with model.session(remote=True):
+    rows = []
+    for text in ["a great film", "utter garbage", "i loved it", "awful, just awful"]:
+        with model.trace(text):
+            hidden = model.transformer.h[6].output[0, -1].detach().float()
+        rows.append(hidden)
+
+    features = torch.stack(rows)
+    target = torch.tensor(labels, device=features.device)
+    probe_w = torch.zeros(768, device=features.device, requires_grad=True)
+    optimizer = torch.optim.SGD([probe_w], lr=1e-3)
+
+    for _ in range(20):
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(features @ probe_w, target)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+    final_loss = nnsight.save(loss.item())
+    trained_probe = probe_w.detach().cpu().save()
+
+print(round(final_loss, 3), trained_probe.shape)
+```
+
+A LoRA adapter, on a trusted key. Parameters have to be created on the device the
+activations live on — `torch.randn` gives CPU float32 even when the code is running
+next to the weights, and modules report `meta`, so take the device off an
+activation — and only plain tensors can come back, so hand back the trained weights
+rather than the adapter that holds them.
 
 <!-- test: remote -->
 ```python
 module = model.transformer.h[-1].mlp
 
 with model.session(remote=True):
+    with model.trace(prompt):
+        device = module.output.device
+
     # Defined inside the block, so the class travels as source. Defined outside,
     # it is pickled by reference and the server has to be able to import its
     # module (see `nnsight.register`).
     class LoRA(torch.nn.Module):
-        def __init__(self, module, dim, rank):
+        def __init__(self, module, dim, rank, device):
             # Named, not bare: a shipped class is recompiled outside any class
             # body, so `super()` has no __class__ cell to read.
             super(LoRA, self).__init__()
             self.module = module
-            device = module.device
             self.WA = torch.nn.Parameter(torch.randn(dim, rank).to(device))
             self.WB = torch.nn.Parameter(torch.zeros(rank, dim).to(device))
 
@@ -174,7 +218,7 @@ with model.session(remote=True):
         def parameters(self):
             return [self.WA, self.WB]
 
-    adapter = LoRA(module, 768, 4)
+    adapter = LoRA(module, 768, 4, device)
     optimizer = torch.optim.AdamW(adapter.parameters(), lr=1e-3)
 
     for _ in range(3):

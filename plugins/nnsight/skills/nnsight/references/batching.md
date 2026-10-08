@@ -213,6 +213,10 @@ assert tuple(solo.shape) == (1, 1, 768)
 assert torch.allclose(short[0, -1], solo[0, -1], atol=1e-3)   # numerics are fine
 ```
 
+That tolerance holds in float32. In bfloat16 — what NDIF serves — padded and solo
+logits differ by up to a bf16 rounding step, enough to flip an argmax whose top two
+logits nearly tie. Compare margins, not single tokens, across batch shapes.
+
 So `[:, -1]` is stable and any absolute index is not: `output[:, 0]` is the first
 real token alone and a pad token here, and `output[:, SUBJECT]` only lands on the
 subject when every prompt in the batch has the same length. Compute the offset from

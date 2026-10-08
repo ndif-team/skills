@@ -139,9 +139,13 @@ except RuntimeError as error:
 
 ## Remote
 
-`RemoteError` on a failed submission or a server-side `ERROR` status. A worker-side
-error from a driver such as vLLM is re-raised at the client as a `RuntimeError`
-carrying the original type, message, and traceback.
+`RemoteError` on a failed submission, a server-side `ERROR` status, or any
+exception your block raises on NDIF. The class does not cross the network, so
+`except IndexError:` around a remote trace never matches: catch `RemoteError`
+(`nnsight.intervention.backends.remote`) and read the original type and message
+off the last line of its message. A worker-side error from a driver such as vLLM
+is re-raised at the client as a `RuntimeError` carrying the original type,
+message, and traceback.
 
 Common remote-only causes: a helper function from your own file that wasn't
 registered (`nnsight.register(...)`), an import that isn't on NDIF's whitelist, a
