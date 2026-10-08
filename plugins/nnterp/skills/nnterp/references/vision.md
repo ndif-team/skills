@@ -236,7 +236,8 @@ assert not torch.equal(edited, vlogits)
   16 x 4096 x 4096 pattern for autograd unless it runs under `torch.no_grad()`.
 
 Read order is the forward's: `vision.image_token_mask` first (it comes off the inputs, like
-`input_ids`), then `vision.patch_embeddings`, the tower's blocks (a block's attention
+`input_ids`; under `generate` on transformers 5.18 and later it comes after the tower,
+[below](#under-generate)), then `vision.patch_embeddings`, the tower's blocks (a block's attention
 interior before its `layer_output`), `vision.tower_output`, `projector`, then
 `vision.image_features`, then the text model's values. A late read raises
 `OutOfOrderError`.
@@ -252,10 +253,16 @@ with vlm.trace() as tracer:
 
 ## Under `generate`
 
-The tower runs on the prompt call only. `vision.image_token_mask` is `[batch, prompt_len]`
+The tower runs once, for the prompt. `vision.image_token_mask` is `[batch, prompt_len]`
 on step 0 and `[batch, 1]`, all false, on every decode step; `image_features` and the
-tower's values have one occurrence, step 0's, so read them under `tracer.iter[0]` (the mask
-first). An edit before any step lands on the prompt call. The per-step table is in
+tower's values have one occurrence, step 0's, so read them under `tracer.iter[0]`.
+On transformers 5.18 and later `generate` encodes the images before the first forward
+(it hands the model `mm_encoder_outputs`), so there the tower's values come *before*
+`vision.image_token_mask`, which is read off the root's inputs; before 5.18, and on
+Qwen3.5 and Qwen3.5-MoE, whose classes do not list images among their `input_modalities`,
+the mask comes first. `vision.image_features`, at the scatter, is after both either way,
+so the mask and the features read in that order on every version; read the mask and a
+tower value in separate generates. An edit before any step lands on the prompt call. The per-step table is in
 [generation-and-helpers.md](generation-and-helpers.md#images-under-generate).
 
 ```python
