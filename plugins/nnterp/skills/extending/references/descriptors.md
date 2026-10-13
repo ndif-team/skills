@@ -120,8 +120,8 @@ output last_position ('batch', 'hidden')
 
 - **`layout` and `dims`** are read off the stub's return annotation, and `layout` is
   that annotation itself. Every shipped value is annotated with a named `jaxtyping`
-  alias defined beside the envoy that serves it: 28 exported by `nnterp.components`
-  (`Residual`, `Streams`, `Queries`, `Keys`, `Values`, `Pattern`, `HeadOutputs`,
+  alias defined beside the envoy that serves it, in `nnterp.components`
+  (`Residual`, `FlatResidual`, `Streams`, `Queries`, `Keys`, `Values`, `Pattern`, `HeadOutputs`, `Neurons`,
   `RouterLogits`, `ExpertWeights`, `ExpertIndices`, `ExpertOutputs`, `State`, `States`,
   `Gates`, the `LinearQK`/`Scan*`/`SSD*` recurrent-mixer families, ...) plus `Logits`,
   `NextTokenProbs`, `Tokens` in `nnterp.standardized`. So
@@ -459,6 +459,10 @@ print("mid_stream" in model.support(), "self_attn.next_norm" in model.support(la
 ../post_attention_layernorm.output
 True True
 ```
+
+`mid_stream` is the shipped `layer_mid` under another name: the base `Layer` keys
+`layer_mid`, `attention_norm_output` and `mlp_norm_output` on the norm aliases from the
+block, below the host, which is why they take aliases.
 
 The alias after `../` is joined into the location string as written,
 `model.transformer.h.0.post_attention_layernorm.output`, which the model never serves

@@ -24,6 +24,11 @@ selection bias and a routed scaling factor are per-family config. Children:
 `router` (alias of `gate`), `experts`, `shared_experts` (alias of `shared_expert` /
 `shared_mlp`).
 
+A mixture has no single activation or down projection, so a `Moe`'s `mlp_activation`
+and `mlp_neurons` are unavailable with `routed experts; read per-expert via the Moe
+component`; a dense block beside the mixtures serves both. The block's `mlp_input` is
+the mixture's input, as on a dense block.
+
 Every value is a `TokenEProperty`: the model routes tensors flat over tokens,
 `[batch * seq, ...]`, and each invoke is served its own `[batch, seq, ...]` rows
 as a view, so in-place edits land on that invoke only.

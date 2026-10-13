@@ -38,8 +38,8 @@ assert torch.equal(lens[model.num_layers - 1], logits[:, -1])
 ```
 
 `project_on_vocab` *calls* `model.norm` and `model.lm_head` on your tensor; reading
-`model.lm_head.output` is the model's own projection of the normed final stream, a
-different thing. The last-block equality holds on every family because
+`model.lm_head_output` (`lm_head.output`) is the model's own projection of
+`final_norm_output`, the normed final stream, a different thing. The last-block equality holds on every family because
 `project_on_vocab` is the family's whole head: the softcap (Gemma-2/4), `logit_scale`
 (Cohere), `/ logits_scaling` (Granite), DeepSeek-V4's `hc_head` before the norm.
 
@@ -105,7 +105,7 @@ assert [model.tokenizer.decode(i) for i in by_id.indices] == list(top[0])
 
 ### Softcapping
 
-`model.logits` is the model's output; `model.lm_head.output` is the raw projection.
+`model.logits` is the model's output; `model.lm_head_output` is the raw projection.
 On Gemma-2 they differ, because the forward applies `cap * tanh(logits / cap)` after
 `lm_head` (`config.final_logit_softcapping`, `30.0` on `google/gemma-2-2b`).
 `project_on_vocab` reads that key and applies the cap, so the wiring check passes
@@ -226,26 +226,21 @@ not a sum of anything: `project_on_vocab` applies the cap, the linear form does 
 
 ### Per head
 
-`attention_head_outputs` is each head's output before concatenation and the output
-projection, `[batch, seq, heads, head_dim]`. The projection is linear, so head `h`'s
+`attention_premix` is what the output projection receives, split by head,
+`[batch, seq, heads, head_dim]`: each head's output after any gate, read at the
+projection under any `attn_implementation`. The projection is linear, so head `h`'s
 share of `attention_output` is its slice times the projection weight's matching
-rows. The projection keeps its native name (`o_proj`, `c_proj`, `dense`, `out_proj` on GPT-Neo
-and CodeGen) and its weight layout differs: `torch.nn.Linear` stores `[out, in]`,
+rows. The projection is `self_attn.o_proj` on every family (aliased from `c_proj`,
+`dense`, `out_proj`); its weight layout differs: `torch.nn.Linear` stores `[out, in]`,
 GPT-2's `Conv1D` stores `[in, out]`.
 
 ```python
 LAYER = model.num_layers // 2
 attention = model.layers[LAYER].self_attn
-
-projection = None                                   # `or` over envoys truth-tests the module's __len__: TypeError
-for name in ("o_proj", "c_proj", "dense", "out_proj"):
-    candidate = getattr(attention, name, None)
-    if candidate is not None:
-        projection = candidate
-        break
+projection = attention.o_proj                                # GPT-2's attn.c_proj, Llama's o_proj
 
 with model.trace(prompt):
-    heads = attention.attention_head_outputs.save()          # [batch, seq, heads, head_dim]
+    heads = attention.attention_premix.save()                # [batch, seq, heads, head_dim]
     contribution = attention.attention_output.save()         # [batch, seq, hidden]
 
 W = projection._module.weight
@@ -260,14 +255,16 @@ print([round(float(x), 2) for x in head_dla[:, paris]])
 ```
 
 The same numbers come from the model: zero every head but `h` in
-`attention_head_outputs` and read `attention_output`; that equals
+`attention_premix` and read `attention_output`; that equals
 `per_head[..., h, :]` plus the bias. Under grouped-query attention the head axis is
 still `num_heads` (query heads), so the slicing is unchanged; on SmolLM2
 `o_proj` is a `Linear [576, 576]` and the check passes exactly. The heads sum to
 `attention_output` only where that is the projection's output: on the Granite line
-multiply by `residual_multiplier` (0.22-0.28), on post-norm families (Gemma-2/3/4,
+multiply by `residual_multiplier` (0.22-0.28), and on post-norm families (Gemma-2/3/4,
 OLMo-2/3, EXAONE-4, FlexOlmo, GLM-4, AFMoE) the sum is the *pre-norm* projection
-output, and on Laguna an output gate follows the heads.
+output. On a gated attention (Laguna, AFMoE) `attention_premix` is after the gate, so
+its per-head shares still sum to the projection's output; `attention_head_outputs` is
+before it and does not.
 
 ### Caveats
 
@@ -290,5 +287,5 @@ output, and on Laguna an output gate follows the heads.
   Two comprehensions, one over all attentions then one over all MLPs, raise
   `OutOfOrderError`. `token_embeddings` before `layers[0].input`.
 - **Three different heads.** `model.lm_head(x)` is a stood-down call on your tensor;
-  `model.lm_head.output` is the model's projection of the normed stream;
+  `model.lm_head_output` is the model's projection of the normed stream;
   `model.logits` adds the softcap.

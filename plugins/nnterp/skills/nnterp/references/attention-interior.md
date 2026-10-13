@@ -58,12 +58,12 @@ ran past it`), not the value.
 
 | value | what it is | layout (`nnterp.components`) |
 |---|---|---|
-| `attention_queries` | the queries entering the interface, after the query projection and, where the family has one, after RoPE | `Queries`: `batch heads seq qk_head_dim` |
-| `attention_keys` | the keys entering the interface, after RoPE and before `repeat_kv`: `num_kv_heads` wide under grouped-query attention | `Keys`: `batch kv_heads seq qk_head_dim` |
-| `attention_values` | the values entering the interface, before `repeat_kv` | `Values`: `batch kv_heads seq head_dim` |
-| `attention_scores` | the scaled, masked scores that enter the softmax | `Pattern`: `batch heads query key` |
+| `attention_queries` | the queries entering the interface, after the query projection and, where the family has one, after RoPE | `Queries`: `batch num_heads seq qk_head_dim` |
+| `attention_keys` | the keys entering the interface, after RoPE and before `repeat_kv`: `num_kv_heads` wide under grouped-query attention | `Keys`: `batch num_kv_heads seq qk_head_dim` |
+| `attention_values` | the values entering the interface, before `repeat_kv` | `Values`: `batch num_kv_heads seq head_dim` |
+| `attention_scores` | the scaled, masked scores that enter the softmax | `Pattern`: `batch num_heads query key` |
 | `attention_probabilities` | the pattern the values are mixed with: the dropout's output after the softmax, in the model dtype, a sink column already dropped | `Pattern` |
-| `attention_head_outputs` | what the interface returns: each head's mix of the values, before the reshape to `[batch, seq, hidden]` and the output projection | `HeadOutputs`: `batch seq heads head_dim` |
+| `attention_head_outputs` | what the interface returns: each head's mix of the values, before the reshape to `[batch, seq, hidden]` and the output projection | `HeadOutputs`: `batch seq num_heads head_dim` |
 
 The pattern is read after the dropout, not at the softmax, because that is the
 tensor the values are multiplied with on every family: cast back to the model
@@ -71,6 +71,40 @@ dtype, and on a sink model without the sink column. The sequence axis is 2 on
 the queries, keys and values (transformers' layout for its interface) and 1 on
 the head outputs. Sizes come off the root: `model.num_heads`,
 `model.num_kv_heads`, `model.head_dim`, `model.qk_head_dim`.
+
+## `attention_premix`: the heads at the output projection
+
+`self_attn.attention_premix` is what the output projection `o_proj` receives,
+`[batch, seq, num_heads, head_dim]` (`HeadOutputs`), split by head as a view of the
+projection's flat input. It is a module boundary, not an operation inside the eager
+forward, so it is served under any `attn_implementation`; on a plain attention it is the
+same numbers as `attention_head_outputs`, and on one with a gate or a norm between the
+heads and the projection (AFMoE, Laguna, BitNet, Qwen3-Next) it is what comes after
+them. `o_proj` is a standard child name: a family that spells it `c_proj`, `dense`,
+`out_proj` or `proj` aliases it, so `layers[i].self_attn.o_proj` is the module on every
+family. In-place edits reach the model; assignment flattens the heads back.
+
+```python
+fast = StandardizedTransformer("openai-community/gpt2", device="cpu", dispatch=True)     # sdpa, transformers' default
+assert fast.support(layer=5)["self_attn.attention_head_outputs"] is not None           # inside the eager forward
+assert fast.layers[5].self_attn.o_proj.path.endswith("h.5.attn.c_proj")
+
+with model.trace(prompt):
+    eager_heads = attn.attention_head_outputs.save()
+    premix = attn.attention_premix.save()
+
+with fast.trace(prompt):
+    fast_premix = fast.layers[5].self_attn.attention_premix.clone().save()   # clone: the next line edits it in place
+    fast.layers[5].self_attn.attention_premix[:, :, 7] = 0    # head 7 never reaches o_proj, under sdpa
+    fast_ablated = fast.logits.save()
+
+assert torch.equal(premix, eager_heads)                       # eager: the head outputs, at the projection
+torch.testing.assert_close(fast_premix, eager_heads)          # sdpa computes the same heads, to float rounding
+torch.testing.assert_close(fast_ablated, ablated, rtol=1e-4, atol=1e-4)    # the eager head-7 ablation above
+```
+
+Use `attention_premix` for head ablation, head patching and per-head attribution
+wherever the pattern itself is not needed; it needs no eager load.
 
 ## Requirement: eager attention
 

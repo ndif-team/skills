@@ -126,8 +126,9 @@ ENVOYS = {
 ```
 
 `gpt2.py` shows the rest of the template in use: block-level single-component aliases,
-container keys anchored at the root, a config flag that takes the attention off the
-shared interface, and a size the config spells its own way:
+container keys anchored at the root, dotted aliases for the two projections both spelled
+`c_proj`, a config flag that takes the attention off the shared interface, and a size the
+config spells its own way:
 
 <!-- test: skip -->
 ```python
@@ -160,6 +161,10 @@ RENAME = {
     "ln_1": "input_layernorm",
     "attn": "self_attn",
     "ln_2": "post_attention_layernorm",
+    # The sublayers' interiors: the output projection, the activation and the down projection under their standard names.
+    "attn.c_proj": "attn.o_proj",
+    "mlp.c_proj": "mlp.down_proj",
+    "act": "act_fn",
 }
 
 
@@ -215,6 +220,11 @@ nnsight resolves every key relative to every envoy in the tree (the `nnsight` sk
   OPT keeps its block-level `final_layer_norm` native: a single-component alias for it
   would also bind on the decoder's final norm.
 - A value may be a list (`"mlp": ["mlp", "ffn"]`) to bind several aliases.
+- A key and value may both be dotted paths from one envoy (`"attn.c_proj": "attn.o_proj"`):
+  the alias binds on the named child only. GPT-2 spells the attention's output projection
+  and the MLP's down projection both `c_proj`, so a bare `"c_proj"` key cannot tell them
+  apart; `"attn.c_proj": "attn.o_proj"` and `"mlp.c_proj": "mlp.down_proj"` can. Dotted
+  aliases need nnsight `dev` at d565f5f8 or later.
 - A key may be a module **class**: nnsight binds it on every envoy with exactly one
   direct child of that class, for a native name whose meaning depends on the block.
   Nemotron-H's one `mixer` per block is keyed by class:
@@ -259,11 +269,22 @@ except ValueError as error:
 `rename` key LayerNorm matches 2 children of `model.transformer.h.0` (ln_1, ln_2); a class key binds only where one child is of that class. Key those by name.
 ```
 
-The standard names are `embed_tokens`, `layers`, `norm`, `lm_head`, and on blocks
-`self_attn`, `mlp`, `input_layernorm`, `post_attention_layernorm`, `linear_attn`. Bind
-the norms only where the family has a module in that position; their meaning varies,
-and the suite checks the sublayer inputs against the family's own norm
-(`ATTENTION_NORM`, `MLP_NORM` below), not the alias.
+The standard names are `embed_tokens`, `layers`, `norm`, `lm_head`; on blocks
+`self_attn`, `mlp`, `input_layernorm`, `post_attention_layernorm`, `linear_attn`; inside
+the sublayers `o_proj` (the attention's output projection), `act_fn` (the MLP's
+activation) and `down_proj` (the MLP's down projection). The block values
+`attention_norm_output`, `layer_mid` and `mlp_norm_output` are keyed on the two norm
+aliases, `mlp_input` on `mlp`, `attention_premix` on `o_proj`, `mlp_activation` on
+`act_fn` and `mlp_neurons` on `down_proj`, so a family whose modules spell these
+otherwise aliases its spelling (`c_proj` / `dense` / `out_proj` / `proj`; `act` /
+`activation_fn` / `activation` / `gelu_impl`; `c_proj` / `dense_4h_to_h` / `fc2` /
+`linear_fc2` / `fc_out` / `output_linear`), and a family that aliases none reports
+`no o_proj module on this attention` (and the like) through `support()`. Bind the norms
+only where the family has a module in that position. On a block that is not the pre-norm
+one the `Layer` subclass points the boundary values at its own modules (Gemma-2 above,
+Falcon below) or marks them unavailable with a shared reason from `nnterp.components`
+(`PARALLEL`, `POST_NORM_ATTENTION`, `POST_NORM_MLP`); the suite checks the sublayer
+inputs against the family's own norm (`ATTENTION_NORM`, `MLP_NORM` below), not the alias.
 
 ### The `ENVOYS` rules
 
@@ -348,7 +369,19 @@ RENAME = {
 
 
 class Layer(Layer):
-    """Gemma-2's decoder block; returns a bare tensor, so the base holds."""
+    """Gemma-2's decoder block; returns a bare tensor, so the base holds.
+
+    A sandwich block: ``post_attention_layernorm`` follows the attention, so ``layer_mid`` and
+    ``mlp_norm_output`` read ``pre_feedforward_layernorm``, the MLP's pre-norm.
+    """
+
+    @EProperty("pre_feedforward_layernorm.input", description="The residual stream after the attention add")
+    def layer_mid(self, value) -> Residual:
+        return value
+
+    @EProperty("pre_feedforward_layernorm.output", description="The normed stream entering the MLP")
+    def mlp_norm_output(self, value) -> Residual:
+        return value
 
 
 class Attention(Attention):
@@ -423,6 +456,10 @@ RENAME = {
     "transformer.h": "layers",
     "transformer.ln_f": "norm",
     "self_attention": "self_attn",
+    # The sublayers' interiors: the output projection, the activation and the down projection under their standard names.
+    "dense": "o_proj",
+    "gelu_impl": "act_fn",
+    "dense_4h_to_h": "down_proj",
 }
 
 
@@ -438,7 +475,7 @@ class Attention(Attention):
     # ``_reshape`` splits the fused projection into ``(query, key, value)``,
     # heads first (the keys are transposed for the score matmul only later);
     # the scores are the softmax's input after the mask; the head outputs are
-    # the ``bmm`` result, ``[batch * heads, seq, head_dim]``.
+    # the ``bmm`` result, ``[batch * num_heads, seq, head_dim]``.
 
     @EProperty("source.self__reshape_0.output", select=0, description=Attention.attention_queries.description)
     def attention_queries(self, value) -> Queries:
@@ -540,7 +577,9 @@ operation by that flag. Without alibi the queries and keys leave
 dropout after it; with alibi there is no rotary, the pattern is the dropout
 after the second softmax, and the head outputs are flattened over batch and
 heads. The 40B layout (``ln_attn`` / ``ln_mlp``, ``new_decoder_architecture``)
-runs the same forward with its key/value heads already broadcast.
+runs the same forward with its key/value heads already broadcast. falcon-11B has
+the 40B layout with ``num_ln_in_parallel_attn`` 1: one ``input_layernorm`` feeds both
+sublayers, and 8 key/value heads serve its 32 query heads.
 """
 
 from typing import TYPE_CHECKING
@@ -548,8 +587,7 @@ from typing import TYPE_CHECKING
 from transformers.models.falcon.modeling_falcon import FalconAttention, FalconDecoderLayer, FalconMLP
 
 from ..components import (
-    Attention, EProperty, HeadOutputs, Keys, Layer, Mlp, Pattern, Queries, Residual, Values,
-    first_tensor, needs_eager, rewrap, seq_first,
+    Attention, EProperty, HeadOutputs, Keys, Layer, Mlp, PARALLEL, Pattern, Queries, Residual, Values, first_tensor, needs_eager, rewrap, seq_first, unavailable,
 )
 
 if TYPE_CHECKING:
@@ -560,11 +598,35 @@ RENAME = {
     "transformer.h": "layers",
     "transformer.ln_f": "norm",
     "self_attention": "self_attn",
+    # The sublayers' interiors: the output projection, the activation and the down projection under their standard names.
+    "dense": "o_proj",
+    "act": "act_fn",
+    "dense_4h_to_h": "down_proj",
 }
 
 
 class Layer(Layer):
-    """Falcon's parallel block; returns a tuple, which the base unwraps."""
+    """Falcon's parallel block; returns a tuple, which the base unwraps.
+
+    A parallel block: there is no stream between the sublayers, and the MLP reads the same normed input
+    as the attention (the 40B layout norms the block input twice, ``ln_attn`` and ``ln_mlp``).
+    """
+
+    layer_mid = unavailable(PARALLEL)
+
+    @EProperty(
+        lambda block: "ln_attn.output" if block.root.config.new_decoder_architecture else "input_layernorm.output",
+        description="The normed stream entering the attention",
+    )
+    def attention_norm_output(self, value) -> Residual:
+        return value
+
+    @EProperty(
+        lambda block: "ln_mlp.output" if block.root.config.new_decoder_architecture else "input_layernorm.output",
+        description="The normed stream entering the MLP: the one norm feeds both sublayers, its own on the 40B layout",
+    )
+    def mlp_norm_output(self, value) -> Residual:
+        return value
 
     returns_tuple = True
 
@@ -629,7 +691,7 @@ class Attention(Attention):
 
     @EProperty(by_alibi("attn_output_1", "flatten_0"), description=Attention.attention_head_outputs.description, unavailable=needs_eager)
     def attention_head_outputs(self, value) -> HeadOutputs:
-        if alibi(self):  # [batch * heads, seq, head_dim] -> a [batch, seq, heads, head_dim] view
+        if alibi(self):  # [batch * num_heads, seq, head_dim] -> a [batch, seq, num_heads, head_dim] view
             heads = self._module.num_heads
             return value.view(-1, heads, *value.shape[1:]).transpose(1, 2)
         return seq_first(value)
@@ -877,6 +939,10 @@ RENAME = {
     "post_layernorm": "norm",
     "layer_norm1": "input_layernorm",
     "layer_norm2": "post_attention_layernorm",
+    # The sublayers' interiors: the output projection, the activation and the down projection under their standard names.
+    "out_proj": "o_proj",
+    "activation_fn": "act_fn",
+    "fc2": "down_proj",
 }
 
 #: Module type -> Envoy subclass, for nnsight's ``envoys=``.
@@ -907,6 +973,10 @@ RENAME = {
     "encoder.layers": "layers",
     "layer_norm1": "input_layernorm",
     "layer_norm2": "post_attention_layernorm",
+    # The sublayers' interiors: the output projection, the activation and the down projection under their standard names.
+    "out_proj": "o_proj",
+    "activation_fn": "act_fn",
+    "fc2": "down_proj",
 }
 
 
@@ -1303,6 +1373,9 @@ not have (`ln2=None` on a parallel block, `mlp=None` on OPT). `LLAMA_ROWS` is
 | `MLP_NORM_BEFORE_ATTENTION` | The MLP's norm runs before the attention does (Falcon's 40B layout norms both inputs up front). |
 | `MOE_UNAVAILABLE` | Mixture value to a substring of the reason, for values this checkpoint's mixture lacks (no entry needed for `shared_expert_output` without a shared expert). |
 | `ROUTER_EXTRA_CLASSES` | Router columns beyond the experts (ZAYA's skip class). |
+| `MID_IDENTITY` | `layer_mid == layer_input + the mixers' contributions`; `False` where a gate scales what the block adds (Doge, ZAYA). Default `True`. |
+| `PREMIX_IS_HEAD_OUTPUTS` | `attention_premix` equals `attention_head_outputs`; `False` where a gate or a norm sits between the heads and the output projection (AFMoE, Laguna, BitNet). Default `True`. |
+| `NEURONS_FROM_ACTIVATION` | `mlp_neurons` is `mlp_activation * up_proj.output` on a gated MLP and `mlp_activation` on a plain one; `False` where something sits between (Arcee's relu², BitNet's sub-norm). Default `True`. |
 
 `pattern_from_scores(self, model, scores)` is the one method a subclass may override:
 what the softmax makes of `attention_scores`; a sink family appends its column.
@@ -1314,6 +1387,8 @@ what the softmax makes of `attention_scores`; a sink family appends its column.
 | Names | `model.family is FAMILY`; every `NATIVE` row resolves to the same envoy; nothing is bound at `model.model`; every `layers.0.*` name exists on every block; every block, attention and MLP is exactly the family's class and a subclass of the component base; a trace through the standard names gives `hidden_size` / `vocab_size` widths. |
 | Availability | `support()` keys equal the standard value set (plus `linear_attn.*` on a hybrid, minus `mlp.*` where no block has an MLP); every `EXPECTED_UNAVAILABLE` key reports the substring and every other key `None`; on block 0 an available value is an `EProperty` on its class, a missing module says `no ... module`, an unavailable value raises `Unavailable` with the reason. |
 | Boundary values | `layer_output` equals `.output` (or its first element); `attention_output`, `mlp_output`, `layer_output` read `hidden_size`-wide tensors on every block; `input + attention_output + mlp_output == layer_output` on every block at 8 ulp; `self_attn.input` and `mlp.input` equal `ATTENTION_NORM`'s and `MLP_NORM`'s outputs (or the block input); block 0 and `lm_head.output` equal the raw `TransformersModel`; assigning each contribution times zero, and zeroing `layer_output[:]`, moves the logits. |
+| Module boundaries (`test_module_boundaries`) | on block 0, each served `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input` equals the raw boundary it names; `layer_mid == layer_input + attention_output` (every mixer's on a hybrid) at 8 ulp of the block's dtype unless `MID_IDENTITY` is off; the norm outputs equal what the sublayers are called with where `ATTENTION_NORM` / `MLP_NORM` are the standard norms; `final_norm_output` and `lm_head_output` equal `norm.output` and `lm_head.output`; a write to each moves the logits. |
+| Sublayer interiors (`test_sublayer_interiors`) | `attention_premix` is `[..., num_heads, head_dim]` and equals `attention_head_outputs` unless `PREMIX_IS_HEAD_OUTPUTS` is off; `mlp_activation` and `mlp_neurons` are `intermediate_size` wide, the neurons `act * up_proj.output` on a gated MLP and the activation on a plain one unless `NEURONS_FROM_ACTIVATION` is off; zeroing each moves the logits. |
 | The pattern | shape `[batch, num_heads, seq, seq]`, `lm_head.weight`'s dtype, rows sum to one (or lie in `(0, 1)` with `ATTENTION_SINK`), lower-triangular; first and last blocks differ and two traces agree; a random pattern and a zeroed head both move the logits (a read can be causally inert); every available value on `FAMILY.Attention` whose key reads inside the forward (`inside_forward()`) reads a tensor on every attention block, one trace per value. |
 | The interior | q `[b, heads, s, qk_head_dim]`, k/v `[b, kv_heads, s, ·]`, scores and pattern `[b, heads, s, s]`, head outputs `[b, s, heads, ·]`, `pattern_from_scores(scores) == pattern`; zeroing each of the five interior values moves the logits and zeroed head outputs give a position-independent contribution; in-place zeroing of scores and head outputs moves the logits, queries too unless `REFUSES_IN_PLACE_QKV`. |
 | Methods | `skip_layers(1, last)` hands block 0's output straight through and the logits equal `project_on_vocab` of it; `skip_with=zeros` zeroes block 0's output and block 1's input; `steer` moves the last position by `2 * vector` and nothing else; `project_on_vocab` on the last block equals `logits`, `get_topk_closest_tokens(k=3)` returns one dict of three entries summing to at most one. |
