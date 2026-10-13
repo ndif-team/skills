@@ -1,6 +1,6 @@
 ---
 name: nnterp
-description: Write interpretability code once against nnterp's StandardizedTransformer and run it on its 98 transformer families (GPT-2, Llama, Qwen, Gemma, OLMo, Granite, DeepSeek, Kimi, DeltaNet and Mamba hybrids, 39 MoE families) and on vision-language models loaded with task="image-text-to-text" (model.vision, the tower blocks vision.layers[i], model.projector, vision.image_token_mask, vision.image_features): one vocabulary (model.layers[i].self_attn / .linear_attn / .mlp, model.norm, model.lm_head) and standard values (layer_output, attention_output, mlp_output, attention_probabilities, logits, ...), plus support(), skip_layers, steer, project_on_vocab. Load it for code that reads or edits the residual stream, a sublayer's contribution, attention, expert routing, recurrent state or an image's path into the text model on more than one architecture, or that would branch on per-family module paths; and when a result on Gemma-4, Granite, Doge, ZAYA or DeepSeek-V4 looks wrong (their blocks are not a plain sum).
+description: Write interpretability code once on nnterp's StandardizedTransformer and run it on its 98 transformer families (GPT-2, Llama, Qwen, Gemma, OLMo, Granite, DeepSeek, DeltaNet and Mamba hybrids, 39 MoE families) and on vision-language models loaded with task="image-text-to-text" (model.vision, the tower blocks vision.layers[i], model.projector, vision.image_token_mask, vision.image_features): one vocabulary (model.layers[i].self_attn / .linear_attn / .mlp, model.norm, model.lm_head) and standard values (layer_output, attention_output, mlp_output, layer_mid, mlp_neurons, attention_probabilities, logits), plus support(), skip_layers, steer, project_on_vocab. Load it for code that reads or edits the residual stream, a sublayer's contribution, attention, expert routing, recurrent state or an image's path into the text model on more than one architecture, or that would branch on per-family module paths; and when a result on Gemma-4, Granite, Doge, ZAYA or DeepSeek-V4 looks wrong (their blocks are not a plain sum).
 ---
 
 # nnterp
@@ -14,7 +14,9 @@ mean the same thing everywhere. Everything nnsight does (`trace`, `generate`,
 unchanged; this skill covers only what nnterp adds. Load the `nnsight` skill for
 the underlying API.
 
-Verified on nnterp `103f697` (branch `encyclopedia`, 98 families), nnsight 0.8 dev `3553b930`, transformers 5.17.0.
+Verified on nnterp `0.8-refactor` at `f9d186c` (98 families), nnsight `dev` at `d565f5f8`, transformers 5.17.0 and 5.19.0.
+nnterp needs nnsight `dev` at `d565f5f8` or later: the families alias `o_proj` and `down_proj`
+with dotted rename keys (`"attn.c_proj": "attn.o_proj"` on GPT-2), which older nnsight cannot bind.
 
 ## Orientation
 
@@ -74,6 +76,7 @@ plain = StandardizedTransformer("openai-community/gpt2")        # meta device, t
 reason = plain.support(layer=0)["self_attn.attention_probabilities"]
 assert reason == "read inside the eager attention forward, but this model runs 'sdpa'; load with attn_implementation='eager'"
 assert plain.support(layer=0)["self_attn.attention_output"] is None    # boundary values never need eager
+assert plain.support(layer=0)["self_attn.attention_premix"] is None    # the heads at o_proj: a module boundary
 ```
 
 **3. `support()`, not `hasattr`.** `hasattr(envoy, value)` is never `False`: it
@@ -117,9 +120,12 @@ The recipes (stream weights for Gemma-4 and Doge, the stream formula for
 DeepSeek-V4): [references/values.md](references/values.md).
 
 **6. Reads follow the forward, within one invoke.** `input_ids` before any
-block; a block's interior (queries, scores, `attention_probabilities`) before
-its `attention_output`, before `mlp_output`, before `layer_output`; block 3
-before block 5; `logits` and `next_token_probs` last. A late read raises
+block; within a block `layer_input`, `attention_norm_output`, the attention's
+interior (queries, scores, `attention_probabilities`, `attention_premix`),
+`attention_output`, `layer_mid`, `mlp_norm_output`, `mlp_input`, `mlp_activation`,
+`mlp_neurons`, `mlp_output`, `layer_output` (`model.order(i)` lists a block's
+values in forward order); block 3 before block 5; `final_norm_output`,
+`lm_head_output`, `logits` and `next_token_probs` last. A late read raises
 `OutOfOrderError`, which names an internal location (`...attention_interface_1.fn.i0`),
 not the value:
 
@@ -214,22 +220,35 @@ Llama's block names, with the containers lifted out of the inner `.model`:
 | `model.embed_tokens` | `transformer.wte` | `model.embed_tokens` | `gpt_neox.embed_in` |
 | `model.layers[i]` | `transformer.h[i]` | `model.layers[i]` | `gpt_neox.layers[i]` |
 | `model.layers[i].self_attn` | `...h[i].attn` | same | `...layers[i].attention` |
+| `model.layers[i].self_attn.o_proj` | `...attn.c_proj` | same | `...attention.dense` |
 | `model.layers[i].mlp` | same | same | same |
+| `model.layers[i].mlp.act_fn` | `...mlp.act` | same | `...mlp.act` |
+| `model.layers[i].mlp.down_proj` | `...mlp.c_proj` | same | `...mlp.dense_4h_to_h` |
 | `model.norm` | `transformer.ln_f` | `model.norm` | `gpt_neox.final_layer_norm` |
 | `model.lm_head` | same | same | same |
 
 `self_attn.input` is what enters the attention and `mlp.input` what enters the
-MLP, on every family; prefer them to the norm aliases (`input_layernorm`,
-`post_attention_layernorm`), whose meaning differs per family. A recurrent block
-has `linear_attn` instead of `self_attn`; OPT and XGLM have no `mlp` module;
-Mamba and Mamba-2 blocks have neither attention nor MLP.
+MLP, on every family. The norm aliases (`input_layernorm`, `post_attention_layernorm`)
+mean different things per family (a sandwich block's `post_attention_layernorm` follows
+the attention); read the boundary values `attention_norm_output`, `layer_mid` and
+`mlp_norm_output` instead, which each family points at its own modules. `o_proj`,
+`act_fn` and `down_proj` are the output projection, the activation and the down
+projection on every family that has them. A recurrent block has `linear_attn` instead
+of `self_attn`; OPT and XGLM have no `mlp` module; Mamba and Mamba-2 blocks have
+neither attention nor MLP.
 
 ## The standard values
 
 | value | on | layout | notes |
 |---|---|---|---|
+| `layer_input` | `layers[i]` | `Residual` | the stream entering the block, `layers[i].input` |
+| `attention_norm_output` | `layers[i]` | `Residual` | the normed stream the attention is called with (`input_layernorm.output`) |
+| `layer_mid` | `layers[i]` | `Residual` | the stream between the sublayers, `layer_input + attention_output`; none on a parallel block |
+| `mlp_norm_output`, `mlp_input` | `layers[i]` | `Residual` | the MLP's pre-norm output; what the MLP is called with (`mlp.input`) |
 | `layer_output` | `layers[i]` | `Residual` | the stream leaving the block; `Streams` on DeepSeek-V4 |
 | `attention_output` | `self_attn` / `linear_attn` | `Residual` | the contribution |
+| `attention_premix` | `self_attn` | `HeadOutputs` | `o_proj.input` split by head, after any gate; any `attn_implementation` |
+| `mlp_activation`, `mlp_neurons` | `mlp` | `Neurons` | `act_fn.output`; `down_proj.input` (`act(gate) * up` on a gated MLP, the activation on a plain one); none on a routed mixture |
 | `mlp_output` | `mlp` | `Residual` | the contribution |
 | `attention_queries`, `_keys`, `_values` | `self_attn` | `Queries`, `Keys`, `Values` | seq on axis 2; keys/values before `repeat_kv`; eager |
 | `attention_scores` | `self_attn` | `Pattern` | masked, scaled, pre-softmax; eager |
@@ -239,7 +258,9 @@ Mamba and Mamba-2 blocks have neither attention nor MLP.
 | `state_input`, `state_output`, `state`, `states`, `decays`, `betas`, ... | `linear_attn` | `State`, `Gates`, `Scan*`, `SSD*` | [references/recurrent-mixers.md](references/recurrent-mixers.md) |
 | `per_layer_output` | `layers[i]` (Gemma-4 E2B/E4B) | `Residual` | the block's third add |
 | `attention_post`, `attention_comb`, `mlp_post`, `mlp_comb` | `layers[i]` (DeepSeek-V4) | `StreamWeights`, `StreamMixing` | the hyper-connection weights |
-| `logits` | root | `Logits` | the output's `.logits` (softcapped, scaled); `lm_head.output` is raw |
+| `final_norm_output` | root | `Residual` | `norm.output`: the stream the head projects |
+| `lm_head_output` | root | `Logits` | `lm_head.output`: the head's logits before a softcap or scale |
+| `logits` | root | `Logits` | the output's `.logits` (softcapped, scaled); `lm_head_output` is raw |
 | `next_token_probs` | root | `NextTokenProbs` | `logits[:, -1].softmax(-1)`, in the model dtype; read-only |
 | `token_embeddings` | root | `Residual` | `embed_tokens.output`; `layers[0].input` is what enters block 0 |
 | `input_ids`, `attention_mask`, `input_size` | root | `Tokens` | read first; the first two assignable |
@@ -258,8 +279,33 @@ from nnterp.components import Pattern
 
 assert type(model.layers[0].self_attn).attention_probabilities.layout is Pattern
 print(type(model.layers[0].self_attn).attention_probabilities)
-# (attention_probabilities) -> Pattern [batch heads query key]: The attention pattern the values are mixed with
+# (attention_probabilities) -> Pattern [batch num_heads query key]: The attention pattern the values are mixed with
 ```
+
+**Between and inside the sublayers.** The module boundaries are values too, so a recipe
+that wants the stream after the attention, the normed input of a sublayer, a neuron or a
+head's output at the projection never names a per-family module:
+
+```python
+with model.trace(prompt):
+    block = model.layers[5]
+    x = block.layer_input.save()
+    normed = block.attention_norm_output.save()          # what the attention is called with
+    premix = block.self_attn.attention_premix.save()     # o_proj's input by head: [batch, seq, heads, head_dim]
+    attn = block.self_attn.attention_output.save()
+    mid = block.layer_mid.save()                         # the stream between the sublayers
+    neurons = block.mlp.mlp_neurons.save()               # down_proj's input: [batch, seq, intermediate_size]
+    head = model.lm_head_output.save()                   # lm_head's own output, before any softcap
+
+assert torch.equal(mid, x + attn) and normed.shape == x.shape
+assert premix.shape == (1, 10, 12, 64) and neurons.shape == (1, 10, 3072)
+assert torch.equal(head, logits)                         # GPT-2's head applies nothing after lm_head
+```
+
+Each is defined on the pre-norm block; a family whose block is built otherwise points it
+at its own module or marks it unavailable with the reason (a parallel block has no
+`layer_mid`, a routed mixture no `mlp_activation` / `mlp_neurons`). Per block structure,
+gated vs plain MLPs, and the root pair: [references/values.md](references/values.md#the-module-boundaries).
 
 **Sizes.** The root's (`num_layers`, `hidden_size`, `vocab_size`, `num_heads`,
 `num_kv_heads`, `head_dim`, `qk_head_dim`, `intermediate_size`) are the config's,
@@ -331,10 +377,10 @@ assert edited.shape == (1, 592, 32064)
 ```
 
 `model.vision` is the tower (a `Vision`), `vision.layers[i]` its blocks with
-`self_attn` and `mlp` and the same three boundary values, laid out `Patches`,
+`self_attn` and `mlp` and the same block values (the module boundaries too), laid out `Patches`,
 and `model.projector` the last module before the image enters the text model;
 `model.layers` stays the text model's. The tower's sizes are on `model.vision`
-(`num_layers`, `hidden_size`, `num_heads`, `patch_size`, ...). The one rule for
+(`num_layers`, `vision_hidden_size`, `num_heads`, `patch_size`, ...). The one rule for
 `vision.image_features`: it is read at the scatter, the tensor the wrapper writes
 into the token embeddings, so `layers[0].input[mask] == image_features` on every
 wrapper; ablate or patch the image there. `projector.output` differs from it on

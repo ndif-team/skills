@@ -1,6 +1,6 @@
 ---
 name: patterns
-description: Run an interpretability technique against nnterp's standard values so the recipe is written once and runs on every transformer family: logit lens, direct logit attribution, attention-pattern analysis, ablation (zero, mean, heads, skip_layers, experts), activation patching, steering, probing, cross-family sweeps and recurrent-state patching on a StandardizedTransformer. Load when an experiment touches layer_output, attention_output, mlp_output, attention_probabilities, attention_head_outputs, expert_weights, a recurrent mixer's state, next_token_probs, project_on_vocab, steer or skip_layers; when the same experiment has to run on GPT-2, a Llama, a Gemma or a Qwen3.5 / Mamba hybrid without per-architecture branches; or when a recipe from the nnsight technique skills should be ported to nnterp. Carries the gotchas that silently corrupt results on trained checkpoints (BOS target token, NaN KL, non-additive blocks, bf16 sweeps, pad tokens, read order under generate).
+description: Run an interpretability technique against nnterp's standard values so the recipe is written once and runs on every transformer family: logit lens, direct logit attribution, attention-pattern analysis, ablation (zero, mean, heads, skip_layers, experts), activation patching, steering, probing, cross-family sweeps and recurrent-state patching on a StandardizedTransformer. Load when an experiment touches layer_output, layer_mid, attention_output, mlp_output, attention_probabilities, attention_head_outputs, attention_premix, mlp_neurons, expert_weights, a recurrent mixer's state, next_token_probs, project_on_vocab, steer or skip_layers; when the same experiment has to run on GPT-2, a Llama, a Gemma or a Qwen3.5 / Mamba hybrid without per-architecture branches; or when a recipe from the nnsight technique skills should be ported to nnterp. Carries the gotchas that silently corrupt results on trained checkpoints (BOS target token, NaN KL, non-additive blocks, bf16 sweeps, pad tokens, read order under generate).
 ---
 
 # nnterp Patterns
@@ -10,9 +10,11 @@ reason: the standard values do the normalization. A block's residual stream is
 `layer_output` on every family, a sublayer's contribution is `attention_output` /
 `mlp_output` (defined by `layers[i].input + attention_output + mlp_output ==
 layer_output`), the pattern is `attention_probabilities`, the per-head view is
-`attention_head_outputs`, and `project_on_vocab` is the model's own head. Nothing
-here indexes `.output[0]` or names `ln_f` versus `norm`. Verified on nnterp
-`103f697` (branch `encyclopedia`), nnsight 0.8 dev `3553b930`, transformers 5.17.0; the executed blocks run on
+`attention_head_outputs` (or `attention_premix` at the output projection, under any
+attention implementation), an MLP's neurons are `mlp_neurons`, and `project_on_vocab`
+is the model's own head. Nothing here indexes `.output[0]` or names `ln_f` versus
+`norm`. Verified on nnterp `0.8-refactor` at `f9d186c`, nnsight `dev` at `d565f5f8`,
+transformers 5.17.0 and 5.19.0; the executed blocks run on
 `openai-community/gpt2`, `HuggingFaceTB/SmolLM2-135M-Instruct` (30 layers, 576
 hidden, 9 heads, 3 kv heads, bf16) and `trl-internal-testing/tiny-LlavaForConditionalGeneration`.
 
@@ -150,8 +152,8 @@ P(Paris) clean 0.070  ablated 0.048  KL 0.030
 Zero ablation can *raise* a target too: zeroing block 6's `mlp_output` moves
 P(Paris) from 0.070 to 0.080 here. Report the KL alongside the target, and say
 which ablation you ran. Mean ablation, `skip_layers`, one head via
-`attention_head_outputs` or the pattern, a recurrent mixer:
-`references/steering-and-ablation.md`.
+`attention_head_outputs`, `attention_premix` or the pattern, MLP neurons via
+`mlp_neurons`, a recurrent mixer: `references/steering-and-ablation.md`.
 
 ### Expert ablation (mixtures of experts)
 

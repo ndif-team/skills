@@ -48,9 +48,12 @@ import argparse
 import sys
 
 ROOT_NAMES = ("embed_tokens", "layers", "norm", "lm_head")
-BLOCK_NAMES = ("self_attn", "linear_attn", "mlp", "input_layernorm", "post_attention_layernorm")
+BLOCK_NAMES = (
+    "self_attn", "linear_attn", "mlp", "input_layernorm", "post_attention_layernorm",
+    "self_attn.o_proj", "mlp.act_fn", "mlp.down_proj",
+)
 VISION_NAMES = ("vision", "vision.layers", "vision.patch_embed", "vision.norm", "projector")
-VISION_SIZES = ("num_layers", "hidden_size", "num_heads", "head_dim", "intermediate_size", "patch_size", "image_size")
+VISION_SIZES = ("num_layers", "vision_hidden_size", "num_heads", "head_dim", "intermediate_size", "patch_size", "image_size")
 DEFAULT_TASK = "text-generation"
 
 

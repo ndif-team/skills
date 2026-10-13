@@ -53,6 +53,114 @@ DeepSeek-V4 carry extra factors ([below](#blocks-that-are-not-a-plain-sum)). A
 Mamba / Mamba-2 block is `input + linear_attn.attention_output`; a Nemotron-H block
 is the input plus its one sublayer; Falcon-H1's has four terms.
 
+## The module boundaries
+
+Between `layer_input` (the block's `input`) and `layer_output` a pre-norm block has four
+more boundaries, each the input or output of one of its modules and each a value on the
+block; after the last block the root has two more:
+
+| value | key on a pre-norm block | what it is |
+|---|---|---|
+| `layers[i].attention_norm_output` | `input_layernorm.output` | the normed stream the attention is called with |
+| `layers[i].layer_mid` | `post_attention_layernorm.input` | the stream between the sublayers: `layer_input + attention_output` |
+| `layers[i].mlp_norm_output` | `post_attention_layernorm.output` | the normed stream entering the MLP |
+| `layers[i].mlp_input` | `mlp.input` | what the MLP is called with; `mlp_norm_output` where nothing sits between |
+| `model.final_norm_output` | `norm.output` | the stream the head projects |
+| `model.lm_head_output` | `lm_head.output` | the head's logits, before a softcap or scale (`Logits`) |
+
+All but `lm_head_output` are `Residual`; all take in-place edits and assignment:
+
+```python
+with model.trace(prompt):
+    block = model.layers[5]
+    x = block.layer_input.save()
+    normed = block.attention_norm_output.save()
+    attn_in = block.self_attn.input.save()
+    attn = block.self_attn.attention_output.save()
+    mid = block.layer_mid.save()
+    mlp_normed = block.mlp_norm_output.save()
+    mlp_in = block.mlp_input.save()
+    mlp = block.mlp.mlp_output.save()
+    out = block.layer_output.save()
+    clean_logits = model.logits.save()
+
+assert torch.equal(normed, attn_in)                   # the attention reads the normed stream
+assert torch.equal(mid, x + attn)                     # the stream after the attention add
+assert torch.equal(mlp_normed, mlp_in)                # nothing between the norm and the MLP on GPT-2
+assert torch.equal(mid + mlp, out)
+
+with model.trace(prompt):
+    model.layers[5].layer_mid[:, -1] = 0              # the MLP and every later block see a zeroed stream there
+    zeroed = model.logits.save()
+
+assert not torch.allclose(zeroed, clean_logits)
+```
+
+The values are keyed on the norm aliases, so they describe the pre-norm block. A block
+built otherwise has its family point a value at its own module, or mark it unavailable
+with the reason (`support()` says which):
+
+| block | families | what changes |
+|---|---|---|
+| sandwich | `gemma2`, `gemma3_text`, `gemma4_text`, `gemma4_unified_text`, `afmoe` | `layer_mid` and `mlp_norm_output` read the MLP's own pre-norm (`pre_feedforward_layernorm`), since `post_attention_layernorm` follows the attention |
+| post-norm only | `olmo2`, `olmo3`, `exaone4`, `flex_olmo`; OLMo-Hybrid's attention blocks | `layer_mid` is `mlp.input`; the two norm outputs are unavailable (`POST_NORM_ATTENTION`, `POST_NORM_MLP`: the sublayer reads the stream itself) |
+| parallel | `gptj`, `codegen`, `cohere`, `cohere2`, `phi`, `falcon`; `gpt_neox` and `stablelm` with `use_parallel_residual` | `layer_mid` unavailable (`PARALLEL`); `mlp_norm_output` is the one norm's output (Falcon's 40B layout: `ln_mlp`) |
+| OPT, XGLM | | the pre-MLP norm is the block's `final_layer_norm`; OPT holds the stream flattened there, so `layer_mid` and `mlp_norm_output` are `FlatResidual` (`[tokens, hidden_size]`); `mlp_input` unavailable (no `mlp` module) |
+| gated merges | `doge`, `zaya` | the values are the real boundaries, but a gate scales what the block adds, so `layer_mid != layer_input + attention_output` |
+| hyper-connections | `deepseek_v4` | all four unavailable: each sublayer reads a mix of the streams |
+| one sublayer | `mamba`, `mamba2`, `falcon_mamba`, `nemotron_h` | the boundaries the block has no modules for are unavailable, with the reason |
+
+The three reasons are strings exported from `nnterp.components` (`PARALLEL`,
+`POST_NORM_ATTENTION`, `POST_NORM_MLP`), so a script can compare against them. The
+default family (a `model_type` nnterp resolves by its generic aliases) serves the three
+boundaries its aliases reach and refuses `layer_mid`, since whether a block has a stream
+between its sublayers is what it cannot tell.
+
+## Inside the sublayers
+
+Three more boundaries sit inside the attention and the MLP, keyed on three standard child
+names every family aliases: `o_proj` (the output projection), `act_fn` (the activation)
+and `down_proj` (the down projection). GPT-2's `attn.c_proj`, `mlp.act` and `mlp.c_proj`
+answer to them, so `layers[i].self_attn.o_proj`, `layers[i].mlp.act_fn` and
+`layers[i].mlp.down_proj` are the modules on every family:
+
+| value | key | layout | what it is |
+|---|---|---|---|
+| `self_attn.attention_premix` | `o_proj.input` | `HeadOutputs` `[batch, seq, num_heads, head_dim]` | every head's output side by side, after any gate; under any `attn_implementation` ([attention-interior.md](attention-interior.md#attention_premix-the-heads-at-the-output-projection)) |
+| `mlp.mlp_activation` | `act_fn.output` | `Neurons` `[batch, seq, intermediate_size]` | `act(gate_proj(x))` on a gated MLP, `act(up_proj(x))` on a plain one |
+| `mlp.mlp_neurons` | `down_proj.input` | `Neurons` | what the down projection sums: `act(gate) * up` on a gated MLP, the activation itself on a plain one |
+
+On GPT-2's plain MLP the neurons are the activation; on SmolLM2's gated one they are the
+activation times `up_proj`'s output:
+
+```python
+block = model.layers[0]
+assert block.self_attn.o_proj.path.endswith("attn.c_proj") and block.mlp.down_proj.path.endswith("mlp.c_proj")
+assert block.mlp.act_fn.path.endswith("mlp.act")
+
+with model.trace(prompt):
+    act = model.layers[5].mlp.mlp_activation.save()
+    neurons = model.layers[5].mlp.mlp_neurons.save()
+
+assert act.shape == (1, 10, model.layers[5].mlp.intermediate_size) and torch.equal(neurons, act)
+
+smol = StandardizedTransformer("HuggingFaceTB/SmolLM2-135M-Instruct", device="cpu", dispatch=True)
+with smol.trace(prompt):
+    gate_act = smol.layers[5].mlp.mlp_activation.save()          # silu(gate_proj(x))
+    up = smol.layers[5].mlp.up_proj.output.save()
+    gated = smol.layers[5].mlp.mlp_neurons.save()                # what down_proj sums
+
+assert gated.shape == (1, gated.shape[1], smol.intermediate_size) == (1, gated.shape[1], 1536)
+assert torch.equal(gated, gate_act * up)
+```
+
+A routed mixture of experts has no single activation or down projection: on a `Moe`
+block both are unavailable with `routed experts; read per-expert via the Moe component`
+([mixture-of-experts.md](mixture-of-experts.md)); dense blocks beside the mixtures serve
+them. A family that aliases none of the three names reports `no o_proj module on this
+attention` (DeepSeek-V4's low-rank projection, JetMoE's per-expert one). Zeroing neuron
+`n` everywhere is `mlp_neurons[..., n] = 0`, on every family with a dense MLP.
+
 ## Tensor blocks and tuple blocks
 
 A Llama, GPT-2 or GPT-NeoX block returns `hidden_states` alone; GPT-J, GPT-Neo,
@@ -272,7 +380,7 @@ stream).
 
 The root answers for the whole run. Read `input_ids` / `attention_mask` /
 `input_size` first (they are the model's input), `token_embeddings` next,
-`lm_head.output`, `logits` and `next_token_probs` last:
+`final_norm_output`, `lm_head_output`, `logits` and `next_token_probs` last:
 
 ```python
 with model.trace(prompt):
@@ -281,22 +389,28 @@ with model.trace(prompt):
     size = torch.tensor(model.input_size).save() # a torch.Size bound in the block does not survive it: save a tensor
     emb = model.token_embeddings.save()          # [batch, seq, hidden]: embed_tokens.output
     entering = model.layers[0].input.save()      # what block 0 receives
-    raw = model.lm_head.output.save()            # the raw projection
+    last = model.layers[-1].layer_output.save()
+    final = model.final_norm_output.save()       # [batch, seq, hidden]: norm.output, what lm_head reads
+    raw = model.lm_head_output.save()            # [batch, seq, vocab]: lm_head.output, the raw projection
     logits = model.logits.save()                 # [batch, seq, vocab]
     probs = model.next_token_probs.save()        # [batch, vocab]
 
 assert ids.shape == mask.shape == (1, 10) and size.tolist() == [1, 10]
 assert not torch.equal(emb, entering)            # GPT-2 adds wpe between the two
+assert not torch.equal(final, last)              # ln_f sits between the last block and the head
 assert torch.equal(raw, logits)                  # GPT-2's head applies nothing more
+assert torch.allclose(model.project_on_vocab(last), raw)
 assert torch.allclose(probs, logits[:, -1].softmax(-1))
 ```
 
 **`logits`** is the `.logits` of the model's output: softcapped on Gemma-2/4 and
 VaultGemma, times `logit_scale` on Cohere, `/ logits_scaling` on the Granite line,
 times `logits_scaling` on HyperCLOVA X, times `lm_head_multiplier` on Falcon-H1,
-float32 on Mamba-2 and Nemotron-H. `lm_head.output` is the raw projection;
-`project_on_vocab` applies the family's step. Assigning replaces the logits in the
-output:
+float32 on Mamba-2 and Nemotron-H. `lm_head_output` is the raw projection
+(`lm_head.output`), so on those families the difference between the two is the
+family's step; `project_on_vocab` applies it. `final_norm_output` is the final norm's
+output (`norm.output`): assign it to hand the head another stream. Assigning `logits`
+replaces the logits in the output:
 
 ```python
 with model.trace(prompt) as tracer:
@@ -395,12 +509,14 @@ between families; the one exception is `layer_output` on DeepSeek-V4 (`Streams`)
 
 | layout | axes | values |
 |---|---|---|
-| `Residual` | `batch seq hidden` | `layer_output`, `attention_output`, `mlp_output`, `token_embeddings`, `per_layer_output`, `routed_output`, `shared_expert_output` |
-| `Streams`, `StreamWeights`, `StreamMixing` | `batch seq streams hidden`, `batch seq streams`, `batch seq streams streams` | DeepSeek-V4's stream and hyper-connection weights |
-| `Logits`, `NextTokenProbs`, `Tokens` | `batch seq vocab`, `batch vocab`, `batch seq` (`Int`) | the root values |
-| `Queries`, `Keys`, `Values` | `batch heads seq qk_head_dim`, `batch kv_heads seq qk_head_dim`, `batch kv_heads seq head_dim` | softmax attention |
-| `Pattern`, `HeadOutputs` | `batch heads query key`, `batch seq heads head_dim` | scores and pattern; head outputs |
-| `RouterLogits`, `ExpertWeights`, `ExpertIndices`, `ExpertOutputs` | `batch seq experts`, `batch seq top_k` (x2, indices `Int`), `batch seq top_k hidden` | a `Moe` |
+| `Residual` | `batch seq hidden_size` | `layer_input`, `layer_output`, `attention_output`, `mlp_output`, `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input`, `token_embeddings`, `final_norm_output`, `per_layer_output`, `routed_output`, `shared_expert_output` |
+| `FlatResidual` | `tokens hidden_size` | OPT's `layer_mid` and `mlp_norm_output` (the stream flattened, as its block holds it) |
+| `Streams`, `StreamWeights`, `StreamMixing` | `batch seq streams hidden_size`, `batch seq streams`, `batch seq streams streams` | DeepSeek-V4's stream and hyper-connection weights |
+| `Logits`, `NextTokenProbs`, `Tokens` | `batch seq vocab_size`, `batch vocab_size`, `batch seq` (`Int`) | `logits` and `lm_head_output`; `next_token_probs`; `input_ids`, `attention_mask` |
+| `Queries`, `Keys`, `Values` | `batch num_heads seq qk_head_dim`, `batch num_kv_heads seq qk_head_dim`, `batch num_kv_heads seq head_dim` | softmax attention |
+| `Pattern`, `HeadOutputs` | `batch num_heads query key`, `batch seq num_heads head_dim` | scores and pattern; `attention_head_outputs` and `attention_premix` |
+| `Neurons` | `batch seq intermediate_size` | `mlp_activation`, `mlp_neurons` |
+| `RouterLogits`, `ExpertWeights`, `ExpertIndices`, `ExpertOutputs` | `batch seq num_experts`, `batch seq top_k` (x2, indices `Int`), `batch seq top_k hidden_size` | a `Moe` |
 | `LinearQK`, `LinearV`, `Gates`, `State`, `States` | `batch seq heads key_dim`, `batch seq heads value_dim`, `batch seq heads`, `batch heads key_dim value_dim`, `batch seq heads key_dim value_dim` | DeltaNet (`State`/`States` also Mamba-2's) |
 | `ScanQK`, `ScanValues`, `ScanSteps`, `ScanDecays`, `ScanState`, `ScanStates` | `batch seq groups state_dim`, `batch seq channels` (x2), `batch seq channels state_dim`, `batch channels state_dim`, `batch seq channels state_dim` | Mamba-1 |
 | `SSDQueries`, `SSDKeys`, `SSDValues`, `SSDHeadOutputs` | `batch seq groups state_dim` (x2), `batch seq heads head_dim` (x2) | Mamba-2 |
@@ -412,7 +528,7 @@ from nnterp.families import falcon
 
 assert Attention.attention_keys.layout is Keys and falcon.Attention.attention_keys.layout is Keys
 assert Layer.layer_output.layout is Residual and StandardizedTransformer.logits.layout is Logits
-assert Layer.layer_output.dims == ("batch", "seq", "hidden")
+assert Layer.layer_output.dims == ("batch", "seq", "hidden_size")
 
 with model.trace(prompt):
     q = model.layers[0].self_attn.attention_queries.save()
@@ -428,12 +544,13 @@ where it is 2. "The last token" is `value[:, -1]` for a residual value,
 query row.
 
 A vision-language wrapper loaded with `task="image-text-to-text"` adds the tower's
-values: `layer_output`, `attention_output` and `mlp_output` on `vision.layers[i]`,
-and `patch_embeddings` and `tower_output` on `model.vision`, all laid out
-`Patches` (`images patches vision_hidden`; a row is an image, a crop, a tile or a
+values: `layer_output`, `attention_output`, `mlp_output` and the four module boundaries
+(`attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input`) on
+`vision.layers[i]`, and `patch_embeddings` and `tower_output` on `model.vision`, all laid out
+`Patches` (`images patches vision_hidden_size`; a row is an image, a crop, a tile or a
 packed run of images, per tower); `vision.image_token_mask` (`ImageTokenMask`,
 `batch seq`, bool) and `vision.image_features` (`ImageFeatures`,
-`image_tokens hidden`, flat over the batch). The text values cover the image
+`image_tokens hidden_size`, flat over the batch). The text values cover the image
 positions too. What each means per tower: [vision.md](vision.md#the-values).
 
 ## Gotchas

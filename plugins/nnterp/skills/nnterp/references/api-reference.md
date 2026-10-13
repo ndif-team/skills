@@ -68,7 +68,9 @@ looks up `config.model_type` in `nnterp.families`, and raises `UnsupportedFamily
 
 | value | layout | assignable | what |
 |---|---|---|---|
-| `model.logits` | `Logits` | yes: replaces `output.logits` | the model's final logits (softcapped, scaled per family); `model.lm_head.output` is the raw projection |
+| `model.logits` | `Logits` | yes: replaces `output.logits` | the model's final logits (softcapped, scaled per family); `lm_head_output` is the raw projection |
+| `model.final_norm_output` | `Residual` | yes | `norm.output`: the stream the head projects |
+| `model.lm_head_output` | `Logits` | yes | `lm_head.output`: the head's logits before the family's softcap or scale |
 | `model.token_embeddings` | `Residual` | yes | `embed_tokens.output`: whatever the embedding module returns |
 | `model.next_token_probs` | `NextTokenProbs` | no (`AttributeError`: assign `logits`) | `logits[:, -1].softmax(-1)` in the model dtype |
 | `model.input_ids`, `model.attention_mask` | `Tokens` | yes: the model runs on what you set | the call's ids and mask; read before any block |
@@ -104,6 +106,7 @@ Details: [values.md](values.md#sizes).
 | `model.family` | the family module (`nnterp.families.llama`); what `route_kernels` takes |
 | `model.layers`, `model.embed_tokens`, `model.norm`, `model.lm_head` | the vocabulary, as envoys |
 | `model.layers[i].self_attn` / `.linear_attn` / `.mlp` | the family's `Attention`, recurrent mixer, `Mlp` or `Moe`; absent where the block has none |
+| `model.layers[i].self_attn.o_proj`, `.mlp.act_fn`, `.mlp.down_proj` | the output projection, the activation and the down projection under their standard names, aliased from each family's spelling |
 | `model.add_prefix_false_tokenizer` | the tokenizer with `add_prefix_space=False`, loaded on first use |
 | `model.vision`, `model.projector` | a vision-language wrapper's tower (a `Vision`) and the last module before the scatter; present on the 16 host families' wrappers, absent on a text-only checkpoint ([vision.md](vision.md)) |
 | `model.processor` | the wrapper's processor, loaded with `task="image-text-to-text"`; `None` on the default `text-generation` load |
@@ -112,14 +115,14 @@ Details: [values.md](values.md#sizes).
 
 | host | values | page |
 |---|---|---|
-| `Layer` | `layer_output` (`Residual`; `Streams` on DeepSeek-V4); `per_layer_output` (Gemma-4); `attention_post` / `attention_comb` / `mlp_post` / `mlp_comb` (DeepSeek-V4); `skip_with(hidden)`; `returns_tuple` | [values.md](values.md) |
-| `Attention` | `attention_output`; `attention_queries` / `_keys` / `_values` / `_scores` / `_probabilities` / `_head_outputs` (eager); `SINK`; `off_interface()` | [attention-interior.md](attention-interior.md) |
-| `Mlp` | `mlp_output` | [values.md](values.md) |
-| `Moe(Mlp)` | `router_logits`, `expert_weights`, `expert_indices`, `expert_outputs`, `routed_output`, `shared_expert_output` (each a `TokenEProperty`); `num_experts`, `top_k`, `SCORING`, `no_mixture()` | [mixture-of-experts.md](mixture-of-experts.md) |
+| `Layer` | `layer_input`, `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input` (`Residual`; `FlatResidual` for OPT's `layer_mid` / `mlp_norm_output`); `layer_output` (`Residual`; `Streams` on DeepSeek-V4); `per_layer_output` (Gemma-4); `attention_post` / `attention_comb` / `mlp_post` / `mlp_comb` (DeepSeek-V4); `skip_with(hidden)`; `returns_tuple` | [values.md](values.md) |
+| `Attention` | `attention_output`; `attention_premix` (`HeadOutputs`, `o_proj.input`, any implementation); `attention_queries` / `_keys` / `_values` / `_scores` / `_probabilities` / `_head_outputs` (eager); `SINK`; `off_interface()` | [attention-interior.md](attention-interior.md) |
+| `Mlp` | `mlp_output`; `mlp_activation`, `mlp_neurons` (`Neurons`: `act_fn.output`, `down_proj.input`) | [values.md](values.md#inside-the-sublayers) |
+| `Moe(Mlp)` | `router_logits`, `expert_weights`, `expert_indices`, `expert_outputs`, `routed_output`, `shared_expert_output` (each a `TokenEProperty`); `num_experts`, `top_k`, `SCORING`, `no_mixture()`; `mlp_activation` / `mlp_neurons` unavailable (routed experts) | [mixture-of-experts.md](mixture-of-experts.md) |
 | `RecurrentMixer` | `attention_output`, `state`, `states`, `state_after(t)`, `set_state_after(t, v)`; subclasses add `attention_queries` / `_keys` / `_values`, `decays`, `betas`, `state_input`, `attention_head_outputs`, `state_output` | [recurrent-mixers.md](recurrent-mixers.md) |
-| `Vision` | `image_token_mask` (`ImageTokenMask`, read-only), `patch_embeddings`, `tower_output` (`Patches`), `image_features` (`ImageFeatures`, assignable); sizes `num_layers`, `hidden_size`, `num_heads`, `head_dim`, `intermediate_size`, `patch_size`, `image_size`; `support(layer=None)`, `no_images()` | [vision.md](vision.md) |
+| `Vision` | `image_token_mask` (`ImageTokenMask`, read-only), `patch_embeddings`, `tower_output` (`Patches`), `image_features` (`ImageFeatures`, assignable); sizes `num_layers`, `vision_hidden_size`, `num_heads`, `head_dim`, `intermediate_size`, `patch_size`, `image_size`; `support(layer=None)`, `no_images()` | [vision.md](vision.md) |
 | `PixtralVision(Vision)`, `QwenVision(Vision)` | Pixtral's tower (`patch_embeddings` is the packed row entering `ln_pre`); the Qwen ViT's (packed `[1, patches, vision_hidden]`, sizes add `spatial_merge_size`, `window_size`) | [vision.md](vision.md#the-qwen-vit) |
-| `VisionLayer(Layer)`, `VisionAttention(Attention)`, `VisionMlp(Mlp)` | a tower block's `layer_output`, `attention_output`, `mlp_output` as `Patches`; the attention interior as on a text block | [vision.md](vision.md#the-values) |
+| `VisionLayer(Layer)`, `VisionAttention(Attention)`, `VisionMlp(Mlp)` | a tower block's `layer_output`, `attention_output`, `mlp_output` and the four module boundaries as `Patches`; the attention interior, `attention_premix`, `mlp_activation` and `mlp_neurons` as on a text block | [vision.md](vision.md#the-values) |
 | `QwenVisionAttention(VisionAttention)` | the Qwen ViT's attention: queries, keys, values whole before the per-image split, `attention_head_outputs` concatenated after it; scores and pattern unavailable (`PER_IMAGE`) | [vision.md](vision.md#the-qwen-vit) |
 | `ImageScatter` | keyed on the wrapper's inner model: the module whose forward writes the image features into the token embeddings (`scatter`, `scatter_argument`); where `image_features` is read. No values of its own | [vision.md](vision.md#availability) |
 

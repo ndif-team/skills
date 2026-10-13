@@ -80,7 +80,7 @@ assert vlm.vision.layers[0].path == "model.model.vision_tower.encoder.layers.0"
 assert vlm.vision.layers[0].input_layernorm.path.endswith("layer_norm1")
 assert vlm.projector.path == "model.model.multi_modal_projector"
 assert getattr(vlm.vision, "norm", None) is None                     # CLIP: no norm over the patches
-assert (vlm.vision.num_layers, vlm.vision.hidden_size, vlm.vision.num_heads, vlm.vision.head_dim) == (2, 16, 4, 4)
+assert (vlm.vision.num_layers, vlm.vision.vision_hidden_size, vlm.vision.num_heads, vlm.vision.head_dim) == (2, 16, 4, 4)
 assert (vlm.vision.image_size // vlm.vision.patch_size) ** 2 == 576  # 336 // 14 = 24 patches a side
 ```
 
@@ -90,6 +90,8 @@ assert (vlm.vision.image_size // vlm.vision.patch_size) ** 2 == 576  # 336 // 14
 |---|---|---|---|
 | `layer_output` | `vision.layers[i]` | `Patches` | the tower's stream leaving the block |
 | `attention_output`, `mlp_output` | `vision.layers[i].self_attn`, `.mlp` | `Patches` | what each sublayer adds: `input + attention_output + mlp_output == layer_output` |
+| `layer_input`, `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input` | `vision.layers[i]` | `Patches` | the block's module boundaries, as on a text block ([values.md](values.md#the-module-boundaries)); `layer_mid == layer_input + attention_output` on a pre-norm tower |
+| `attention_premix`, `mlp_activation`, `mlp_neurons` | `vision.layers[i].self_attn`, `.mlp` | `HeadOutputs`, `Neurons` | the heads at `o_proj` and the MLP's neurons, as on a text block; the towers alias `out_proj` / `proj`, `activation_fn` / `act`, `fc2` / `linear_fc2` to the standard names; no eager load needed |
 | `attention_probabilities`, `attention_queries`, ... | `vision.layers[i].self_attn` | `Pattern`, `Queries`, ... | as on a text block, the `batch` axis being the tower's rows; no causal mask (Pixtral masks between packed images, Gemma 4 masks its padded keys); needs eager |
 | `patch_embeddings` | `vision` | `Patches` | the patch embedding's output, one row per patch, before any position embedding, CLS token or pre-norm |
 | `tower_output` | `vision` | `Patches` | the last block's stream after `vision.norm` where there is one, before any pooling, CLS dropping or adapter |
