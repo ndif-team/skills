@@ -195,8 +195,8 @@ nnsight's interleaved backward means an adapter inserted at any layer trains wit
 ordinary torch. The model's parameters never move; only the adapter's do.
 
 **Training against a *remote* model** needs a different recipe — the adapter and
-optimizer are built inside `model.session(remote=True)`, and on NDIF training and
-weight access need a trusted API key. The `remote` skill covers both.
+optimizer are built inside `model.session(remote=True)`. The `remote` skill
+covers it.
 
 ```python
 class LoRA(torch.nn.Module):
@@ -335,5 +335,5 @@ that work, and stop at the efficacy you need. Report all three numbers.
 - `nnsight` — `edit`, attaching modules, gradients
 - `model-steering` — inference-time behavior change without touching weights
 - `debugging` — the in-place/autograd error above and others
-- `remote` — training against NDIF, which needs a trusted key
+- `remote` — training against NDIF
 - `tensor-parallel` — editing sharded (`DTensor`) weights

@@ -201,7 +201,7 @@ the op can silently bind to the next step; see
 | The `forward` is **decorated** | Instrumented: a wrapper that calls the function is peeled and rebuilt; a dispatcher that picks an implementation at run time shows the dispatch — drill into that op for what ran |
 | The op is an **assignment** | No callee — `.source` on it raises `SourceNotAvailable` |
 | Recursive `.source` outside a trace | Raises; open a trace first |
-| Recursive `.source` on NDIF with a standard key | `SourceNotAvailable` (arrives as `RemoteError`); one level works, so read the outer op's `.output` instead. A trusted key runs it |
+| Recursive `.source` on NDIF | may raise `SourceNotAvailable` (arrives as `RemoteError`); one level works, so read the outer op's `.output` instead |
 | Ops requested out of execution order | `OutOfOrderError`, same as modules |
 | **First** `.source` on a module, after something else in the block was read | `OutOfOrderError` (inside a `tracer.iter` loop: a silent next-step bind instead). Instrumenting rewrites the forward, so do `_ = module.source` outside the trace, once per module |
 | `op.source` asked for after `op.output` on the same op | `OutOfOrderError` on `...{op}.fn` — the drill is served one step earlier; ask for it first |

@@ -1,6 +1,6 @@
 ---
 name: remote
-description: Write and optimize nnsight code that runs on NDIF — remote=True, model.session(remote=True), blocking=False jobs, and models too large to run locally (Llama-70B/405B, DeepSeek). Use whenever remote execution is involved even if the user did not ask for optimization — the two costs (too many requests, too much downloaded) have mechanical fixes. Also covers NDIF setup, API keys, standard versus trusted keys, COLD/RUNNING model status, nnsight.register for shipping local helper code, RemoteError, and diagnosing remote-only failures.
+description: Write and optimize nnsight code that runs on NDIF — remote=True, model.session(remote=True), blocking=False jobs, and models too large to run locally (Llama-70B/405B, DeepSeek). Use whenever remote execution is involved even if the user did not ask for optimization — the two costs (too many requests, too much downloaded) have mechanical fixes. Also covers NDIF setup, API keys, COLD/RUNNING model status, nnsight.register for shipping local helper code, RemoteError, and diagnosing remote-only failures.
 ---
 
 # Remote Execution on NDIF
@@ -121,7 +121,7 @@ away. For tensors you genuinely need, `.detach().cpu()` before saving.
 | Your own helpers must be shipped | `nnsight.register(my_module)` (cloudpickle by value), or inline the helper |
 | `print()` is your debugger | It comes back as log lines — far cheaper than saving a tensor to look at it (needs `CONFIG.APP.REMOTE_LOGGING`, on by default) |
 | Variables from outside the block **are** captured | Every name the block reads is pickled into the payload. They must be picklable, they arrive on CPU, and edits stay server-side unless you save them |
-| Take device and dtype from an activation | You cannot know either client-side: `vec.to(hidden.device, hidden.dtype)`. Not from a module — see [the key section](#standard-and-trusted-keys) |
+| Take device and dtype from an activation | You cannot know either client-side: `vec.to(hidden.device, hidden.dtype)`. Not from a module — its metadata may not reflect the serving device |
 | `super()` needs its class named | A shipped class is recompiled outside any class body, so bare `super()` raises `super(): __class__ cell not found`. Write `super(MyClass, self).__init__()` |
 
 An outer variable comes back if you save it *inside* the block — the save pushes
@@ -149,27 +149,6 @@ activation inside the block rather than assuming one. bf16 has about three
 significant digits, so a next-token argmax whose top two logits nearly tie can flip
 between a batched and a solo run, or between the server and a local float32 model.
 Compare a logit difference or a top-k margin rather than asserting one exact token.
-
-## Standard and trusted keys
-
-NDIF sandboxes code submitted with a standard key: your block runs in a process
-beside the model, not inside it. This is policy, not a bug. Reading and editing
-activations behaves as it does locally; four things do not:
-
-| Inside the block, on a standard key | What happens |
-|---|---|
-| `with loss.backward():` / `.grad` on an activation | `OutOfOrderError` naming a number rather than a module (`'1401…3376.grad.i0'`) |
-| `loss.backward()` + an optimizer over a parameter injected into the forward (LoRA, a steering vector) | completes with no error and never trains: the loss repeats bit-identically and the parameter stays where it started |
-| `module.weight`, `model.device`, `module.device` | `meta` — reading a weight raises `Cannot copy out of meta tensor`, writing one changes nothing, and `.to(model.device)` silently drops the data |
-| recursive `.source` (`op.source.inner_op`) | `SourceNotAvailable` — read the outer op's `.output` instead |
-
-A key NDIF has marked **trusted** lifts all four. To tell whether you are
-sandboxed, `print(module.device)` inside the block: `meta` means a standard key.
-Code that must run on either key takes device and dtype from an activation
-(`hidden.device`), never from a module. What works on any key is training on
-activations: collect them inside a session, detached, and fit a probe there — its
-whole graph lives in your block. The sessions reference has the probe and the
-trusted-key LoRA example.
 
 ## Submitting without waiting
 
@@ -199,10 +178,8 @@ print(local_model.tokenizer.decode(check))
 Develop against a small model locally, dry-run with `remote="local"`, then switch
 the model id and `remote=True`.
 
-It does **not** sandbox — weights readable, device real, like a trusted key, so
-none of the four standard-key failures reproduce; a forgotten `.save()` passes
-(client-side mutations still come back); `CONFIG.APP.DEBUG` prints no payload
-bytes. It does catch the round trip — an unpicklable capture fails only here:
+A forgotten `.save()` passes (client-side mutations still come back), and
+`CONFIG.APP.DEBUG` prints no payload bytes. It does catch the round trip — an unpicklable capture fails only here:
 
 <!-- test: expect-error TypeError -->
 ```python
@@ -224,7 +201,6 @@ Walk these in order; the first two are usually worth orders of magnitude.
 | `.save()` on logits/hidden states followed by a client-side reduction | move the reduction into the trace |
 | Client-scope list appended to inside a trace | build it inside, `nnsight.save()` the container |
 | Optimizer or `nn.Module` built outside a remote session | move both inside the session — a client-side optimizer over a shipped module trains nothing, silently |
-| `.to(model.device)`, `backward()`, `.grad`, weight reads | see [Standard and trusted keys](#standard-and-trusted-keys) |
 | Saved CUDA tensor without `.detach().cpu()` | add it |
 | A helper from the user's own file called inside a trace | `nnsight.register(...)` or inline it |
 | One long session | split into several — sessions have a time limit |
@@ -244,7 +220,6 @@ to apply before they scale up.
 | Works locally, fails remotely | an import the server lacks, or an unregistered local helper — reproduce with `remote="local"` |
 | Result missing a value | the save wasn't bound to a name, or you saved elements instead of a container |
 | Worker-side exception | arrives as `RemoteError`, whose message is the worker's traceback ending in the original type and message. `except IndexError:` never matches — catch `RemoteError` and read the last line |
-| `OutOfOrderError` on a number, `meta` weights, a loss that never moves | a standard key — see [Standard and trusted keys](#standard-and-trusted-keys) |
 
 `CONFIG.APP.DEBUG = True` adds payload/result byte sizes and per-status logging —
 useful for confirming a transfer really did shrink.
