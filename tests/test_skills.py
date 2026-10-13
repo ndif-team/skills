@@ -25,6 +25,9 @@ def _skip_reason(block: Block, run_slow: bool) -> str | None:
     package = required_package(block.path)
     if package is not None and importlib.util.find_spec(package) is None:
         return f"needs the {package} package installed"
+    for module in sorted(block.requires):
+        if importlib.util.find_spec(module) is None:
+            return f"needs the {module} package installed"
     if "remote" in block.flags and not conftest.ndif_host():
         return "needs a reachable NDIF_HOST (e.g. NDIF_HOST=http://localhost:8001)"
     if "gpu" in block.flags and not conftest.cuda_available():

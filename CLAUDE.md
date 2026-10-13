@@ -69,6 +69,7 @@ Directives go in an HTML comment immediately above the fence:
 <!-- test: gpu -->                     only with CUDA
 <!-- test: slow -->                    only with --run-slow
 <!-- test: expect-error OutOfOrderError --> must raise this
+<!-- test: requires vllm -->           only when that module is importable
 ```
 
 Use ```python-legacy for old-API code shown deliberately (porting guides) — it is

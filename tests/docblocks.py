@@ -10,6 +10,7 @@ placed on the line(s) immediately before the opening fence:
     <!-- test: gpu -->                   only run when CUDA is available
     <!-- test: slow -->                  only run with --run-slow
     <!-- test: expect-error ValueError --> must raise that exception
+    <!-- test: requires vllm -->         only run when that module is importable
     <!-- test: setup -->                 marks a block other blocks build on
                                          (informational; all blocks share a
                                          namespace in document order anyway)
@@ -53,6 +54,7 @@ class Block:
     line: int  # 1-indexed line of the opening fence
     flags: set[str] = field(default_factory=set)
     expect_error: str | None = None
+    requires: set[str] = field(default_factory=set)
 
     @property
     def location(self) -> str:
@@ -63,10 +65,11 @@ class Block:
         return self.lang == "python" and "skip" not in self.flags
 
 
-def _parse_directives(lines: list[str], fence_index: int) -> tuple[set[str], str | None]:
+def _parse_directives(lines: list[str], fence_index: int) -> tuple[set[str], str | None, set[str]]:
     """Collect `test:` directives immediately preceding a fence."""
     flags: set[str] = set()
     expect_error: str | None = None
+    requires: set[str] = set()
 
     i = fence_index - 1
     while i >= 0:
@@ -86,6 +89,12 @@ def _parse_directives(lines: list[str], fence_index: int) -> tuple[set[str], str
                 expect_error = tokens[j] if j < len(tokens) else None
             elif token.startswith("expect-error:"):
                 expect_error = token.split(":", 1)[1]
+            elif token in ("requires", "requires:"):
+                j += 1
+                if j < len(tokens):
+                    requires.add(tokens[j])
+            elif token.startswith("requires:"):
+                requires.add(token.split(":", 1)[1])
             elif token in KNOWN_FLAGS:
                 flags.add(token)
             else:
@@ -93,7 +102,7 @@ def _parse_directives(lines: list[str], fence_index: int) -> tuple[set[str], str
             j += 1
         i -= 1
 
-    return flags, expect_error
+    return flags, expect_error, requires
 
 
 def extract_blocks(path: Path) -> list[Block]:
@@ -116,7 +125,7 @@ def extract_blocks(path: Path) -> list[Block]:
             body.append(lines[j][len(indent) :] if indent else lines[j])
             j += 1
 
-        flags, expect_error = _parse_directives(lines, i)
+        flags, expect_error, requires = _parse_directives(lines, i)
         blocks.append(
             Block(
                 path=path,
@@ -125,6 +134,7 @@ def extract_blocks(path: Path) -> list[Block]:
                 line=i + 1,
                 flags=flags,
                 expect_error=expect_error,
+                requires=requires,
             )
         )
         i = j + 1
