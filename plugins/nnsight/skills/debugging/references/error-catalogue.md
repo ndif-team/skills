@@ -1,20 +1,34 @@
 # Error Catalogue
 
 Every exception nnsight 0.8 raises, with the message text as it actually appears
-(reproduced against nnsight 0.8 + gpt2), what caused it, and the fix.
+(reproduced against nnsight 0.8 + gpt2), what caused it, and the fix. The headline
+messages are raised by the blocks below.
+
+<!-- test: setup -->
+```python
+import nnsight
+from nnsight import TransformersModel
+
+model = TransformersModel("openai-community/gpt2", dispatch=True)
+prompt = "The Eiffel Tower is in the city of"
+```
 
 ## Execution order
 
 ### `OutOfOrderError`
 
-One class, three messages. Which one you get depends on where the worker was
-standing when the run ended, not on what the mistake was.
+One message — and, inside a loop, sometimes a warning instead of the error
+(below). Which you get depends on where the worker was standing when the run
+ended, not on what the mistake was.
 
-**Asked out of order, or never delivered.** The worker is not inside an
-iteration loop:
+**Asked out of order, or never delivered.**
 
-```
-'model.transformer.h.2.output.i0' was requested but the model already ran past it
+<!-- test: expect-error OutOfOrderError -->
+```python
+with model.trace(prompt):
+    late = model.transformer.h[8].output
+    early = model.transformer.h[2].output
+# OutOfOrderError: 'model.transformer.h.2.output.i0' was requested but the model already ran past it
 ```
 
 You read a later module and then an earlier one, or the module never executed at
@@ -39,17 +53,10 @@ loop's count, pass `min_new_tokens=` on transformers or `min_tokens=` /
 ```
 
 `tracer.iter[:8]`, `tracer.iter[2]`, and `tracer.iter[[0, 2, 7]]` all name an
-end, and a run that makes fewer steps cuts the loop short there. The unwind
-takes the worker out at the loop, so nothing after the loop runs — and what the
-loop saved is kept, so the result looks complete while being shorter than the
-bound. Check the `len()` of what you collected.
-
-Fix: `min_new_tokens=N` alongside `max_new_tokens=N` (`min_tokens=` /
-`ignore_eos=True` on vLLM), or `tracer.all()`. A **stop string** overrides both
-minimums, so a run with `stop_strings=` still cuts a bounded loop short — use
-`tracer.all()` there. Trailing statements go in a separate `tracer.invoke()`,
-not after the `with`: `tracer.result` outside the block raises
-``Cannot access `result` outside of interleaving``.
+end, and a run that makes fewer steps cuts the loop short there; check the `len()`
+of what you collected. The fixes — `min_new_tokens=`, or `tracer.all()` with the
+trailing code in a separate invoke — are in the debugging SKILL.md, "A loop that
+outran the run".
 
 **The `.iN` suffix is the tell.** It is the occurrence index — `.i3` is the fourth
 visit to that location, i.e. generation step 3. An occurrence *past anything the
@@ -62,14 +69,15 @@ a shifted request runs off the end of the run, so a bound that stops *short* of
 the run's last step (`iter[1:3]` over four steps) completes with no warning and no
 error, the writes landing one step late and the trailing code running. Verify a
 loop's writes against a no-write baseline per step rather than trusting a clean
-exit — see `docs/errors/out-of-order-error.md` for the full table.
+exit.
 
 **A `.source` op shifts even at step 0** when its module's `.source` is first
 touched inside the loop. `attn.output[0]` read before
 `attn.source.attention_interface_1.output` in `for step in tracer.iter[:4]` gives
-the op's steps 1–3 and a `.i3` "never reached" warning, with no error. Touch
-`attn.source` before the trace and the same body raises; read the op first and it
-is correct. Compare the lengths of parallel lists.
+the op's steps 1–3 and a `.i3` "never reached" warning, with no error — and the
+warning blames the loop bound. Touch `attn.source` before the trace and the same
+body raises; read the op first and it is correct. Compare the lengths of parallel
+lists.
 
 ## Context and setup
 
@@ -80,12 +88,17 @@ is correct. Compare the lengths of parallel lists.
 | `ValueError` | ``trace() needs an input, or at least one `with tracer.invoke(...)` block`` | `with model.trace():` with an empty body → pass an input or add an invoke. A body that also reads an envoy raises "Cannot access …" first, because the body runs before this check |
 | `ValueError` | ``Cannot invoke while the model is already running.`` | nested `tracer.invoke`, or an invoke opened inside an `iter` loop → open all invokes at the top level of the trace |
 | `AttributeError` | ``'NoneType' object has no attribute 'event'`` | a `with model.trace(...)` nested inside another trace → use `model.session()` for several traces, or sibling `tracer.invoke(...)` blocks for several inputs |
-| `ValueError` | ``The body of a traced `with` must start on its own line; nnsight runs the body itself, and can only intercept it at the start of a line.`` | `with model.trace(x): out = ...` → put the body on the next line |
+| `ValueError` | ``The body of a traced `with` must start on its own line; nnsight runs the body itself, and can only intercept it at the start of a line.`` | `with model.trace(x): out = ...` → put the body on the next line (raised below) |
 | `ValueError` | ``A traced `with` block cannot start with `try:`; nnsight intercepts the body at its first line, and a `try` there is the one statement Python gives it no way back out of. Put any statement above the `try`, or move the `try` outside the block.`` | the body's **first** statement is a `try` (with `except`, `finally`, or both) → put any statement above it, or wrap the whole `with` in the `try`. A `try` anywhere else in the body is ordinary code |
 | `SyntaxError` | ``'return' outside function`` | a `return` inside the block — the body is compiled on its own, outside any function → save the value and `return` it after the `with` |
 | `WithBlockNotFoundError` | *(no message)* | the block's source text isn't retrievable — a script piped to stdin (`python < s.py`), `exec(compile(str, ...))`, generated code → run the file by name. `python -c "..."` works |
 | `NotImplementedError` | ``NNsight does not support batching multiple invokes`` | base `NNsight` with 2+ *input* invokes → use one invoke, or implement `_batch_size`/`_batch`; empty invokes always work |
 | `AttributeError` | ``module 'nnsight' has no attribute 'list'`` (also `dict`, `apply`, `cond`, `iter`, `log`, `local`, `session`) | pre-0.8 code → [porting-pre-0.8.md](porting-pre-0.8.md) |
+
+<!-- test: expect-error ValueError -->
+```python
+with model.trace(prompt): one_line = model.output.save()
+```
 
 ## Coordination
 
@@ -93,19 +106,28 @@ is correct. Compare the lengths of parallel lists.
 |---|---|---|
 | `ValueError` | ``A barrier was never reached by every block it waits for; check the count it was created with`` | `tracer.barrier(n)` with `n` **larger** than the number of blocks that call it → pass the true count. This is the safe way to get the count wrong: it is loud, and it fails at run end without having released anything. A count that is too *small* releases early and says nothing — see the `NameError` row. **Call the barrier, don't wait on it**: `b = tracer.barrier(2)` then `b()`. There is no `b.wait()` |
 | `ValueError` | ``A batched `.skip()` has to cover every row: skip the module in every invoke, or none — a shared forward can't run for only the rows an invoke left unskipped.`` | `.skip()` in some invokes but not others → skip in all of them or none |
-| `NameError` | ``name 'src' is not defined`` | **(a)** a value from another invoke read before its producer ran → `tracer.barrier(n)`, or park the reader past the producing module first. **(b)** a `tracer.barrier(n)` whose `n` is *smaller* than the number of blocks holding it: it releases as soon as `n` of them arrive, so the waiting blocks resume before the producer has bound its value. Nothing mentions the barrier — the name in the message is the tell. Count the blocks that call it. See `docs/usage/barrier.md` |
+| `NameError` | ``name 'src' is not defined`` | **(a)** a value from another invoke read before its producer ran → `tracer.barrier(n)`, or park the reader past the producing module first. **(b)** a `tracer.barrier(n)` whose `n` is *smaller* than the number of blocks holding it: it releases as soon as `n` of them arrive, so the waiting blocks resume before the producer has bound its value. Nothing mentions the barrier — the name in the message is the tell. Count the blocks that call it. The `nnsight` skill's batching reference covers barriers |
+| `NameError` | ``name 'a' is not defined``, raised in the trace body **outside** any invoke | trace-body code between invokes runs before the invoke workers, so a name an invoke saves does not exist yet → do the work inside an invoke; to accumulate across invokes, `store = nnsight.save({})` in the body and `store[k] = ...` inside each invoke |
 
 ## Values and shapes
 
 | Exception | Message | Cause → fix |
 |---|---|---|
-| `UnboundLocalError` | ``cannot access local variable 'h' where it is not associated with a value`` | forgot `.save()`, or the block unwound at a loop before reaching that line → save it; check for an over-running `iter` loop above it |
+| `NameError` | ``name 'hidden' is not defined``, after the block at module level | forgot `.save()`, or the block unwound at a loop before reaching that line → save it; check for an over-running `iter` loop above it |
+| `UnboundLocalError` | ``cannot access local variable 'h' where it is not associated with a value`` | the same two causes, when the trace is inside a function |
 | `TypeError` | ``'tuple' object does not support item assignment`` | `attn.output[0] = x` → `attn.output[0][:] = x`, or rebuild the tuple and assign to `.output` |
 | `AttributeError` | ``'TransformersModel' object (nor its module) has attribute 'model'`` | wrong module path for this architecture → `scripts/inspect_model.py <repo_id>`. The same message appears when an `eproperty`'s preprocess raises `AttributeError`, since a failing property getter falls through to `__getattr__` |
+| `AttributeError` | ``'Envoy' object (nor its module) has attribute '100'. Did you mean: '10'?`` | an index past the last layer (`h[100]` on 12-layer GPT-2) — not an `IndexError`. The "Did you mean" is Python's suggestion, added when the traceback prints → index within `len(model.transformer.h)` |
 | `RuntimeError` | ``The expanded size of the tensor (10) must match the existing size (3) at non-singleton dimension 1.`` | a replacement tensor whose shape doesn't match the activation → build it from the activation (`torch.zeros_like(x)`, `x.shape`, `x.device`, `x.dtype`) |
 | shape error in a **later** module of a batched trace | e.g. an attention mask that no longer matches the hidden states' batch dim | a whole-tensor write in one invoke changed its row count — the splice takes the write as given, and nothing checks the height → build the replacement from the activation you were served. A lone invoke *is* the batch and may reshape freely |
 | `NotImplementedError` | ``This tensor does not require grad, so a backward session cannot produce gradients: nothing the block reads can ever receive one. The forward ran without gradient tracking (e.g. under torch.no_grad()), or the tensor was created without requires_grad=True.`` | a `with metric.backward():` inside a `torch.no_grad()` region → drop the `no_grad` around the trace |
 | `GuardOnDataDependentSymNode` | ``Could not guard on data-dependent expression ...`` | branching on **values** inside `model.scan(...)` — fake tensors have no data → branch on shapes only, or use a real trace |
+
+<!-- test: expect-error AttributeError -->
+```python
+with model.trace(prompt):
+    past_the_end = model.transformer.h[100].output.save()
+```
 
 ## vLLM refusals
 
@@ -120,9 +142,8 @@ read the shapes off the activations it serves.
 
 Everything else raised by an intervention arrives at the client as a
 `RuntimeError` whose message *begins* with the original type name and message,
-once the request ends (or at construction for the last two). The original class is
-not reconstructed across the process boundary — **match on the message, not the
-class**:
+once the request ends. The original class is not reconstructed across the process
+boundary — **match on the message, not the class**:
 
 <!-- test: skip nocompile -->
 ```python
@@ -135,7 +156,7 @@ except RuntimeError as error:
 |---|---|
 | ``'<location>' is not a tap on this engine, so a replayed CUDA graph never reaches it`` | reading a module location on a `taps=` engine that was not declared → add it to `taps`, or build the engine without `taps` (eager, every location served) |
 | ``... prompt was split across steps by chunked prefill`` | `enable_chunked_prefill=True` was passed and this prompt exceeded the step's token budget → drop the flag (off by default), or raise `max_num_batched_tokens` |
-| ``enforce_eager=... contradicts taps=...`` | `ValueError` at construction: the engine mode follows from `taps` → drop `enforce_eager` |
+| ``enforce_eager=... contradicts taps=...`` | not a `RuntimeError`: a plain `ValueError` in your process when the engine is built, since the engine mode follows from `taps` → drop `enforce_eager` |
 
 ## Remote
 
@@ -143,12 +164,10 @@ except RuntimeError as error:
 exception your block raises on NDIF. The class does not cross the network, so
 `except IndexError:` around a remote trace never matches: catch `RemoteError`
 (`nnsight.intervention.backends.remote`) and read the original type and message
-off the last line of its message. A worker-side error from a driver such as vLLM
-is re-raised at the client as a `RuntimeError` carrying the original type,
-message, and traceback.
+off the last line of its message.
 
 Common remote-only causes: a helper function from your own file that wasn't
-registered (`nnsight.register(...)`), an import that isn't on NDIF's whitelist, a
+registered (`nnsight.register(...)`), an import the server does not have, a
 model that is COLD rather than RUNNING, a missing API key, or a version skew
 between your machine and the server. `python scripts/check_env.py --remote` (in the
 `nnsight` skill) checks all of those at once. See the `remote` skill.
@@ -169,21 +188,15 @@ between your machine and the server. `python scripts/check_env.py --remote` (in 
 
 ## Reading a traceback
 
-By default nnsight strips **its own** frames so the traceback points at your code;
-the exception type is unchanged, so `except ValueError:` still works. Frames from
+By default nnsight strips most of its own frames — a few tracer frames remain, and
+the last frame is your line. The exception type is unchanged, so
+`except ValueError:` still works. Frames from
 torch, transformers, and your own helpers all stay — so a failure caused by a
 badly shaped write arrives with the model's stack intact, ending in torch, and the
 line that made the write is not in it. The `with` line at the top is what names
 your block.
 
 To see nnsight's internals — when you suspect the bug is in the library rather
-than your intervention:
-
-```python
-import nnsight
-nnsight.CONFIG.APP.DEBUG = True
-```
-
-or `NNSIGHT_DEBUG=1 python script.py`, or pass `-v` on the command line. On GPT-2
-that takes an in-block error from 4 frames to 14. Debug mode also makes remote runs
-log payload/result sizes and every status update.
+than your intervention — set `nnsight.CONFIG.APP.DEBUG = True`, or run with
+`NNSIGHT_DEBUG=1 python script.py`, or pass `-v` on the command line. Debug mode
+also makes remote runs log payload/result sizes and every status update.

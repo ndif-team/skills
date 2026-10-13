@@ -7,9 +7,7 @@ description: Trace and intervene on models that are not text-only — vision-lan
 
 `trace`, `.output`, `save` and gradients work on these models exactly as they do
 on a language model. What changes is **how you build the input**, **where the
-module tree puts things**, and how batching works: pixel and audio tensors do not
-pad, so only some input forms batch across invokes, and the ones that do are
-scoped per invoke on the language side only.
+module tree puts things**, and which inputs batch.
 
 <!-- test: setup -->
 ```python
@@ -49,12 +47,8 @@ with vlm.trace(inputs):
     hidden = vlm.model.language_model.layers[10].output.save()
     logits = vlm.output.logits.save()
 
-print(hidden.shape, logits.shape)
+print(hidden.shape, logits.shape)    # [1, 743, 1024] [1, 743, 152000]
 assert hidden.shape[1] == inputs["input_ids"].shape[1]
-```
-
-```
-torch.Size([1, 743, 1024]) torch.Size([1, 743, 152000])
 ```
 
 **743 positions for a short question.** Almost all of them are image patch
@@ -72,7 +66,6 @@ names are not shared across families. Measured on transformers 5.15:
 | repo | vision stack | adapter | text stack |
 |---|---|---|---|
 | `llava-hf/llava-interleave-qwen-0.5b-hf` | `model.vision_tower` | `model.multi_modal_projector` | `model.language_model` |
-| `trl-internal-testing/tiny-LlavaForConditionalGeneration` | `model.vision_tower` | `model.multi_modal_projector` | `model.language_model` |
 | `hf-internal-testing/tiny-random-Idefics3ForConditionalGeneration` | `model.vision_model` | *(none exposed)* | *(no `language_model`)* |
 | `Qwen/Qwen3-VL-4B-Instruct` | `model.visual` | `model.visual.merger` **and** `model.visual.deepstack_merger_list` | `model.language_model` |
 
@@ -116,18 +109,8 @@ assert (image_positions.diff() == 1).all()        # one contiguous span
 
 One contiguous span is a fact about a single-image prompt. A prompt with text between
 images gives one span per image, so treat the positions as a mask, not as a slice
-`[start:end]`. The span is also not the only place image information enters on every
-model: Qwen3-VL adds features from its tower (DeepStack) at the image positions again
-after each of its first three text blocks.
-
-nnterp's `StandardizedTransformer` serves this split as values: `model.vision.image_token_mask`
-is the `[batch, seq]` bool mask, and `model.vision.image_features` is what the text model
-receives at those positions, `[image_tokens, hidden]`, read where the wrapper writes the
-features into the token embeddings. On every wrapper it names the tower of,
-`layers[0].input[image_token_mask] == image_features` holds exactly, so ablating or
-patching `image_features` edits the image as the text model sees it. The `nnterp` skill
-covers loading a wrapper (`task="image-text-to-text"`), the tower's own values, and the
-wrappers it covers.
+`[start:end]`. (The `nnterp` skill serves this mask and the image features as named
+values on every VLM family it wraps.)
 
 Those positions exist only because the **processor** built the ids. The template
 string holds a single `<image>`, and the processor expands it into 729 copies;
@@ -170,10 +153,8 @@ assert top5(clean)[0][0] == top5(ablated)[0][0]        # same top-1 either way
 assert abs(top5(clean)[1][1] - top5(ablated)[1][1]) > 0.2
 ```
 
-```
-clean   [('The', 0.605), ('This', 0.324), ('It', 0.056), ('I', 0.004), ('You', 0.004)]
-ablated [('The', 0.805), ('A', 0.031), ('This', 0.026), ('If', 0.02), ('It', 0.015)]
-```
+On llava-interleave-qwen-0.5b, "The" stays on top while its probability moves
+from 0.61 to 0.81 and "This" drops from 0.32 to 0.03.
 
 Generation is the other metric that moves. Zeroing the projector cuts every
 image feature at once, and the answer changes even though the first token does
@@ -192,11 +173,6 @@ answer = lambda ids: vlm.tokenizer.decode(ids[0, prompt_length:], skip_special_t
 print("with image:", repr(answer(ids_clean)))
 print("projector zeroed:", repr(answer(ids_blind)))
 assert answer(ids_clean) != answer(ids_blind)
-```
-
-```
-with image: 'The color of the image is not specified in the caption.'
-projector zeroed: 'The color is this.'
 ```
 
 ### What batches, and what a batched VLM trace still gets wrong
@@ -237,9 +213,8 @@ assert len(swept) == 3
 
 **Only the language side is reliably scoped per invoke.** nnsight decides an
 invoke's rows from a value's leading dimension — the batch size, or a whole
-multiple of it (see the `nnsight` skill's
-[batching.md](../nnsight/references/batching.md#which-values-are-scoped-to-your-rows)).
-A vision-tower or projector activation is batched over **images**, which lines up
+multiple of it (the `nnsight` skill's batching reference, "Which values are scoped
+to your rows"). A vision-tower or projector activation is batched over **images**, which lines up
 with the prompt rows only when every invoke carries the same number of images. Put
 a two-image invoke beside a one-image invoke and
 `vlm.model.multi_modal_projector.output` is `(3, 729, 1024)` in *both* of them:
@@ -281,18 +256,12 @@ with sd.generate(PROMPT, **SETTINGS) as tracer:
 print(mid.shape, full.images[0].shape)
 ```
 
-Precision goes by `torch_dtype=`, diffusers' spelling. `dtype=`, which is what
-`TransformersModel` takes, is accepted and ignored, leaving the pipeline in
-float32.
-
-### A traced run denoises once
-
-`with sd.generate(...)` is a *traced* run, and a traced run defaults to
-`num_inference_steps=1`. The same call means one denoising step inside a `with`
-and the pipeline's default outside it. On SD 1.4 that is 1 denoiser forward
-against 51, and a single step gives a noise blob rather than an image with
-nothing printed to say so. Name the step count on every traced generation whose
-image you intend to look at.
+Two silent defaults. Precision goes by `torch_dtype=`, diffusers' spelling —
+`dtype=` is accepted and ignored, leaving the pipeline in float32. And **a traced
+run denoises once**: inside a `with`, `sd.generate(...)` defaults to
+`num_inference_steps=1` (outside it, the pipeline's default — 51 forwards on SD
+1.4), which gives a noise blob with nothing printed to say so. Name the step count
+on every traced generation whose image you intend to look at.
 
 ### Per-timestep interventions
 
@@ -351,18 +320,13 @@ for layer in (0, 6, 12, 21):
     distances[layer] = float(np.abs(lensed.images[0] - full.images[0]).mean())
 
 print({k: round(v, 4) for k, v in distances.items()})
-assert distances[0] > distances[21]
-```
-
-```
-{0: 0.2296, 6: 0.1796, 12: 0.1513, 21: 0.0926}
+assert distances[0] > distances[21]      # {0: 0.23, 6: 0.18, 12: 0.15, 21: 0.09}
 ```
 
 Deeper layers land closer to the image the full encoder produces. The images
 themselves are the result worth looking at: Toker et al. report that CLIP
 encoders settle on a compound prompt's first noun early and add the second later,
-while T5 encoders do the reverse. The `diffusion_lens.ipynb` tutorial reproduces
-that on SD 1.5, Deep Floyd, SDXL and FLUX, with the module paths for each.
+while T5 encoders do the reverse.
 
 Module paths for the lens differ by encoder: CLIP layers are
 `text_encoder.encoder.layers[i]` and return a tensor; T5 blocks are
@@ -408,29 +372,20 @@ assert correlation(latents[-1]) > correlation(latents[0])
 assert correlation(latents[-1]) > correlation(noise[-1])
 ```
 
-```
-step 0: latent 0.362   conv_out 0.333
-step 1: latent 0.400   conv_out 0.329
-step 2: latent 0.467   conv_out 0.317
-step 3: latent 0.565   conv_out 0.296
-step 4: latent 0.691   conv_out 0.261
-step 5: latent 0.838   conv_out 0.219
-```
+Over six steps the latent's correlation with the final image climbs from 0.36 to
+0.84 while `conv_out`'s falls from 0.33 to 0.22.
 
 `.clone()` matters: the pipeline reuses the latent buffer, so references saved
 across steps all end up holding the last step's data.
 
-Guidance doubles the denoiser's batch. `guidance_scale=0.0` above keeps it at one
-row; above 1 the rows are the unconditional half followed by the conditional
-half, so row 0 decodes to the empty prompt's image, not the prompt's.
-
-**Under guidance, write by assignment rather than in place.** Every example here
-runs at `guidance_scale=0.0`, which is *not* the diffusers default (7.5). With
-guidance on, one prompt owns two non-adjacent row ranges, so the per-invoke value
-your block sees is stitched from both — a copy, not a view into the model's
-tensor. Reads are unaffected, but `output[:] = x` can write into that copy and
-never reach the model, with no error. `output = x` goes through the swap path and
-always lands. Whichever you use, check that the image actually moved.
+**Guidance doubles the denoiser's batch, and changes how writes land.** Every
+example here runs at `guidance_scale=0.0`, which is *not* the diffusers default
+(7.5). Above 1 the rows are the unconditional half followed by the conditional
+half, so row 0 decodes to the empty prompt's image. One prompt then owns two
+non-adjacent row ranges, so the value your block sees is stitched from both — a
+copy, not a view. Reads are unaffected, but `output[:] = x` can write into that
+copy and never reach the model, with no error; `output = x` always lands. Check
+that the image actually moved.
 
 ### Cross-attention: where the prompt acts
 
@@ -455,130 +410,26 @@ assert change > 0.01
 ```
 
 Cut at `to_out[0].input` — the post-attention, pre-projection activation. That
-removes the layer's contribution while letting attention itself run. The
-`cross-attention-ablation.ipynb` tutorial sweeps all 16 layers of SD 1.4 this
-way; one of them turns out to carry the prompt's binding to a specific painting.
+removes the layer's contribution while letting attention itself run. Path names
+differ between UNet and DiT pipelines, so list them rather than hard-coding.
 
-Path names differ between UNet and DiT pipelines, so list them rather than
-hard-coding.
+## Other tasks and chunked tasks
 
-## Other tasks
-
-Any task the `transformers` pipeline API supports works through
-`TransformersModel` with the right `task=`. Which preprocessor is populated
-depends on the task, and the others are `None`:
-
-| task | populated |
-|---|---|
-| `image-text-to-text` | `processor`, `tokenizer` (from the processor) |
-| `image-classification`, `image-feature-extraction` | `image_processor` |
-| `automatic-speech-recognition` | `feature_extractor`, `tokenizer` |
-| `audio-classification` | `feature_extractor` |
-| `fill-mask`, `text-classification`, `token-classification` | `tokenizer` |
-
-`model.tokenizer` is populated on a VLM. It is `None` for the tasks with no text
-side, which is where a `tokenizer.decode` call falls over.
-
-```python
-vision = TransformersModel("facebook/dinov3-vits16-pretrain-lvd1689m",
-                           task="image-feature-extraction", dispatch=True)
-
-with vision.trace(image):
-    patches = vision.model.layer[6].output.save()
-
-print(patches.shape, "| tokenizer:", vision.tokenizer)
-assert vision.tokenizer is None
-```
-
-```
-torch.Size([1, 201, 384]) | tokenizer: None
-```
-
-The layer path is `vision.model.layer[i]`: the root envoy's child is the
-`DINOv3ViTModel`, whose blocks are `layer`. `vision.encoder` does not exist and
-raises `AttributeError: 'TransformersModel' object (nor its module) has attribute
-'encoder'`.
-
-### Chunked tasks
-
-Some tasks split one input into several encodings and forward each separately:
-token windows past the model's length limit, one entailment pair per candidate
-label, a long recording's windows. Those become **rows of the trace's single
-forward**, in the order the task yields them, so a read inside the block sees one
-row per chunk.
-
-```python
-ner = TransformersModel("hf-internal-testing/tiny-random-BertForTokenClassification",
-                        task="token-classification", dispatch=True)
-
-with ner.trace("John lives in Paris"):
-    short = ner.output.logits.save()
-
-with ner.trace(" ".join(["John lives in Paris"] * 200), stride=16):
-    windows = ner.output.logits.save()
-
-print(short.shape, windows.shape)
-assert short.shape[0] == 1 and windows.shape[0] == 7
-```
-
-```
-torch.Size([1, 18, 2]) torch.Size([7, 512, 2])
-```
-
-Six things to know about these tasks:
-
-- A chunked invoke is the whole batch. The row count belongs to the task, so
-  putting one next to another invoke is refused with `task=... splits this invoke
-  into N forward rows`.
-- `document-question-answering` and `zero-shot-object-detection` take the task's
-  own input dict (`{"image": ..., "question": ...}`), which goes through the
-  task's preprocessing rather than being read as a model encoding.
-- An encoder-decoder task needs the decoder's side of the forward:
-  `whisper` traces with `decoder_input_ids=` and gives one row per audio chunk
-  (70 s at `chunk_length_s=30` is 3 rows of `[1500, 384]` at the encoder).
-- **Whisper runs its encoder twice.** The first pass is language detection, the
-  second is the transcription. A block that does not loop binds to the *first*
-  one, so an edit written to change the transcript changes the language guess
-  instead and the text comes back unaltered. Wrap it: `for _ in tracer.iter[:2]:`,
-  and act on the second iteration.
-- `mask-generation` is refused. Its preprocessing runs the model to embed the
-  image before yielding one input per batch of candidate points, so there is no
-  single forward to assemble. Use `model.pipe(image)`, or build an encoding with
-  `model.image_processor` and pass the points as `input_points=`.
-- `keypoint-matching` is refused too, for a different reason: its unit input is
-  a *pair* of images, which a trace's list convention (one prompt per element)
-  would split. Use `model.pipe([image_a, image_b])`, or trace an encoding you
-  build with `model.image_processor(images=[image_a, image_b],
-  return_tensors='pt')`.
-
-```python
-zero_shot = TransformersModel("hf-internal-testing/tiny-random-DistilBertForSequenceClassification",
-                              task="zero-shot-classification", dispatch=True)
-
-with zero_shot.trace("one day I will see the world",
-                     candidate_labels=["travel", "cooking", "dancing"]):
-    per_label = zero_shot.output.logits.save()
-
-print(per_label.shape)         # one row per candidate label
-assert per_label.shape[0] == 3
-```
+Any `transformers` pipeline task works through `TransformersModel` with the right
+`task=` — image classification and feature extraction, ASR, NER, zero-shot. Which
+preprocessor is populated depends on the task (`model.tokenizer` is `None` when
+there is no text side), and some tasks — long-text NER, zero-shot classification,
+long audio — split one input into several forward rows, one per chunk, which makes
+a chunked invoke the whole batch. Whisper also runs its encoder twice.
+[references/other-tasks.md](references/other-tasks.md) has the preprocessor table,
+a vision-encoder trace, the chunked tasks and the two tasks a trace refuses.
 
 ## What to watch for
-
-**Sequence length is dominated by non-text tokens.** Compute spans from the input
-ids rather than reusing indices from a text-only experiment.
-
-**Module nesting is deeper and less stable.** VLM layouts differ across families
-and move between `transformers` releases. Inspect first.
 
 **`scan` fails on some VLM families** with
 `GuardOnDataDependentSymNode`: preprocessing takes a size that depends on tensor
 *data*, which fake tensors cannot supply. It raises on Idefics3 and Qwen3-VL and
 succeeds on both Llava variants. Run a real trace when `scan` refuses.
-
-**Diffusion has no single "output token".** Metrics are image-space or
-latent-space, so decide what you are measuring before intervening; the
-`interp-experiment-design` skill covers choosing one.
 
 ## Related skills
 

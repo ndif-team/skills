@@ -125,7 +125,8 @@ only needs layer 5 of a 80-layer model, stop there.
 ## model.session() — several traces, one scope
 
 Inside a session, values flow from one trace to the next without `.save()`; only
-what you save escapes the session.
+what you save escapes the session. (Only the outermost context filters on saves —
+the same holds for a `tensor.backward()` block inside a trace.)
 
 ```python
 with model.session():
@@ -211,7 +212,9 @@ every later experiment.
 ## Conditionals and loops
 
 Ordinary Python works inside a trace body; you are operating on real tensors in a
-worker greenlet.
+worker greenlet. Two contexts restrict it: `model.scan()` (fake tensors — branch on
+shapes only, not values) and remote traces (the body is serialized, so helpers from
+your own files need `nnsight.register(...)`).
 
 ```python
 with model.trace(prompt):
@@ -227,10 +230,6 @@ One syntactic restriction: a trace body cannot **start** with `try:` — nnsight
 intercepts the body at its first line, and a `try` there is the one statement
 Python gives it no way back out of. Put any statement above it, or the `try`
 outside the `with`.
-
-The exceptions are `model.scan()` (fake tensors — branch on shapes only, not
-values) and remote traces (the body is serialized, so helpers from your own files
-need `nnsight.register(...)`).
 
 ## Related
 

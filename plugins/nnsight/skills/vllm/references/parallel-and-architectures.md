@@ -2,7 +2,9 @@
 
 ## Tensor parallelism is transparent to the block
 
-<!-- test: gpu slow setup -->
+Needs two GPUs, so the suite does not run it:
+
+<!-- test: skip -->
 ```python
 import torch
 import nnsight
@@ -48,10 +50,6 @@ sharded (the block above sees an 896-wide `o_proj` input against a 448-wide weig
   shards: `model.logits_processor(model.lm_head, model.model.norm(h))`.
   `model.lm_head(h)` raises `LMHead's weights should be used in the sampler`.
   `norm(h)` returns a tensor; `norm(h, residual)` is the fused add and returns a pair.
-- vLLM sets `VLLM_WORKER_MULTIPROC_METHOD=spawn` itself once CUDA is initialized,
-  which dispatching an engine does, and logs `Reasons: CUDA is initialized`. What
-  that costs you is the `if __name__ == "__main__":` guard in the main SKILL — spawn
-  re-imports the main module, at any `tensor_parallel_size`, including 1.
 - Decode-context parallelism on MLA models is handled.
 
 Throughput under TP is where `taps=` matters most — see
@@ -61,13 +59,15 @@ Throughput under TP is where `taps=` matters most — see
 
 The router `mlp.gate` is a `ReplicatedLinear`, full and identical on every rank;
 its `.output` is a pair `(logits, bias)` of shape `[tokens, num_experts]`. The
-fused experts (`mlp.experts`) return the whole value on 0.27 (the all-reduce moved
-inside the layer). Individual experts are not submodules — vLLM stacks them into
+fused experts (`mlp.experts`) return the whole value. Individual experts are not submodules — vLLM stacks them into
 one grouped kernel — and neither is the top-k selection: recompute it from the
 logits, matching the checkpoint's `num_experts_per_tok` / `norm_topk_prob`.
 
-<!-- test: skip -->
+<!-- test: gpu slow requires vllm -->
 ```python
+import nnsight
+from nnsight.modeling.vllm import VLLM
+
 model = VLLM("Qwen/Qwen1.5-MoE-A2.7B", dispatch=True, gpu_memory_utilization=0.5)
 
 with model.trace("The theory of relativity was developed by", temperature=0.0, max_tokens=6) as tracer:
@@ -79,6 +79,7 @@ with model.trace("The theory of relativity was developed by", temperature=0.0, m
 
 print(result.outputs[0].text, [t.tolist() for t in tops])
 # ' Albert Einstein. It is a' [[17, 26], [8, 36], [5, 22], [22, 42], [10, 3], [45, 40]]
+assert len(tops) == 6 and all(t.shape == (2,) for t in tops)
 ```
 
 To ablate an expert, mask its router logit: `mlp.gate.output[0][:, e] = -inf`.
@@ -88,9 +89,8 @@ ordinary submodules.
 **This section is vLLM's layout only.** The same checkpoint under
 `TransformersModel` gives the router a *three*-tuple `(logits, weights, index)`,
 and the block uses `[1]` and `[2]` — so `gate.output[0][:, e] = -inf` there is a
-silent no-op. The `nnsight` skill's
-[modules-and-architectures.md](../../nnsight/references/modules-and-architectures.md)
-has the `TransformersModel` version.
+silent no-op. The `nnsight` skill's modules-and-architectures reference has the
+`TransformersModel` version.
 
 ## Hybrid (linear-attention) trunks
 
@@ -98,14 +98,15 @@ Qwen3-Next / Qwen3.5 / Qwen3.6 interleave gated-delta-net layers with full
 attention. Both are ordinary decoder-layer envoys with the same `(hidden,
 residual)` output; tell them apart by the child they carry:
 
-<!-- test: skip -->
+<!-- test: gpu slow requires vllm -->
 ```python
 model = VLLM("Qwen/Qwen3.5-0.8B", dispatch=True, gpu_memory_utilization=0.4)
 layers = model.language_model.model.layers          # a checkpoint with a vision tower
 kinds = {i: "linear" if hasattr(layers[i]._module, "linear_attn") else "attention"
          for i in range(len(layers))}
-print([i for i, k in kinds.items() if k == "attention"])
-# [3, 7, 11, 15, 19, 23]
+attention = [i for i, k in kinds.items() if k == "attention"]
+print(attention)   # [3, 7, 11, 15, 19, 23]
+assert attention == [3, 7, 11, 15, 19, 23]
 ```
 
 The recurrent state lives in vLLM's state cache, not in any module output, so it

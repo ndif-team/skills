@@ -1,17 +1,13 @@
 ---
 name: nnsight
-description: Read, modify, and analyze the internals of neural networks with nnsight — tracing activations, intervening on modules, batching interventions, gradients, caching, generation, and running on NDIF. Use for any task that touches model internals rather than just model outputs: interpretability experiments, activation extraction, ablation, patching, steering, probing, circuit analysis, or debugging existing nnsight code. Covers nnsight 0.8 (TransformersModel, tracer.result, no .value) — load this before writing any nnsight code, since idioms from older versions are still widespread and silently wrong.
+description: Read, modify, and analyze the internals of neural networks with nnsight — tracing activations with model.trace, intervening on modules, batching interventions, gradients, caching, generation, and running on NDIF. Use for any task that touches model internals rather than just model outputs: interpretability experiments, activation extraction, ablation, patching, steering, probing, circuit analysis, or debugging existing nnsight code — and whenever you would otherwise reach for PyTorch forward hooks (register_forward_hook) to read or edit activations. Covers nnsight 0.8 (TransformersModel, tracer.result, no .value) — load this before writing any nnsight code, since idioms from older versions are still widespread and silently wrong.
 ---
 
 # nnsight
 
-nnsight gives you access to every intermediate value in a model's forward pass —
-reading them, replacing them, backpropagating through them — for models you run
-locally and for models too large to fit on your machine (via NDIF).
-
-This skill is the general-purpose reference. Techniques built on it (logit lens,
-activation patching, steering, …) have their own skills; see the bottom of this
-file.
+nnsight reads, replaces and backpropagates through every intermediate value in a
+model's forward pass, locally or on NDIF for models too large for your machine.
+Techniques built on it have their own skills (listed at the bottom).
 
 ## Orientation
 
@@ -36,17 +32,10 @@ assert model.tokenizer.decode(clean[0, -1].argmax()) == " Paris"
 assert model.tokenizer.decode(edited[0, -1].argmax()) == " London"
 ```
 
-Exact-token asserts like these hold for a float32 model. In bfloat16 an argmax
-whose top two logits nearly tie can flip between batched and solo runs, or between
-GPU and CPU — assert on a logit difference instead when the margin is small.
-
-Install: `pip install nnsight` (needs `torch` and `transformers`).
-
-To choose one device pass `device=` (`device="cpu"`, `device="cuda:1"`). With no
-device the model lands on the first GPU, and so does `device_map="cpu"`: nnsight
-loads through `transformers.pipeline(...)`, which moves a single-device model to
-its own `device`. `device_map=` is for spreading a model across devices (`"auto"`,
-a dict). Check with `next(model.parameters()).device`.
+Install: `pip install nnsight` (needs `torch` and `transformers`). Pick a device
+with `device="cpu"` / `device="cuda:1"`, not `device_map=` — `device_map="cpu"`
+still lands on the GPU; see the device table in
+[references/modules-and-architectures.md](references/modules-and-architectures.md).
 
 ## The five things that break agent-written nnsight code
 
@@ -71,27 +60,19 @@ There is no `.value` in 0.8 — the saved variable *is* the tensor.
 value, and the model has already gone past. Within a block, the submodules
 (`ln_1`, `attn`, `mlp`) come before the block's own `.output`. This binds writes
 too — an edit at layer 0 goes above a read at layer 11, not below it. Inside a
-`tracer.iter` loop a wrong-order read can bind to the *next* step instead of
-raising (past step 0 for any location; at step 0 too for a `.source` op first
-touched in the loop), so per-step lists come back shifted and one short — see
-[references/generation.md](references/generation.md).
+`tracer.iter` loop a wrong-order read binds to the *next* step instead of raising
+— see [references/generation.md](references/generation.md).
 
 **3. Don't guess module paths or output types.** `model.transformer.h[i]` is GPT-2;
 Llama is `model.model.layers[i]`; Gemma-3 is `model.model.language_model.layers[i]`.
 A block's `.output` is a plain tensor, but an attention submodule's is a tuple —
-so `.output[0]` copied from an old example silently selects batch row 0. Run:
-
-```
-python scripts/inspect_model.py <repo_id> --prompt "your prompt"
-```
-
-It builds the model on `meta` (a 27B model takes ~8s, no weights downloaded) and
-prints the layer path, every block child **in execution order**, and whether each
+so `.output[0]` copied from an old example silently selects batch row 0. Run
+`python scripts/inspect_model.py <repo_id> --prompt "..."`: without downloading
+weights, it prints every block child **in execution order** and whether each
 output is a tensor or a tuple.
 
 **4. One trace is one forward pass — structure by input, not by activation.**
-Everything you want from one input comes out of one trace. N traces to fetch N
-layers is N forward passes (and, remotely, N network round-trips).
+N traces to fetch N layers is N forward passes (remotely, N round-trips).
 
 **5. Old nnsight code is everywhere and it is wrong here.** `.value`,
 `nnsight.list()`, `tracer.next()`, `with tracer.all():`, `LanguageModel`,
@@ -105,7 +86,7 @@ convert it first; see the `debugging` skill.
 | one forward pass | `model.trace(x)` | the model's output object |
 | generated tokens | `model.generate(x, max_new_tokens=N)` | token ids on `tracer.result` (the checkpoint's `generation_config` decides sampling — pass `do_sample=False`) |
 | decoded text / labels | `model.pipe(x, ...)` | pipeline records (often sampled — pass `do_sample=False`) |
-| shapes, no compute | `model.scan(x)` | fake tensors: shapes and dtypes only — it cannot see devices or values. Loader-backed models only (`TransformersModel`, `DiffusionModel`, `VLLM`); plain `NNsight(module)` has no `.scan` |
+| shapes, no compute | `model.scan(x)` | fake tensors: shapes and dtypes only, no values (not on plain `NNsight`) |
 | several traces sharing values | `model.session()` | values flow between traces |
 | a permanent intervention | `model.edit(inplace=True)` | replayed on every later run |
 
@@ -119,28 +100,22 @@ prompt = "The Eiffel Tower is in the city of"
 paris = model.tokenizer(" Paris").input_ids[0]
 
 with model.trace() as tracer:
-    scores = nnsight.save([])
+    scores = nnsight.save({})                   # keyed: invokes finish in model order
     for layer in range(len(model.transformer.h)):
         with tracer.invoke(prompt):
             model.transformer.h[layer].output[:, -1, :] = 0
-            scores.append(model.output.logits[0, -1, paris])
+            scores[layer] = model.output.logits[0, -1, paris]
 
-print([round(s.item(), 2) for s in scores])     # 12 ablations, one forward pass
+assert sorted(scores) == list(range(12))        # 12 ablations, one forward pass
 ```
 
 Inside an invoke, index as if that input were alone — `[:, -1, :]` means "this
-invoke's rows, last position".
+invoke's rows, last position". Trace-body code *outside* the invokes runs before
+any of them, so it raises `NameError` on a name an invoke binds — combine across
+invokes through a `nnsight.save({})` written from inside each one, as above.
 
-**Grab many modules at once** with `tracer.cache()` (call it first thing; it
-observes post-intervention values, and returns a *list* per module when the module
-runs more than once, as in generation):
-
-```python
-with model.trace(prompt) as tracer:
-    cache = tracer.cache(modules=[model.transformer.h[0], model.transformer.h[11]])
-
-print(cache["model.transformer.h.0"].output.shape)
-```
+**Grab many modules at once** with `tracer.cache(modules=[...])`, opened first thing
+in the trace — see [references/caching-and-scan.md](references/caching-and-scan.md).
 
 **Gradients** — capture in the forward, read in reverse order inside
 `with metric.backward():`:
@@ -151,16 +126,12 @@ with model.trace(prompt):
     metric = model.output.logits[0, -1, paris]
     with metric.backward():
         grad = hidden.grad.clone().save()
-
-print(grad.shape)
 ```
 
 **Generation** — a `tracer.iter` loop must not ask for a step the run does not
-make. A bound the run meets keeps the code after the loop; a loop that outruns
-the run warns, keeps what it saved, and drops the statements after it — the
-result looks complete while being short. `max_new_tokens` is an upper bound, so
-pass `min_new_tokens=` when the bound has to hold, and check the `len()` of what
-you collected:
+make: one that outruns the run warns, keeps what it saved, and silently drops the
+statements after the loop. `max_new_tokens` is only an upper bound, so pass
+`min_new_tokens=` when the bound has to hold, and check `len()` of what you collected:
 
 ```python
 with model.generate(prompt, max_new_tokens=3, min_new_tokens=3) as tracer:
@@ -169,8 +140,7 @@ with model.generate(prompt, max_new_tokens=3, min_new_tokens=3) as tracer:
         picks.append(model.output.logits[0, -1].argmax(dim=-1))
     ids = tracer.result.save()
 
-assert len(picks) == 3
-print(model.tokenizer.decode(ids[0]))
+assert len(picks) == 3 and ids.shape[1] == 13
 ```
 
 ## Running it somewhere else
@@ -183,17 +153,12 @@ download:
 ```python
 with model.trace(prompt, remote=True):
     last = model.transformer.h[-1].output[:, -1].detach().cpu().save()
-
-print(last.shape)
 ```
 
-Anything beyond one trace (loops, sweeps, multi-step experiments) should be a
-`model.session(remote=True)` — one job instead of N round-trips. See the
-`remote` skill before writing remote code.
+Anything beyond one trace should be a `model.session(remote=True)` — one job
+instead of N round-trips. Load the `remote` skill before writing remote code.
 
 ## References
-
-Read the one that matches the task before writing code.
 
 | File | Covers |
 |---|---|
@@ -205,32 +170,36 @@ Read the one that matches the task before writing code.
 | [references/caching-and-scan.md](references/caching-and-scan.md) | `tracer.cache()`, `model.scan()`, fake-tensor rules |
 | [references/control-flow.md](references/control-flow.md) | `skip`, `tracer.stop`, `session`, `edit`, conditionals |
 | [references/source-tracing.md](references/source-tracing.md) | `.source` — attention patterns and other values inside a forward |
-| [references/modules-and-architectures.md](references/modules-and-architectures.md) | model classes, per-family module paths (MoE, SSM, hybrids included), `rename`, wrapping your own module, attaching SAEs/probes, custom served values with `eproperty` / `envoys=` |
-| [references/api-reference.md](references/api-reference.md) | every method, property, config key, and exception in tables |
+| [references/modules-and-architectures.md](references/modules-and-architectures.md) | constructor and device placement, per-family module paths (MoE, SSM, hybrids included), `rename`, wrapping your own module, attaching SAEs/probes, custom served values with `eproperty` / `envoys=` |
+| [references/api-reference.md](references/api-reference.md) | model classes and every method, property, config key, and exception in tables |
 
-Scripts (run them, don't read them):
-
-- `scripts/inspect_model.py <repo_id> [--prompt P] [--grep attn] [--depth 2]
-  [--task text-generation] [--trust-remote-code]` — module paths, execution order,
-  tensor-vs-tuple and MoE router/expert paths, without loading weights. It prints
-  the task and the class it built: the task decides the class, and the class
-  decides the tree
-- `scripts/check_env.py [--remote]` — versions, GPUs, NDIF key/host, deployed
-  models, and the local-vs-NDIF package diff
-
-## Before you run an experiment
-
-- Module paths and output types confirmed with `inspect_model.py`, not assumed
-- Every value you need after the block is `.save()`d, containers not elements
-- Module accesses in forward order; sweeps batched into invokes
-- A control condition in the same trace (unmodified run) to compare against
-- For generation: bounded `tracer.iter[:N]`, and `do_sample=False` if you want
-  reproducibility from `pipe`
-- For large models: reduce metrics *inside* the trace before saving
+Scripts (run them, don't read them): `scripts/inspect_model.py <repo_id>
+[--prompt P] [--grep attn]` — module paths, execution order, tensor-vs-tuple,
+without weights; `scripts/check_env.py [--remote]` — versions, GPUs, NDIF key and
+host, deployed models.
 
 ## Related skills
 
+Techniques:
+
+- `ablation` — remove a component (zero, mean, resample) to test necessity
+- `activation-patching` — copy activations between runs to localize a behavior
+- `attribution-patching` — gradient approximation of patching, for screening
+- `causal-tracing` — ROME-style corrupt-and-restore to find where a fact lives
+- `attention-analysis` — attention patterns, per-head metrics, head types
+- `logit-lens` — decode intermediate residual streams through the unembedding
+- `probing` — classifiers on activations: what is decodable, and where
+- `circuit-discovery` — find and validate the subgraph a task uses
+- `model-steering` — add directions to the residual stream at inference
+- `model-editing-and-lora` — persistent weight/activation edits, ROME, LoRA
+- `sae-and-dictionary-learning` — sparse autoencoders: attach, read, train
+- `interp-experiment-design` — metrics, prompt sets, controls, baselines
+
+Infrastructure:
+
+- `remote` — running on NDIF: sessions, request batching, download size
 - `debugging` — an error, a hang, an empty result, or pre-0.8 code to port
-- `remote` — running on NDIF: sessions, batching requests, download size
-- `logit-lens`, `activation-patching`, `attribution-patching`, `causal-tracing`,
-  `model-steering` — techniques built on this API
+- `vllm` — nnsight inside the vLLM engine: throughput, serving, taps
+- `tensor-parallel` — a model sharded across GPUs with transformers TP
+- `quantization` — 4/8-bit loading and what it changes in a trace
+- `diffusion-and-multimodal` — VLMs, diffusion pipelines, audio/vision encoders

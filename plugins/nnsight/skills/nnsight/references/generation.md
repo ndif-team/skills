@@ -1,7 +1,7 @@
 # Multi-Token Generation
 
-Three run methods, three different return values. Picking the wrong one is the
-most common source of "why is my output empty / not text / not reproducible".
+Three run methods, three return values. Picking the wrong one is the usual cause of
+"why is my output empty / not text / not reproducible".
 
 | Method | Runs | `tracer.result` is | Sampling |
 |---|---|---|---|
@@ -34,19 +34,15 @@ reading it afterwards raises `ValueError: Cannot access 'result' outside of
 interleaving`. `model.generator.output` hands back the identical tensor and warns
 that `tracer.result` is the way to ask for it.
 
-Generation through the model uses the **checkpoint's own `generation_config`**,
-which is not the same as greedy. It is greedy on a base model that ships no
-sampling defaults (gpt2, SmolLM2-135M), and *sampled* on most instruct
-checkpoints: Qwen3-8B ships `do_sample=True, temperature=0.6, top_p=0.95`,
-Llama-3.2-1B-Instruct `do_sample=True, temperature=0.6, top_p=0.9`. Pass
-`do_sample=False` when you need determinism; all kwargs are forwarded to the
-underlying `generate`.
+Generation uses the **checkpoint's own `generation_config`**. A base model that
+ships no sampling defaults (gpt2, SmolLM2-135M: `generation_config.do_sample` is
+`None`) decodes greedily; most instruct checkpoints *sample* (Qwen3-8B and
+Llama-3.2-1B-Instruct ship `do_sample=True, temperature=0.6`). Pass
+`do_sample=False` for determinism — kwargs are forwarded to `generate`. Two runs
+disagreeing, or a per-step reading that disagrees with the emitted tokens, is
+sampling far more often than a bug in the intervention.
 
-This is worth a habit rather than a check. Two runs of the same prompt
-disagreeing, or a per-step reading that disagrees with the tokens that came out,
-is sampling far more often than it is a bug in the intervention.
-
-Called without a `with` block it simply returns the ids: `ids = model.generate(prompt, max_new_tokens=3)`.
+Called without a `with` block it returns the ids: `ids = model.generate(prompt, max_new_tokens=3)`.
 
 ## pipe — decoded records
 
@@ -58,9 +54,7 @@ assert records[0]["generated_text"].startswith(prompt)
 print(records[0]["generated_text"])
 ```
 
-Note `do_sample=False`:
-gpt2's pipeline config asks for sampling, so pipe output is non-deterministic
-unless you turn it off.
+gpt2's pipeline config asks for sampling, hence `do_sample=False`.
 
 ## Interventions during generation
 
@@ -75,40 +69,55 @@ with model.generate(prompt, max_new_tokens=5) as tracer:
 print(model.tokenizer.decode(ids[0]))
 ```
 
-To act on every step, loop over `tracer.iter[...]`:
-
-```python
-with model.generate(prompt, max_new_tokens=5) as tracer:
-    for step in tracer.iter[:5]:
-        model.transformer.h[6].output[:, -1, :] *= 0.5
-    ids = tracer.result.save()
-
-print(model.tokenizer.decode(ids[0]))
-```
-
-## Collecting per-step values
-
-```python
-with model.generate(prompt, max_new_tokens=5) as tracer:
-    picks = nnsight.save([])
-    for step in tracer.iter[:5]:
-        picks.append(model.output.logits[0, -1].argmax(dim=-1))
-    ids = tracer.result.save()
-
-print([model.tokenizer.decode(p) for p in picks])
-```
-
-`step` is a real integer, so ordinary Python works inside the loop:
+To act on every step, loop over `tracer.iter[...]`. `step` is a real integer, so
+ordinary Python works inside the loop:
 
 ```python
 with model.generate(prompt, max_new_tokens=4) as tracer:
     for step in tracer.iter[:4]:
+        model.transformer.h[6].output[:, -1, :] *= 0.5     # every step
         if step >= 2:
-            model.transformer.h[8].output[:, -1, :] += 2.0
+            model.transformer.h[8].output[:, -1, :] += 2.0  # steps 2 and 3
     ids = tracer.result.save()
 
 print(model.tokenizer.decode(ids[0]))
 ```
+
+Other forms: `tracer.iter[2]` (one step), `tracer.iter[1:3]` (a range),
+`tracer.iter[[0, 2, 4]]` (a list). Negative indices raise — there is no "last
+step" shorthand. A `with tracer.iter[...]:` block is deprecated in favour of the
+`for` loop.
+
+### What a step is
+
+`tracer.iter` counts forward passes, and step *k*'s forward produces generated
+token *k*. Step 0 is the prefill over the whole prompt (`[B, prompt_len, H]`);
+every later step is one position (`[B, 1, H]`). So a loop intervention applies to **every prompt position** on step 0 and one
+token afterwards — use `tracer.iter[1:]` for generated tokens only. A write at
+layer L on step *k* changes that step's token; it reaches layers at or below L
+only from step *k*+1, through the token it changed. Until a generated token
+differs, layers ≤ L stay bit-identical to the unedited run:
+
+```python
+def run(edit):
+    with model.generate(prompt, max_new_tokens=3, min_new_tokens=3) as tracer:
+        early = nnsight.save([])
+        for step in tracer.iter[:3]:
+            early.append(model.transformer.h[3].output.clone())
+            if edit and step == 1:
+                model.transformer.h[6].output[:, -1, :] *= -5
+        ids = tracer.result.save()
+    return early, ids
+
+base, base_ids = run(False)
+edit, edit_ids = run(True)
+assert tuple(base[0].shape) == (1, 10, 768) and tuple(base[1].shape) == (1, 1, 768)
+assert torch.equal(base_ids[0, :11], edit_ids[0, :11])      # token 0 unchanged
+assert base_ids[0, 11] != edit_ids[0, 11]                   # step 1's token changed
+assert torch.equal(base[1], edit[1])                        # layer 3, step 1: untouched
+assert not torch.equal(base[2], edit[2])                    # step 2 sees the new token
+```
+
 
 ## The one rule for iteration loops
 
@@ -155,28 +164,10 @@ run wherever it matches.
 
 ### When you cannot know the step count
 
-`tracer.all()` and `tracer.iter[:]` end *by* asking for a step the run does not
-make, so they warn instead of raising. The same unwind still discards everything
-the block has after the loop:
-
-```python
-import warnings
-
-with warnings.catch_warnings(record=True) as caught:
-    warnings.simplefilter("always")
-    with model.generate(prompt, max_new_tokens=3) as tracer:
-        seen = nnsight.save([])
-        for step in tracer.all():
-            seen.append(model.output.logits[0, -1].argmax(dim=-1))
-        after_the_loop = nnsight.save("this line never runs")
-
-assert len(seen) == 3                            # the loop's own values survive
-assert "after_the_loop" not in globals()         # the trailing line was dropped
-assert "was never reached" in str(caught[0].message)
-```
-
-Put what has to happen afterwards in a separate empty invoke — its own worker, so
-the loop's unwind does not reach it:
+`tracer.all()` and `tracer.iter[:]` always end *by* asking for a step the run
+does not make, so they always warn and always drop the statements after the loop.
+Put what has to happen afterwards — reading `tracer.result` included — in a
+separate empty invoke, its own worker, so the loop's unwind does not reach it:
 
 ```python
 with model.generate(max_new_tokens=3) as tracer:
@@ -191,18 +182,13 @@ with model.generate(max_new_tokens=3) as tracer:
 assert len(seen) == 3 and ids.shape[0] == 1
 ```
 
-Reading `tracer.result` below the `with` block instead does not work: it is
-served during the run, so outside the block it raises `ValueError: Cannot access
-'result' outside of interleaving`.
-
 ### Two ways a loop hangs or lies
 
 An open loop ends when a request in its body outruns the model, so a body that
-reads no module never ends at all — a pure Python spin, no warning, no timeout:
+reads no module spins forever, with no warning and no timeout:
 
 <!-- test: skip -->
 ```python
-# Hangs forever — nothing in the body parks the worker, so the loop never ends.
 with model.generate(prompt, max_new_tokens=2) as tracer:
     n = nnsight.save([0])
     for step in tracer.all():
@@ -215,12 +201,11 @@ the way the forward runs.
 
 ### A wrong-order `.source` read lands on the next step
 
-A read the model already ran past raises `OutOfOrderError` at step 0, and past
-step 0 it binds to the next step instead. A `.source` op whose module's `.source`
-is first touched inside the loop binds to the next step **even at step 0**. Reading
-`attn.output` and then an op inside `attn` therefore gives the op's steps 1, 2, …,
-one entry short. The only signal is the closing "was never reached" warning, and
-it blames the loop bound:
+A read the model already ran past raises `OutOfOrderError` at step 0 and binds to
+the next step after that. A `.source` op whose module's `.source` is first touched
+inside the loop binds to the next step **even at step 0**: reading `attn.output`
+and then an op inside `attn` gives the op's steps 1, 2, …, one entry short. The
+only signal is the closing "was never reached" warning, which blames the loop bound:
 
 ```python
 import warnings
@@ -239,8 +224,8 @@ assert ops[0].shape[1] == 1                 # ...and it starts at step 1, not th
 assert any("was never reached" in str(w.message) for w in caught)
 ```
 
-Once a module's `.source` has been touched (here, by the loop above), the same
-body raises at step 0, as a module read would:
+Once the module's `.source` has been touched (here, by the loop above), the same
+body raises at step 0:
 
 <!-- test: expect-error OutOfOrderError -->
 ```python
@@ -251,32 +236,7 @@ with model.generate(prompt, max_new_tokens=4, min_new_tokens=4) as tracer:
 ```
 
 So: read ops before the module output that contains them, touch `.source` once
-outside the trace (`attn.source`), and assert that parallel lists have the same
-length. For a per-step check, a shape that grows with the step helps: an
-attention pattern's key axis is `prompt_len + step`.
-
-### Step 0 is the prefill
-
-`tracer.iter` counts forward passes, not generated tokens, and the first pass is
-the prefill over the whole prompt:
-
-```python
-with model.generate("The Eiffel Tower is in the city of", max_new_tokens=3) as tracer:
-    shapes = nnsight.save([])
-    for step in tracer.iter[:]:
-        shapes.append(tuple(model.transformer.h[0].output.shape))
-
-assert shapes == [(1, 10, 768), (1, 1, 768), (1, 1, 768)]   # prompt, then one token per step
-```
-
-So an intervention inside the loop applies to **every prompt position** on step 0
-and to a single token afterwards. Skip it with `tracer.iter[1:]` if you only mean
-the generated tokens.
-
-Other iteration forms: `tracer.iter[2]` (one step), `tracer.iter[1:3]` (a range),
-`tracer.iter[[0, 2, 4]]` (explicit list). Negative indices raise — there is no
-"last step" shorthand. A `with tracer.iter[...]:` block is deprecated in
-favour of the `for` loop.
+outside the trace (`_ = attn.source`), and assert parallel lists have equal length.
 
 ## Streaming tokens as they are produced
 
@@ -327,17 +287,10 @@ with chat.generate(text, max_new_tokens=10) as tracer:
 print(chat.tokenizer.decode(reply[0, -10:], skip_special_tokens=True))
 ```
 
-Two things to watch: the template usually adds a system turn and special tokens,
-so **position indices shift** (`-1` is still the last token, but "the 3rd token" is
-not the 3rd word); and a chat model's layers are at `chat.model.layers[i]`, not
+The template usually adds a system turn and special tokens, so **position indices
+shift** (`-1` is still the last token, but "the 3rd token" is not the 3rd word).
+And a chat model's layers are at `chat.model.layers[i]`, not
 `chat.transformer.h[i]` — see [modules-and-architectures.md](modules-and-architectures.md).
-
-```python
-with chat.trace(text):
-    resid = chat.model.layers[10].output.save()   # a tensor on transformers 5.x
-
-print(resid.shape)
-```
 
 ## Related
 

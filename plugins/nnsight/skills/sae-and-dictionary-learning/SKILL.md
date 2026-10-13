@@ -5,17 +5,13 @@ description: Work with sparse autoencoders and dictionary learning in nnsight �
 
 # SAEs and Dictionary Learning
 
-Neurons are polysemantic; SAEs try to fix that by re-expressing activations in an
-overcomplete, sparse basis where each dimension is (hopefully) one interpretable
-feature.
+An SAE re-expresses activations in an overcomplete, sparse basis where each
+dimension is (hopefully) one interpretable feature:
 
 ```
 features = ReLU(W_enc (x − b_dec))          # sparse, wide
 x̂        = W_dec features + b_dec           # reconstruction
 ```
-
-Two things this skill covers: how to wire an SAE into a traced model (the
-nnsight-specific part) and how to tell whether an SAE is telling you anything.
 
 <!-- test: setup -->
 ```python
@@ -32,8 +28,7 @@ d_features = 2048
 
 ## Attaching an SAE to the model
 
-Define it as a normal `torch.nn.Module`, assign it into the envoy tree, and route
-activations through it:
+Define it as a normal `torch.nn.Module` and assign it into the envoy tree:
 
 ```python
 class SparseAutoencoder(torch.nn.Module):
@@ -65,7 +60,7 @@ print(features.shape, f"active per token: {(features > 0).float().sum(-1).mean()
 ```
 
 **Splicing it into the forward pass** — replace the activation with its
-reconstruction, so everything downstream runs on what the SAE can represent:
+reconstruction:
 
 ```python
 with model.trace() as tracer:
@@ -83,36 +78,15 @@ That comparison is the **cheapest quality check there is**: if the model's outpu
 changes when you route through the SAE, the reconstruction is losing something the
 model uses.
 
-**Replace the output, do not write into it.** `output[:] = sae(resid)` writes the
-SAE's result into the very tensor that was its input, and autograd refuses to
-differentiate back through it: `RuntimeError: one of the variables needed for
-gradient computation has been modified by an inplace operation`. That kills
-training the SAE, attributing through it, or taking any gradient past the layer —
-the whole reason to route the model through it. `output = sae(resid)` costs
-nothing and keeps the graph.
+**Replace the output, do not write into it.** `output[:] = sae(resid)` overwrites
+the SAE's own input, and any gradient through the layer then raises
+`RuntimeError: one of the variables needed for gradient computation has been
+modified by an inplace operation`. `output = sae(resid)` keeps the graph.
 
-To make the SAE permanent — and its internals observable from other traces — put
-the routing in an `edit` and pass `hook=True`:
-
-```python
-with model.edit(inplace=True):
-    resid = model.transformer.h[LAYER].output
-    model.transformer.h[LAYER].output = model.transformer.h[LAYER].sae(resid, hook=True)
-
-with model.trace(prompt):
-    encoder_out = model.transformer.h[LAYER].sae.encoder.output.save()   # observable
-
-print(encoder_out.shape)
-model.clear_edits()
-```
-
-The routing call and the read must be in **different** workers (edit vs trace) —
-doing both in one trace body raises `OutOfOrderError`. See the `nnsight` skill →
-modules and architectures.
-
-To *measure* an SAE rather than run the model through it, call the attachment and
-throw the result away. The call still fires the submodules, so `sae.encoder.output`
-is readable from any later trace and the model's own activations are untouched:
+To make the SAE's internals observable from later traces, call it inside an
+`edit` with `hook=True`. Calling it and discarding the result *observes*; assigning
+the result to `.output` inside the edit would *splice* permanently. Reconstruction
+error enters the model only when you assign back to `.output`:
 
 ```python
 with model.edit(inplace=True):
@@ -132,8 +106,8 @@ assert model.tokenizer.decode(answer) == model.tokenizer.decode(clean)
 torch.Size([1, 10, 2048]) ' Paris'
 ```
 
-Splicing and observing are separate decisions. Reconstruction error only enters
-the model when you assign back to `.output`.
+The routing call and the read must be in **different** workers (edit vs trace);
+both in one trace body raises `OutOfOrderError`.
 
 ## Training a dictionary
 
@@ -159,11 +133,12 @@ held_out = [
 
 def collect(texts):
     """Activations at LAYER, pad positions dropped."""
-    mask = model.tokenizer(texts, return_tensors="pt", padding=True)["attention_mask"].bool()
     with torch.no_grad():                 # collection only — see note
         with model.trace(texts):
+            args, kwargs = model.inputs   # the mask the forward actually ran with
+            mask = kwargs["attention_mask"].bool().save()
             acts = model.transformer.h[LAYER].output.detach().save()
-    return acts[mask.to(acts.device)].float()
+    return acts[mask].float()
 
 data = collect(corpus)
 held = collect(held_out)
@@ -176,28 +151,25 @@ print("fit vectors:", tuple(data.shape), " held-out vectors:", tuple(held.shape)
 fit vectors: (83, 768)  held-out vectors: (47, 768)
 ```
 
-**Mask the padding.** Everything inside one `trace(...)` is left-padded to the
-longest input in the batch, so a plain `.reshape(-1, d_model)` over this corpus
-would hand the optimizer 112 vectors of which 29 are pad. They are not small: at
-GPT-2's layer 6 the mean residual norm is 3118 on a pad position against 377 on a
-real one. An unmasked dictionary spends capacity modelling the padding, and every
-feature ranking downstream inherits it. The ratio is architecture-specific, and
-pythia-70m's pad residuals are *smaller* than its real ones, so measure rather
-than assume. The `nnsight` skill → batching has the padding rule itself.
+**Mask the padding — everywhere you read activations from a batch.** A batched
+`trace(...)` left-pads every input to the longest, so a plain
+`.reshape(-1, d_model)` over this corpus would hand the optimizer 112 vectors of
+which 29 are pad. They are not small: at GPT-2's layer 6 the mean residual norm
+is 3118 on a pad position against 377 on a real one, so an unmasked dictionary
+spends capacity modelling the padding and every feature ranking downstream
+inherits it. Take the mask from `model.inputs` inside the trace rather than
+re-tokenizing: it is the one the forward ran with. The `nnsight` skill →
+batching has the padding rule itself.
 
-**Collect a held-out set.** Metrics computed on the tensor the dictionary was fit
-to answer a different question from the one you want. See the evaluation section.
-
-**Collect under `torch.no_grad()`.** A trace runs with autograd on, so saved
-activations arrive with a live `grad_fn` pinning the forward graph. On a
-64-sequence GPT-2 capture that is 1133 MiB against 242 MiB, and the multiple
-grows with sequence length and model depth, so measure it on your own workload
-rather than budgeting from a single number. `.detach()` on the saved tensor is too
-late; the graph was already built. Dictionary *training* below still needs
-gradients, but only through the SAE, not through the frozen model.
+**Collect under `torch.no_grad()`, and `.detach()` what you save.** A trace runs
+with autograd on, so a saved activation arrives with a live `grad_fn` that keeps
+the forward graph alive for as long as you hold the tensor. `.detach()` on the
+saved tensor is what drops that reference; `torch.no_grad()` stops the graph
+being built at all, which lowers peak memory during the forward. `collect()` does
+both. Dictionary *training* below still needs gradients, but only through the
+SAE, not through the frozen model.
 
 ```python
-
 optimizer = torch.optim.Adam(sae.parameters(), lr=1e-3)
 for step in range(800):
     reconstruction = sae(data)
@@ -211,7 +183,8 @@ for step in range(800):
 
 ## Evaluating it — and why this one is worthless
 
-Three numbers, on activations the dictionary was **not** fit to:
+Three numbers, on activations the dictionary was **not** fit to — metrics on the
+fitting set answer a different question:
 
 ```python
 @torch.no_grad()
@@ -237,25 +210,21 @@ fit       explained variance 0.997   L0   5.7 of 768   dead 2032/2048
 held-out  explained variance 0.996   L0   9.3 of 768   dead 1950/2048
 ```
 
-By the first two metrics this SAE is superb: it reconstructs 99.7% of the variance
-using six features per token, and it holds up on text it never saw. It is also
-**completely meaningless** — 2032 of its 2048 features never fire. Sixteen
-directions memorized 83 activation vectors. Nothing here generalizes, and every
-"feature" you interpret would be an artifact.
+By the first two metrics this SAE is superb — 99.7% of variance from six
+features per token, held up on unseen text — and it is **meaningless**: 2032 of
+its 2048 features never fire. Sixteen directions memorized 83 vectors, and every
+"feature" you interpreted would be an artifact.
 
 ### What each number has to clear
 
-**L0 is a ratio to `d_model`, not a distance from zero.** A dictionary that fires
-768 features per token on a 768-dimensional activation has re-expressed the
-activation, not decomposed it. For scale, Gemma Scope's residual SAEs publish an
-average L0 of 82 on a `d_model` of 2304, a few percent. Anything approaching
-`d_model` is the tell. Print the two side by side, as above, so the comparison is
-unavoidable.
+**L0 is a ratio to `d_model`, not a distance from zero.** A dictionary firing 768
+features per token on a 768-dimensional activation has re-expressed it, not
+decomposed it. For scale, Gemma Scope's residual SAEs average L0 82 on a
+`d_model` of 2304. Print the two side by side, as above.
 
-**Reconstruction says nothing on its own.** The null hypothesis for any
-dictionary is an identity map in a rotated basis: it reconstructs perfectly, and
-every "feature" it reports is a rotated neuron. Keep one on hand and run it beside
-the SAE you are evaluating.
+**Reconstruction says nothing on its own.** The null hypothesis is an identity map
+in a rotated basis: perfect reconstruction, every "feature" a rotated neuron. Run
+it beside the SAE you are evaluating.
 
 ```python
 class RotatedIdentity(torch.nn.Module):
@@ -286,52 +255,49 @@ assert explained > 0.999 and round(l0) == d_model     # perfect, and disqualifie
 rotated identity: explained variance 1.000   L0 768.0 of 768   dead 39/1536
 ```
 
-Run the same null over 8,192 held-out GPT-2 layer-6 activations and the rest of
-the battery falls too: dead features 0/1536, cosine similarity 1.000, ΔCE −0.000,
-and **loss recovered 1.0000**. Every metric people report comes back perfect on
-data the null never saw, except L0, which comes back at exactly `d_model`. Add
-this row to any evaluation you write. It costs a few lines and it is the only
-control that separates "reconstructs the activation" from "decomposes the
-activation".
+On a larger held-out set the null also scores loss recovered 1.0000 and no dead
+features: every metric comes back perfect except L0, at exactly `d_model`. Add
+this row to any evaluation; it is the only control that separates "reconstructs
+the activation" from "decomposes the activation".
 
-**Deadness is measured on data you did not fit to.** Take a dictionary whose
-4,096 decoder rows *are* 4,096 sampled training activations, a lookup table with
-no structure at all. It reports 334 dead features (8%) on its fitting set and
-2,834 (69%) held out. Explained variance barely moves across that split (0.331 to
-0.317) and loss recovered falls 0.82 to 0.63, so deadness is where the split
-shows up first. A memorizing dictionary looks alive on exactly the vectors it
-memorized.
+**Deadness is measured on data you did not fit to.** A memorizing dictionary
+looks alive on exactly the vectors it memorized, and deadness is where the
+fit/held-out split shows up first, before explained variance moves.
 
 Real SAE training needs millions of tokens, and resampling or auxiliary losses to
-revive dead features. Report all three numbers on held-out activations, plus the
-downstream check above: does the model's output survive the reconstruction?
+revive dead features.
 
 ## Using a pretrained SAE
 
 In practice you load someone else's. The wiring is identical — build the module,
-load the weights, assign it into the tree:
+load the weights, assign it into the tree, and read it at the point it was
+trained on:
 
 <!-- test: skip -->
 ```python
 from sae_lens import SAE                     # or: from dictionary_learning import AutoEncoder
 
-sae, config, _ = SAE.from_pretrained(release="gpt2-small-res-jb", sae_id="blocks.6.hook_resid_pre")
-sae = sae.to(model.device)
-model.transformer.h[6].sae = sae
+# sae_lens >= 6 returns the SAE alone; 3.x-5.x returned (sae, cfg_dict, sparsity).
+pretrained = SAE.from_pretrained(release="gpt2-small-res-jb", sae_id="blocks.6.hook_resid_pre")
+if isinstance(pretrained, tuple):
+    pretrained = pretrained[0]
+model.transformer.h[6].pretrained_sae = pretrained.to(model.device)
 
 with model.trace(prompt):
-    resid = model.transformer.h[6].output
-    features = model.transformer.h[6].sae.encode(resid).save()
+    resid_pre = model.transformer.h[6].input           # hook_resid_pre = the block's INPUT
+    features = model.transformer.h[6].pretrained_sae.encode(resid_pre).save()
 ```
 
-Check what the SAE was trained on: the **hook point** (`resid_pre` is the block's
-input, `resid_post` its output), the layer index, and the model revision. An SAE
-applied at the wrong point produces plausible-looking garbage.
+Check what the SAE was trained on: the **hook point** (`blocks.L.hook_resid_pre`
+is `h[L].input`, equal to `h[L-1].output`; `hook_resid_post` is `h[L].output`),
+the layer index, and the model revision. An SAE applied at the wrong point
+produces plausible-looking garbage.
 
 ## Feature analysis
 
-**Max-activating examples** — what makes a feature fire. Mask the padding here
-too, for the same reason as during collection:
+**Max-activating examples** — what makes a feature fire. The trace's own
+`input_ids` and mask give the token at the winning position without any
+left-padding arithmetic:
 
 ```python
 examples = [
@@ -340,52 +306,39 @@ examples = [
     "The stock market fell sharply.",
     "She wrote a poem about the sea.",
 ]
-batch = model.tokenizer(examples, return_tensors="pt", padding=True)
-real = batch["attention_mask"].bool().to(model.device)
 
-with model.trace(examples):
-    resid = model.transformer.h[LAYER].output
-    all_features = model.transformer.h[LAYER].sae.encode(resid).detach().save()
+with torch.no_grad():
+    with model.trace(examples):
+        args, kwargs = model.inputs
+        input_ids = kwargs["input_ids"].save()
+        real = kwargs["attention_mask"].bool().save()
+        resid = model.transformer.h[LAYER].output
+        all_features = model.transformer.h[LAYER].sae.encode(resid).detach().save()
 
 live = (all_features > 0).any(dim=0).any(dim=0).nonzero().flatten()
-fabricated = sum(
-    not real.reshape(-1)[int(all_features[..., int(f)].reshape(-1).argmax())]
-    for f in live
-)
-print(f"live features: {len(live)}")
-print(f"…whose unmasked argmax lands on a pad token: {fabricated}")
-
 feature = int(live[all_features[..., live].amax(dim=(0, 1)).argmax()])
 scores = all_features[..., feature].masked_fill(~real, float("-inf"))   # pads out
 best_example, best_position = divmod(int(scores.argmax()), scores.shape[1])
-ids = model.tokenizer(examples[best_example])["input_ids"]
-tokens = [model.tokenizer.decode([i]) for i in ids]
-position = best_position - (scores.shape[1] - len(tokens))      # undo left padding
-print(f"feature {feature} fires hardest on {examples[best_example]!r} "
-      f"at token {tokens[position]!r}")
+token = model.tokenizer.decode(input_ids[best_example, best_position])
+print(f"feature {feature} fires hardest on {examples[best_example]!r} at token {token!r}")
 
-assert 0 <= position < len(tokens)
+assert real[best_example, best_position]
 ```
 
 ```
-live features: 1678
-…whose unmasked argmax lands on a pad token: 327
 feature 376 fires hardest on 'Dogs are loyal pets.' at token 'D'
 ```
 
-Without `masked_fill`, 327 of those 1,678 features get reported against a pad
-position. The left-padding correction turns negative there, so a
-`tokens[max(0, position)]` guard prints token 0 of some example and reads like an
-answer. Bound `position` and let it raise instead.
+Without the `masked_fill`, about a fifth of the live features here report a pad
+position as their top activation.
 
-Interpret features from a *large* corpus of max-activating examples, not four
-sentences, and check the bottom of the distribution too, since a feature that
-fires on everything is not a feature.
+Interpret features from a *large* corpus, not four sentences, and check the
+bottom of the distribution too: a feature that fires on everything is not a
+feature.
 
-**Feature steering** — add a decoder column to the residual stream. This is the
-causal test of a feature's meaning, and it is more targeted than steering with a
-raw difference vector. Sweep it, like any other steering coefficient, and scale
-against the measured residual norm:
+**Feature steering** — add a decoder column to the residual stream, the causal
+test of a feature's meaning. Sweep the coefficient, scaled to the measured
+residual norm:
 
 ```python
 feature_direction = sae.decoder.weight[:, feature].detach()
@@ -413,32 +366,25 @@ base ' released'   residual norm 93.2
   alpha 4.0: ' "'
 ```
 
-Read the residual norm before the logits. A trace body runs in model order, so
-asking for layer 6 after the run has reached `lm_head` raises `OutOfOrderError`.
+Read the residual norm before the logits: a trace body runs in model order, so
+layer 6 after `lm_head` raises `OutOfOrderError`.
 
-Do not read anything into *these* tokens. The feature comes from the dictionary
-above, which memorized 83 vectors, so this is a dose-response curve for an
-arbitrary direction. Steering only tests a feature's meaning once the dictionary
-survives the evaluation section. Use a pretrained SAE for that, and see the
-`model-steering` skill for the matched-norm control that says whether the
+Read nothing into *these* tokens: the feature comes from the memorizing
+dictionary above, so this is a dose-response curve for an arbitrary direction.
+Steering tests a feature's meaning only once the dictionary survives evaluation;
+the `model-steering` skill has the matched-norm control that says whether the
 direction's content mattered or only its magnitude.
 
 ## What to be careful about
 
-**Reconstruction error is not free.** Everything downstream of a spliced-in SAE
-runs on an approximation. Report the model's behavior with and without it.
-
-**Dead features and feature splitting.** Dead features waste capacity; feature
-splitting means one concept fragments across many features as the dictionary
-grows, so "how many features encode X" is not stable across dictionary sizes.
-
-**Interpretability illusions.** A feature that looks like "the Golden Gate Bridge"
-on its top-20 examples may be firing on something more general. Validate with
-steering, with the full activation distribution, and with examples the feature
-does *not* fire on.
-
-**An SAE is a hypothesis about the model, fit to activations.** It can be a good
-sparse code and still not carve the model's computation at its joints.
+- **Feature splitting.** One concept fragments across more features as the
+  dictionary grows, so "how many features encode X" is not stable across sizes.
+- **Interpretability illusions.** A feature that looks like "the Golden Gate
+  Bridge" on its top-20 examples may fire on something more general. Validate
+  with steering, the full activation distribution, and examples it does *not*
+  fire on.
+- **An SAE is a hypothesis fit to activations.** It can be a good sparse code and
+  still not carve the model's computation at its joints.
 
 ## Related skills
 
