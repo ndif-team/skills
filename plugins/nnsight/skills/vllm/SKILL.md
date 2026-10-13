@@ -1,6 +1,6 @@
 ---
 name: vllm
-description: Run nnsight interventions inside the vLLM inference engine — continuous batching, tensor parallelism, CUDA-graph taps, async streaming, an engine-wide edit() and nnsight-serve. Use when an experiment needs throughput or many concurrent prompts, a model sharded across GPUs, streamed tokens with interventions, or a served engine that other clients hit. Covers what a block sees on vLLM (flat [tokens, hidden] rows, the (hidden, residual) layer-output pair, live buffers), model.logits/model.samples, one prompt per invoke, passing values between invokes with two traces, sweeps with model.edit(), taps, why .skip() can kill the engine, and what is not supported.
+description: Run nnsight interventions inside the vLLM inference engine — continuous batching, tensor parallelism, CUDA-graph taps, async streaming, engine-wide edit() and nnsight-serve. Use for throughput, many concurrent prompts, streamed tokens, or a served engine; for a sharded model that needs gradients, .source or the full TransformersModel API, use the tensor-parallel skill instead. Covers flat [tokens, hidden] rows, the (hidden, residual) layer pair, live buffers, model.logits/model.samples, one prompt per invoke, model.edit() sweeps, taps, and why .skip() can kill the engine.
 ---
 
 # vLLM
@@ -10,13 +10,18 @@ serialized onto each request, run against the real modules, and the saved values
 shipped back. You get PagedAttention, continuous batching, tensor parallelism and
 CUDA-graph replay (with `taps=`), and the same trace syntax.
 
-Blocks in this skill run under the test suite on a GPU with vLLM 0.27.1 (they are
-skipped elsewhere). Model: `HuggingFaceTB/SmolLM2-135M-Instruct`, a Llama-style
-trunk, so what it shows about layer outputs holds for Llama, Qwen and Mistral.
+nnsight targets **vLLM 0.27.1 and its V1 engine**. `pip install nnsight[vllm]`
+does not cap the version, so a newer vLLM can be installed and then fail at
+`import` with `ModuleNotFoundError` — pin `vllm==0.27.1`. nnsight sets
+`VLLM_USE_V2_MODEL_RUNNER=0` itself and refuses an engine started with it set to
+`1` (`NotImplementedError`: that runner is not instrumented).
+
+The examples use `HuggingFaceTB/SmolLM2-135M-Instruct`, a Llama-style trunk, so
+what they show about layer outputs holds for Llama, Qwen and Mistral.
 
 ## What breaks first: four things a vLLM block sees differently
 
-<!-- test: gpu setup -->
+<!-- test: gpu setup requires vllm -->
 ```python
 import torch
 import nnsight
@@ -49,56 +54,50 @@ assert not torch.equal(alias, resid) and alias.shape == resid.shape
    residual add into the next layer's norm, so `output[0]` is this layer's **MLP
    output** and `output[1]` the residual stream **after this layer's attention** —
    not the stream entering the layer, which is `layer.inputs[0][1] +
-   layer.inputs[0][2]` (measured on Llama-3.2-1B layers 6 and 15: `out[0]` matches
-   `mlp.output` exactly, `out[1]` differs from the layer's incoming stream by 0.98
-   and 2.4). The stream *after* the layer is `out[0] + out[1]`. Patching
-   `output[0]` alone changes almost nothing. Writing either element steers (the
-   next norm adds them).
-3. **Clone what you keep.** A served value is the model's live buffer, and the next
-   layer's fused kernel rewrites it after your block returns — the un-cloned
-   `alias` above comes back holding later data. Reduce or `.clone()` before saving.
-   `NNSIGHT_VLLM_CLONE_READS=1` in the environment (before `VLLM(...)`, which builds
-   the worker that makes the copies) serves every read as a private copy instead, so
-   nothing needs a clone at the call site — at the cost of in-place edits, which then
-   write to the copy and never reach the model. Under it, write by assignment
-   (`layer.output = out`), not `layer.output[0][:] += v`. Off by default.
+   layer.inputs[0][2]`. The stream *after* the layer is `out[0] + out[1]`.
+   Patching `output[0]` alone changes almost nothing. Writing either element
+   steers (the next norm adds them).
+3. **Clone what you keep.** A served value is the model's live buffer, rewritten by
+   the next fused kernel after your block returns — the un-cloned `alias` above
+   comes back holding later data. Reduce or `.clone()` before saving.
+   (`NNSIGHT_VLLM_CLONE_READS=1`, set before `VLLM(...)`, serves every read as a
+   copy instead; in-place edits then never reach the model, so write by
+   assignment.) Parameters need the same care:
+   `layer.weight.save()` fails with `Can't get local object
+   'Interleaver.instrument.<locals>.forward'` (a vLLM parameter carries a loader
+   bound to its instrumented layer); save `weight.detach().clone()`.
 4. **Where tensors live.** A tensor referenced from outside the block (a steering
    vector) travels with the block; move it onto the served value with
    `v.to(h.device, h.dtype)`. Saved tensors come back on the worker's device unless
    you `.cpu()` them inside. `model.device` on an undispatched client is `meta`.
 
-`model.logits` is `[1, vocab]` for the step, `model.samples` is `[1, 1]` for one
-sequence. Greedy decoding is `temperature=0.0`; vLLM's default is `1.0`.
+`model.logits` is `[1, vocab]` for the step, `model.samples` `[1, 1]`. Greedy is
+`temperature=0.0`; vLLM's default is `1.0`.
 
 ## Loading and the constructor
 
 `VLLM(repo_id, *, mode="sync"|"async", dispatch=False, tensor_parallel_size=1,
 gpu_memory_utilization=0.9, taps=(), **vllm_kwargs)`. `dispatch=False` builds a
-meta tree only. `mode` is fixed at construction. Every other keyword goes to
-vLLM's engine args (`max_model_len`, `enable_prefix_caching`, `seed`, ...). The
-engine runs eagerly, serving every location, unless you declare `taps=` — see
-[graph taps](references/graph-taps.md).
+meta tree only; every other keyword goes to vLLM's engine args. The engine runs
+eagerly, serving every location, unless you declare
+[`taps=`](references/graph-taps.md).
 
-Scripts need an `if __name__ == "__main__":` guard. Dispatching initializes CUDA in
-your process, so vLLM starts its EngineCore with `spawn` (it sets
-`VLLM_WORKER_MULTIPROC_METHOD` itself, logging `Reasons: CUDA is initialized`), spawn
-re-imports the main module, and a `VLLM(...)` at the top level of that module dies
-with `An attempt has been made to start a new process before the current process has
-finished its bootstrapping phase`. One GPU and `mode="sync"` included; notebooks are
-exempt. `enable_prefix_caching=False` whenever you will `model.edit()`.
+**A script needs an `if __name__ == "__main__":` guard** around `VLLM(...)`, at
+any `tensor_parallel_size` (notebooks are exempt). Without it the engine's spawned
+process re-imports your module and dies with `An attempt has been made to start a
+new process before the current process has finished its bootstrapping phase`.
+Pass `enable_prefix_caching=False` whenever you will `model.edit()`.
 
 ## Per-step values and generation
 
 Sampling kwargs go on `trace(...)` / `invoke(...)`, not the constructor. Step 0
-under `tracer.iter` is the prefill; step *k* serves the *k*-th generated token,
-and `model.samples` there is `result.outputs[0].token_ids[k]`. Python locals
-persist across steps, so a block can carry state. Order within a step is forward
-order: a write to a layer *below* one you already read this step parks until that
-layer's next visit — and on the last step there is none, so the block never
-finishes and nothing after the loop runs. Put upstream writes (from last step's
-state) at the top of the loop body, downstream reads after.
+under `tracer.iter` is the prefill; step *k* serves the *k*-th generated token.
+Python locals persist across steps. Within a step, order is forward order: a write
+to a layer *below* one already read this step parks until that layer's next visit
+— on the last step there is none, and nothing after the loop runs. Put upstream
+writes at the top of the loop body, downstream reads after.
 
-<!-- test: gpu -->
+<!-- test: gpu requires vllm -->
 ```python
 with model.trace("The capital of France is", temperature=0.0, max_tokens=6, ignore_eos=True) as tracer:
     steps = nnsight.save([])
@@ -114,39 +113,29 @@ with model.trace("The capital of France is", temperature=0.0, max_tokens=6, igno
         steps.append((step, triggered, model.samples.item()))
     result = tracer.result.save()          # served at collect time: must be the LAST read
 
-print(result.outputs[0].token_ids, steps[2])
 assert result.outputs[0].token_ids[2] == 3_000 and steps[2] == (2, False, 3_000)
 assert steps[3][1] is True
 ```
 
-- `tracer.iter[:N]` is bounded so code after the loop (`tracer.result.save()`)
-  runs — but only if all `N` steps happen, and `max_tokens` is a cap, not a
-  promise: an EOS, a `stop` string, `stop_token_ids` or a `tracer.stop()` all end
-  the request early. A loop the run cannot supply — bounded or open — is cut
-  short there with a warning: what it saved comes home, the statements after the
-  loop never run, and the warning is emitted in the EngineCore subprocess, so
-  `warnings.catch_warnings` in your code never sees it. The result looks complete
-  while holding fewer steps than the bound, so check the `len()` of what you
-  collected. Hold the run to the count with `ignore_eos=True` or `min_tokens=N`
-  (vLLM's spelling; the warning text names it, alongside transformers'
-  `min_new_tokens=`), or loop with `tracer.all()` and put the trailing statements
-  in a separate `tracer.invoke()` — `tracer.result` cannot be read after the
-  `with` block.
-- **`tracer.result` must be the last read.** It is the finished `RequestOutput`,
-  served after every module, `logits` and `samples` visit; a read after it raises
-  `OutOfOrderError` naming that later value.
+- **`max_tokens` is a cap, not a promise.** An EOS, a `stop` string or
+  `tracer.stop()` ends the request early, and a `tracer.iter[:N]` loop the run
+  cannot supply is cut short: what it saved comes home, the statements after the
+  loop never run, and the only notice is a warning you never see (see "Errors and
+  warnings"). Check the `len()` of what you collected, and hold the run to the
+  count with `ignore_eos=True` or `min_tokens=N`.
+- **`tracer.result` must be the last read** — it is served after every module,
+  `logits` and `samples` visit; a read after it raises `OutOfOrderError`.
 - Assigning `model.samples` forces the token the engine continues from;
   assigning `model.logits` changes what the sampler sees.
 
 ## One prompt per invoke; collecting across invokes
 
 Each `tracer.invoke(prompt)` is one vLLM request; the engine batches them. A name
-saved in every invoke comes back as a **list** in invoke order; a name saved once
-stays a value. A container saved *above* the invokes is copied per request:
-assigning into pre-sized slots merges back, **`append` does not** — you get one
-element.
+saved in every invoke comes back as a **list** in invoke order. A container saved
+*above* the invokes is copied per request: assigning into pre-sized slots merges
+back, **`append` does not** — you get one element.
 
-<!-- test: gpu -->
+<!-- test: gpu requires vllm -->
 ```python
 prompts = ["The capital of France is", "The capital of Japan is", "Two plus two is"]
 
@@ -161,7 +150,6 @@ with model.trace(temperature=0.0, max_tokens=1) as tracer:
             appended.append(i)
             nxt = model.samples.item().save()
 
-print([model.tokenizer.decode(t) for t in nxt], len(last), slots, appended)
 assert len(last) == 3 and all(s is not None for s in slots) and len(appended) == 1
 ```
 
@@ -170,12 +158,11 @@ A list of prompts in one invoke is rejected. Async traces fired with
 
 ### Passing values between invokes: two traces
 
-Invokes are separate requests with separate scopes: a value one invoke reads is
-**not** visible to a sibling (`NameError`), `tracer.barrier` raises, and a
-`session()` does not bridge traces. Save in one trace, reference in the next —
-the saved tensors ship with the second block. Activation patching:
+Invokes are separate requests: a value one reads is **not** visible to a sibling
+(`NameError`), `tracer.barrier` raises, and `session()` does not bridge traces.
+Save in one trace and reference it in the next. Activation patching:
 
-<!-- test: gpu -->
+<!-- test: gpu requires vllm -->
 ```python
 CLEAN, CORRUPT, L, POS = "The Eiffel Tower is in the city of", "The Colosseum is in the city of", 12, slice(1, 4)
 paris = model.tokenizer(" Paris")["input_ids"][0]
@@ -191,21 +178,13 @@ with model.trace(temperature=0.0, max_tokens=1) as tracer:
             served[POS] = saved[POS].to(served.device)
         patched = model.logits.softmax(-1)[0, paris].item().save()
 
-print(f"P(Paris) corrupt {base:.3f} -> patched {patched:.3f}")
 assert patched > base
 ```
 
-Many invokes still batch: a layer sweep is one trace with one patched invoke per
-layer. Index rows as `hs[POS]` (no batch axis) and write *both* elements.
-
 Writing *into* the served value, as above, always fits. A whole-value replacement
-(`layer.output = t`) is spliced back into the batch the model is running, so it
-has to keep the rows the block owns — and nothing checks that for you. A donor
-captured at a different prompt length is the usual way to get a short one; spliced
-in as given, it hands the next kernels a slab of the wrong height, and the
-mismatch can land as a device-side assert that takes the engine and every request
-in it, not just yours. Slice the donor to the rows you are writing
-(`served[POS] = donor[POS]`) rather than handing back a shorter tensor.
+(`layer.output = t`) must keep the rows the block owns, and nothing checks: a donor
+from a different prompt length can land as a device-side assert that kills the
+engine and every request in it. Slice the donor to the rows you write.
 
 ## Sampling parameters and `n > 1`
 
@@ -217,7 +196,7 @@ block runs once per sequence, saved names come back as a list per sequence, and 
 saved container comes back as a list of `k` containers matching
 `result.outputs[i]`.
 
-<!-- test: gpu -->
+<!-- test: gpu requires vllm -->
 ```python
 with model.trace("My favourite colour is", temperature=0.9, seed=0, n=3, max_tokens=4, ignore_eos=True) as tracer:
     caps = nnsight.save([])
@@ -225,65 +204,47 @@ with model.trace("My favourite colour is", temperature=0.9, seed=0, n=3, max_tok
         caps.append(model.model.layers[8].output[1][-1].clone())
     result = tracer.result.save()
 
-print([o.text for o in result.outputs])
 assert len(caps) == 3 and len(caps[1]) == 4 and len(result.outputs) == 3
 ```
 
 ## Sweeps: `model.edit()` and the per-invoke cost
 
-A trace carries its block on the request it rides. `model.edit()` sends the block
-once and it runs for every request the engine serves afterwards — including plain
-`model.generate(...)` calls and other clients of a served engine — with each
-request's values on that request's output. There is no `tracer.invoke` inside an
-edit; `tracer.all()` makes it follow every generated step.
+`model.edit()` sends the block once and it runs for every request the engine
+serves afterwards — plain `model.generate(...)` calls and other clients of a served
+engine included — with each request's values on that request's `.saves`. No
+`tracer.invoke` inside an edit; `tracer.all()` makes it follow every step.
 
-<!-- test: gpu -->
+<!-- test: gpu requires vllm -->
 ```python
-import time
 sweep = [f"Fact number {i} about the ocean is that it" for i in range(200)]
-layer = model.model.layers[20]                     # bind the envoy OUTSIDE the trace
+layer = model.model.layers[20]                     # bind the envoy OUTSIDE the block
 
 with model.edit() as (tracer, edit):
     out = layer.output
     feat = (out[0] + out[1]).mean(0).cpu().save()
 
-t = time.perf_counter()
 outputs = model.generate(sweep, max_tokens=1, temperature=0.0)      # plain requests, block runs
-edited = time.perf_counter() - t
 feats = torch.stack([o.saves["feat"] for o in outputs])
 texts = [o.outputs[0].text for o in outputs]
 edit.clear()
 
-t = time.perf_counter()
-with model.trace(temperature=0.0, max_tokens=1) as tracer:
-    for p in sweep:
-        with tracer.invoke(p):
-            feat = (layer.output[0] + layer.output[1]).mean(0).cpu().save()
-traced = time.perf_counter() - t
-
-t = time.perf_counter()
-with model.trace(temperature=0.0, max_tokens=1) as tracer:
-    for p in sweep:
-        with tracer.invoke(p):
-            feat = (layer.output[0] + layer.output[1]).mean(0).cpu().save()
-            nxt = model.samples.save()                               # references `model`
-traced_with_model = time.perf_counter() - t
-
-print(f"edit {edited:.2f}s  traced {traced:.2f}s  traced+model.samples {traced_with_model:.2f}s")
 assert feats.shape == (200, 576) and len(texts) == 200
-assert torch.allclose(feats, torch.stack(feat), rtol=2e-2, atol=0.5)   # bf16, batched differently
-assert getattr(outputs[0], "saves", None) is not None
 ```
+
+The same sweep as one trace with one invoke per prompt ships the block per
+invoke, and a block that references `model` inside it (`model.logits`,
+`model.samples`, `tracer.result`, `model.model.layers[i]`) ships the model too,
+~9 ms per invoke. On Qwen3-8B, 500 prompts: 0.5 s edited (bare vLLM 0.45 s), 0.8 s
+traced with the envoy bound outside, 5.2 s once the block reads `model.samples`.
+Bind layer envoys outside the block, and take the text from the edit's outputs.
 
 ### Named edits, chosen per request
 
-`model.edit(name=...)` tags an edit; `edits=[...]` on `trace`/`invoke`/plain
-`generate` (and over serve) picks which installed edits run: the named ones
-listed **plus every unnamed edit**. No `edits=` runs them all; `edits=[]` the
-unnamed only. An unknown name is refused (`ValueError` locally; the request's
-error over serve).
+`model.edit(name=...)` tags an edit; `edits=[...]` on `trace`/`invoke`/`generate`
+runs the named ones listed **plus every unnamed edit**. No `edits=` runs them all;
+`edits=[]` the unnamed only; an unknown name raises `ValueError`.
 
-<!-- test: gpu -->
+<!-- test: gpu requires vllm -->
 ```python
 with model.edit(name="probe") as (tracer, probe):
     score = layer.output[1][-1].norm().item().save()
@@ -294,106 +255,71 @@ both = model.generate("Fact:", max_tokens=1, temperature=0.0)[0]
 only_unnamed = model.generate("Fact:", max_tokens=1, temperature=0.0, edits=[])[0]
 with model.trace("Fact:", max_tokens=1, temperature=0.0, edits=["probe"]) as tracer:
     result = tracer.result.save()
-print(sorted(both.saves), sorted(only_unnamed.saves), sorted(result.saves))
 assert "score" in both.saves and "score" not in only_unnamed.saves and "score" in result.saves
-try:
-    model.generate("Fact:", max_tokens=1, edits=["nope"])
-except ValueError as e:
-    print("refused:", str(e)[:40])
 model.clear_edits()
 ```
 
-- Measured on Qwen3-8B, 500 prompts: **0.5 s edited** (bare vLLM 0.45 s), 0.8 s
-  traced with the layer envoy bound outside — and **5.2 s traced** once the block
-  also reads `model.logits`, `model.samples` or `tracer.result`. A reference to
-  `model` inside a block ships the model with every invoke (~9 ms each), and those
-  properties cannot be bound outside a trace. In a sweep, take the text from the
-  edit's outputs.
-- `model.model.layers[i]` written *inside* the block is the same trap; bind the
-  layer envoy before the trace.
-- Prefix caching must be off: a cached token gets no forward pass, so an edit
-  sees fewer rows than the prompt has, silently. A trace forces its own recompute.
-- After `edit.clear()` an output has no `.saves` attribute at all.
-- On `mode="async"`: `async with model.edit()` and `await edit.aclear()`.
-- `tracer.result.saves` on a traced request carries the edit's values only; the
-  trace's own come back as your variables.
+Prefix caching must be off for an edit: a cached token gets no forward pass, so
+the edit silently sees fewer rows than the prompt has (a trace forces its own
+recompute). After `edit.clear()` an output has no `.saves` attribute at all.
+`tracer.result.saves` on a traced request carries the edit's values only.
 
 ## Graph taps, serving, parallelism, architectures
 
 - **[Graph taps](references/graph-taps.md)** — `taps=[...]` keeps CUDA-graph replay
-  and serves the named locations from it: 96% of vanilla vLLM on one GPU against the
-  eager engine's 85%, and 91% against 20% at tp=8. Only taps are served, edits land
-  in place, clone what you keep, hybrid trunks pin decode-only graphs.
+  and serves only the named locations, at 91–96% of plain vLLM's throughput;
+  edits land in place, clone what you keep.
 - **[Serving](references/serving.md)** — `nnsight-serve`, GPU-less clients with
-  `trace(..., serve=url)` and `edit(serve=url)`, the CLI's forwarded flags, and
-  what the server is not (an OpenAI endpoint).
+  `trace(..., serve=url)` and `edit(serve=url)`, the async engine, and what the
+  server is not (an OpenAI endpoint).
 - **[Tensor parallelism, MoE, hybrid trunks](references/parallel-and-architectures.md)**
-  — what is gathered and what is a shard, the logit lens via `logits_processor`,
-  router logits as a `(logits, bias)` pair, `linear_attn` vs `self_attn` layers.
+  — what is gathered and what is a shard, the logit lens via `logits_processor`
+  (`model.lm_head(h)` raises), router logits as a `(logits, bias)` pair,
+  `linear_attn` vs `self_attn` layers, vision-language checkpoints.
 
 ## `.skip()` can take the whole engine down
 
-`.skip()` is the one intervention that costs more than the request it is in. A
-skip has to supply a replacement for **every row of the step**, and a step's rows
-are whatever the scheduler put together — other traces of yours, other tenants'
-requests, and decodes of requests whose own block finished long ago. When the
-replacement does not tile them, the `ValueError` is raised outside the deferral
-that turns an intervention error into one failed request, so vLLM treats it as
-fatal: `EngineDeadError`, every in-flight request lost, the engine object unusable
-and only rebuildable (40-70 s).
+A skip must replace **every row of the step**, and a step's rows are whatever the
+scheduler batched — other invokes, other clients' requests. When the replacement
+does not tile them, vLLM treats the error as fatal: `EngineDeadError`, every
+in-flight request lost. **Treat `.skip()` as unsupported once more than one
+request can be in flight**, including other traffic on a shared engine.
 
-Whether that happens is the scheduler's decision, not your code's. A single-invoke
-skip is fine; two invokes where only the second skips is fine, because they are
-not co-scheduled; three invokes with the middle one skipping dies. **Treat
-`.skip()` as unsupported once more than one request can be in flight** — and note
-that "in flight" includes another client's traffic on a shared engine or
-`nnsight-serve`.
+On one prompt with nothing else running, note that **a decoder layer's `.input` is
+the positions tensor** (`forward(positions, hidden_states, residual)`), so
+`module.skip(module.input)` kills the engine. The pass-through is:
 
-If you use it anyway, on one prompt with nothing else running: **a decoder layer's
-`.input` is the positions tensor, not the hidden state.** vLLM calls
-`forward(positions, hidden_states, residual)`, so the pass-through idiom from the
-`nnsight` skill (`module.skip(module.input)`) feeds a `[tokens]` int64 vector in
-where a hidden state belongs and kills the engine. The pass-through here is:
-
-<!-- test: skip -->
+<!-- test: gpu slow requires vllm -->
 ```python
-with model.trace(prompt, temperature=0.0, max_tokens=4):
+with model.trace("The capital of France is", temperature=0.0, max_tokens=4, ignore_eos=True) as tracer:
     args, _ = model.model.layers[10].inputs
     model.model.layers[10].skip((args[1], args[2]))       # hidden, residual
+    result = tracer.result.save()
+assert len(result.outputs[0].token_ids) == 4
 ```
 
-To ablate a layer without skipping it, write its output instead — the compute is
-spent either way, but a write cannot kill the engine.
+To ablate a layer without that risk, write its output instead.
 
 ## Not supported on the vLLM path
 
 - **Gradients / `backward()`** and **`.source` inside a fused kernel** — the kernel's
   inputs and outputs are locations, its interior is not Python.
-- **`model.scan()`** — it propagates shapes by running the model's forward under a
-  fake-tensor mode, and the forward is in the worker under `torch.inference_mode`.
-  It raises `NotImplementedError: scan is unavailable on vLLM: ... Trace a prompt
-  and read the shapes off the activations it serves.`
-- **Image/video inputs** — vision-language checkpoints load and trace on text; the
-  decoder is at `model.language_model.model.layers`.
+- **`model.scan()`** — raises `NotImplementedError: scan is unavailable on vLLM:
+  ... Trace a prompt and read the shapes off the activations it serves.`
 - **Cross-invoke values and `tracer.barrier`** — two traces (above).
 - **Pipeline parallelism and speculative decoding** — shard with
   `tensor_parallel_size`. A `pipeline_parallel_size=2` engine builds and then fails
   every trace with `RuntimeError: UnknownPersistentIdError:
   Module:model.model.layers.12.self_attn`, naming a layer on the other stage.
-- **`model.lm_head(h)`** — raises; the unembed is
-  `model.logits_processor(model.lm_head, model.model.norm(h))`.
+
+## Errors and warnings
 
 Errors raised inside the worker come back as `RuntimeError` carrying the original
-type and an "Intervention traceback" pointing at your line — so catch `RuntimeError`
-and match on the message, not the class. Warnings do not come back: they are emitted
-by vLLM's EngineCore subprocess, so `warnings.catch_warnings()` around a trace records
-nothing — a `tracer.iter` loop that outran the run is cut short with only that
-engine-side warning, and your process sees a short result and nothing else. Once
-the engine is running, that is the one behaviour that differs from the local
-path; errors are identical. Nor does anything that fails while the engine builds
-come back as itself, including a bad `taps=` entry: the caller gets
-`RuntimeError: Engine core initialization failed. See root cause above.` and the
-real message is in the `(EngineCore pid=...)` lines above it.
+type and an "Intervention traceback" — match on the message, not the class.
+**Warnings do not come back**: they are emitted in vLLM's EngineCore subprocess,
+so `warnings.catch_warnings()` records nothing. A failure while the engine builds
+(a bad `taps=` entry included) arrives as `RuntimeError: Engine core initialization
+failed`; the real message is in the `(EngineCore pid=...)` log lines above it.
 
 ## Choosing
 
@@ -401,12 +327,10 @@ real message is in the `(EngineCore pid=...)` lines above it.
 |---|---|
 | one prompt, gradients, attribution, `.source`, `scan` | `TransformersModel` |
 | hundreds of prompts, or a served engine | `VLLM`; sweeps through `model.edit()` |
-| model larger than one GPU, locally | `VLLM` with `tensor_parallel_size` (declare `taps`) |
+| model larger than one GPU, for throughput | `VLLM` with `tensor_parallel_size` (declare `taps`) |
+| model larger than one GPU, with gradients / `.source` / the full API | the `tensor-parallel` skill |
 | model larger than your machine | NDIF — the `remote` skill |
 | token-by-token streaming | `VLLM` with `mode="async"`: `async for output in tracer.backend` |
 
-## Related skills
-
-- `nnsight` — the intervention API that carries over unchanged
-- `tensor-parallel` — the `transformers` + `torchrun` alternative for sharding
-- `debugging` — reading the re-raised worker errors
+The intervention API itself is the `nnsight` skill's; reading the re-raised worker
+errors is the `debugging` skill's.

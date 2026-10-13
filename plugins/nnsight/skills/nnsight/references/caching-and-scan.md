@@ -14,28 +14,10 @@ model = TransformersModel("openai-community/gpt2", dispatch=True)
 prompt = "The Eiffel Tower is in the city of"
 ```
 
-## One pass, many modules
-
-The rule: **structure traces by which input you are running, not by which
-activation you want.** Everything from one input comes out of one forward pass.
-
-The explicit form — a loop inside the trace, saving into one container:
-
-```python
-with model.trace(prompt):
-    resid = nnsight.save([])
-    for block in model.transformer.h:
-        resid.append(block.output[0, -1])          # last position, each layer
-
-print(len(resid), resid[0].shape)                  # 12 torch.Size([768])
-```
-
-The anti-pattern is opening one trace per layer — that is N forward passes for no
-reason, and N network round-trips when remote.
-
 ## tracer.cache()
 
-For "give me everything", `tracer.cache()` records modules without naming them:
+`tracer.cache()` records many modules without a save per module — the
+alternative to a loop of `.save()`s inside one trace:
 
 ```python
 with model.trace(prompt) as tracer:
@@ -119,31 +101,14 @@ with model.trace(prompt) as tracer:
 print(cache["model.transformer.h.0"].output.abs().sum().item())   # 0.0 — post-intervention
 ```
 
-### A per-invoke cache is padded, and nothing marks the pad
+### A per-invoke cache is padded
 
 Inside `tracer.invoke(...)` you get that invoke's rows at the *whole batch's*
-padded length, left-padded. Pad positions carry real values, and they can be
-larger than the real ones:
-
-```python
-with model.trace() as tracer:
-    with tracer.invoke("the cat"):                                     # 2 tokens
-        short = tracer.cache(modules=[model.transformer.h[0]])
-    with tracer.invoke("a much longer prompt here about many things"):  # 8 tokens
-        pass
-
-out = short["model.transformer.h.0"].output
-print(out.shape)                                          # torch.Size([1, 8, 768])
-print([round(float(n), 1) for n in out[0].norm(dim=-1)])
-# [192.4, 192.4, 192.4, 192.4, 192.4, 192.4, 136.7, 56.7]
-#  six pad positions, each with a larger norm than either real token
-assert out.shape[1] == 8
-```
-
-`out.mean(1)` there is three quarters padding. Index from the right (`[:, -1]` is
-stable, the padding is on the left) or mask before reducing. This costs more in a
-cache than in a `.save()`, because nobody eyeballs twelve layers times N invokes.
-[batching.md](batching.md) has the mechanism.
+padded length, left-padded, with no mask. Pad positions carry real values, often
+with a larger norm than the real tokens, so `out.mean(1)` can be mostly padding.
+Index from the right or mask before reducing — the mechanism is in
+[batching.md](batching.md#positions-shift-with-the-batch). It costs more here than
+in a `.save()`, because nobody eyeballs twelve layers times N invokes.
 
 To capture the whole combined batch, open the cache in an empty `tracer.invoke()`:
 
@@ -160,9 +125,8 @@ assert tuple(batch["model.transformer.h.0"].output.shape) == (2, 8, 768)
 
 ### detach=False makes the cache differentiable
 
-`detach` is listed with the memory options, but it is also the switch that decides
-whether you can call `backward()` on what you captured. With `device=None` so the
-tensors stay on the graph's device:
+`detach` also decides whether you can call `backward()` on what you captured. With
+`device=None` so the tensors stay on the graph's device:
 
 ```python
 with model.trace(prompt) as tracer:
@@ -180,19 +144,10 @@ costs. Leave `detach=True` for plain collection.
 
 ### Cost
 
-GPT-2, batch 32 x 64 tokens, fp16, under `torch.no_grad()`, min of five runs,
-A and B interleaved on an otherwise idle A6000:
-
-| | ms/batch | payload |
-|---|---|---|
-| trace, no capture | 13.2 | — |
-| `cache(modules=[12 blocks])` | 19.0 | 36.0 MiB |
-| hand-written `save()` loop, same 12 | 18.8 | 36.0 MiB |
-| `cache()` with no `modules=` | 381 | 1124.7 MiB over 151 modules |
-
-A cache and a save loop cost the same. Pick the cache because you do not want to
-write the loop, not because it is faster. Always pass `modules=`: unfiltered is
-20x the time and 31x the bytes.
+A cache costs the same as a hand-written `.save()` loop over the same modules —
+pick it to avoid writing the loop, not for speed. Always pass `modules=`: on GPT-2,
+an unfiltered cache was about 20x slower and 30x larger than one restricted to the
+12 blocks.
 
 ## model.scan() — shapes without compute
 
@@ -200,11 +155,9 @@ write the loop, not because it is faster. Always pass `modules=`: unfiltered is
 no kernels run, and **the model is never dispatched**. Use it to check indexing
 before spending a forward pass — or before downloading weights at all.
 
-`scan` belongs to the wrappers that load from a repo id — `TransformersModel`,
-`DiffusionModel`, `VLLM` — because it is the meta-build machinery that makes a
-weightless forward possible. A plain `NNsight(my_module)` has no `.scan`, and
-asking for one raises `AttributeError: 'NNsight' object (nor its module) has
-attribute 'scan'`. Your own module is already built, so trace it instead.
+`scan` belongs to the wrappers that load from a repo id (`TransformersModel`,
+`DiffusionModel`, `VLLM`). A plain `NNsight(my_module)` has none — `AttributeError:
+'NNsight' object (nor its module) has attribute 'scan'` — so trace it instead.
 
 ```python
 meta = TransformersModel("openai-community/gpt2")     # no dispatch=True
@@ -248,4 +201,4 @@ move those out of the scan block.
 
 - [access-and-modify.md](access-and-modify.md)
 - [batching.md](batching.md) — many inputs in the same pass
-- [execution-model.md](execution-model.md) — saving containers vs elements
+- [execution-model.md](execution-model.md) — `.save()` semantics

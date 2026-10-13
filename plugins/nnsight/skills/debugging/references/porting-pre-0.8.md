@@ -16,9 +16,7 @@ the word "proxy" · `.output[0]` on every transformer block
 
 ## What you actually see
 
-Keyed by the message, because that is what you have. Every row below was run on
-0.8 against GPT-2 with transformers 5.15, from an imported module under untouched
-warning filters.
+Keyed by the message, because that is what you have.
 
 ### Removed — raises immediately
 
@@ -36,7 +34,7 @@ warning filters.
 | `tracer.next()` | `AttributeError: 'InterleavingTracer' object has no attribute 'next'` | `for step in tracer.iter[:N]:` |
 | `module.next()` | `AttributeError: 'Envoy' object (nor its module) has attribute 'next'` | `for step in tracer.iter[:N]:` |
 | `tracer.local()` | `AttributeError: 'InterleavingTracer' object has no attribute 'local'` | *(not ported)* — use a remote session |
-| `CONFIG.APP.CROSS_INVOKER` | `AttributeError: 'AppConfig' object has no attribute 'CROSS_INVOKER'` | nothing needed — invokes share values by default. A `tracer.barrier(n)` is only for the ordering case described in `docs/usage/invoke-and-batching.md` |
+| `CONFIG.APP.CROSS_INVOKER` | `AttributeError: 'AppConfig' object has no attribute 'CROSS_INVOKER'` | nothing needed — invokes share values by default. A `tracer.barrier(n)` is only for the ordering case in the `nnsight` skill's batching reference |
 | `CONFIG.APP.CACHE_DIR` / `TRACE_CACHING` | `AttributeError: 'AppConfig' object has no attribute 'CACHE_DIR'` | nothing needed |
 | `nnsight.save([])` before the `with` | `ValueError: save() was called outside a trace. …` | move the save inside the block |
 
@@ -60,17 +58,10 @@ output means the idiom is not there, not that it was hidden.
 | `model.generator.output` | `model.generator.output is deprecated; use tracer.result instead (model.generator.streamer.output still gives per-step tokens).` | `tracer.result` |
 | `nnsight.ndif_status()` | `nnsight.ndif_status() is deprecated; use nnsight.status() instead.` | `nnsight.status()` |
 
-`model.generator.output` and `tracer.result` carry the identical tensor — the
-prompt's ids followed by the generated ones, `[1, 13]` for a 10-token prompt plus
-3 new — so that row is a straight rename with nothing to re-index. Per-step
-tokens are `model.generator.streamer.output`, which is not deprecated.
-
-To silence nnsight's deprecations and no other library's:
-
-```python
-import warnings, nnsight
-warnings.filterwarnings("ignore", category=nnsight.NNsightDeprecationWarning)
-```
+`model.generator.output` → `tracer.result` is a straight rename: the same tensor
+(prompt ids then generated ids), nothing to re-index. To silence nnsight's
+deprecations and no other library's,
+`warnings.filterwarnings("ignore", category=nnsight.NNsightDeprecationWarning)`.
 
 ### Runs, says nothing, and may be wrong
 
@@ -80,60 +71,7 @@ warnings.filterwarnings("ignore", category=nnsight.NNsightDeprecationWarning)
 | `attn.output[0]` | Runs, and is still right — an attention submodule's `.output` really is a tuple | unchanged |
 | `results = []` outside; `results.append(x.save())` | Runs locally and collects all 12 elements; returns nothing **remotely** | `results = nnsight.save([])` inside the trace, appending raw values |
 | `hidden.retain_grad()`; `logits.sum().backward()`; read `hidden.grad` after | Runs, and gives the identical gradient | fine for reading one gradient; use `with metric.backward():` to edit one or read several in reverse order |
-| `with tracer.all():` over N steps | Runs the loop, drops everything after it | bound the loop, or move the trailing code past the `with` |
-
-## The three that silently change results
-
-**1. `.output[0]` on transformer blocks.** Blocks used to return tuples. In
-current `transformers` a GPT-2/Llama block returns a plain tensor, so `[0]` now
-selects **batch row 0**. Shapes stay plausible, results are wrong.
-
-```diff
-- hidden = model.transformer.h[5].output[0]      # was: unwrap the tuple
-+ hidden = model.transformer.h[5].output         # now: already a tensor
-```
-
-Attention submodules *do* still return tuples, so `attn.output[0]` is usually
-still right. Confirm per model with `scripts/inspect_model.py --prompt ...`.
-
-**2. Unbounded iteration.** Old nnsight bounded `tracer.all()` internally; 0.8
-does not, and the over-run unwinds every line after the loop:
-
-```diff
-  with model.generate(prompt, max_new_tokens=5) as tracer:
--     for step in tracer.all():
-+     for step in tracer.iter[:5]:
-          collected.append(model.output.logits[0, -1].argmax(dim=-1))
-      ids = tracer.result.save()     # only runs if the loop is bounded
-```
-
-A `tracer.iter[:5]` the run does not reach is cut short with a warning and hands
-back fewer values than the bound named:
-
-```
-UserWarning: 'model.output.i3' was never reached: the loop asked for a step the
-run did not make, so it was cut short — values saved inside the loop are kept,
-and the statements after it did not run. …
-```
-
-Add `min_new_tokens=5` alongside `max_new_tokens=5` so the generation cannot stop
-short of what the loop asks for — `min_tokens=` or `ignore_eos=True` on vLLM.
-Neither holds a run that a stop string ends, so keep `tracer.all()` where
-`stop_strings=` is in play, and put what follows the loop in a separate
-`tracer.invoke()`.
-
-**3. Saving list elements.** Old code often wrote `results.append(x.save())` into
-a list created outside the trace. It collects values locally and returns nothing
-remotely. Save the container instead:
-
-```diff
-- results = []
-  with model.trace(prompt):
-+     results = nnsight.save([])
-      for block in model.transformer.h:
--         results.append(block.output.save())
-+         results.append(block.output[0, -1])
-```
+| `with tracer.all():` over N steps | Runs the loop, drops everything after it | bound the loop with `min_new_tokens=N`, or move the trailing code into a separate `tracer.invoke()` — not past the `with`, where `tracer.result` raises |
 
 ## Gradients
 
@@ -149,10 +87,10 @@ print(hidden.grad)
 ```
 
 That still runs on 0.8 and gives the same gradient, so it is not the first thing
-to change — drop the `[0]` (point 1 above) and it is correct. The 0.8 form is what
-you need in order to *edit* a gradient mid-backward, or to read `.grad` on several
-tensors, which must happen in reverse-forward order inside the block. No
-`retain_grad()` / `requires_grad_()` needed:
+to change — drop the `[0]` (the silent table above) and it is correct. The 0.8
+form is what you need in order to *edit* a gradient mid-backward, or to read
+`.grad` on several tensors, which must happen in reverse-forward order inside the
+block. No `retain_grad()` / `requires_grad_()` needed:
 
 <!-- test: setup -->
 ```python
@@ -174,31 +112,16 @@ assert grad.shape == (1, 10, 768)
 assert grad.abs().sum() > 0
 ```
 
-## `save()` now raises outside a trace
-
-A pattern that used to be a silent no-op is now an error — build accumulators
-*inside* the trace:
-
-```diff
-- buffer = nnsight.save([])          # ValueError on 0.8
-  with model.trace(prompt):
-+     buffer = nnsight.save([])
-      buffer.append(model.transformer.h[0].output[0, -1])
-```
-
 ## Porting checklist
 
-1. Replace `LanguageModel` → `TransformersModel`; drop every `.value`.
-2. Replace `nnsight.list/dict/apply/cond/log/session` with plain Python /
-   `model.session()`.
-3. Convert `with tracer.all():` / `tracer.next()` to a **bounded**
-   `for step in tracer.iter[:N]:`, and add `min_new_tokens=N` so the run reaches
-   the bound. Keep `tracer.all()` if the run can be ended by a stop string.
-4. Re-check every `.output[0]` against the real output type.
-5. Move accumulator creation inside the trace; save containers, not elements.
-6. Swap `model.generator.output` for `tracer.result` — same tensor, no re-indexing.
-7. If it generated text, decide whether you want `generate` (ids) or `pipe` (text).
-8. Run it with warnings on. Anything still deprecated says so and names its
-   replacement.
-9. Sanity-check: does the unmodified baseline reproduce the expected output, and
+1. Work through the three tables above: every removed name, every deprecation
+   warning, every silent row.
+2. Re-check every `.output[0]` against the real output type
+   (`scripts/inspect_model.py --prompt ...` in the `nnsight` skill) — on 0.8 an
+   attention submodule still returns a tuple, a block does not.
+3. For every `tracer.iter` loop, decide what bounds the run: `min_new_tokens=N`
+   for a bounded loop, `tracer.all()` plus a separate invoke where a stop string
+   can end it. 0.8 does not bound `tracer.all()`.
+4. If it generated text, decide whether you want `generate` (ids) or `pipe` (text).
+5. Sanity-check: does the unmodified baseline reproduce the expected output, and
    does an extreme intervention actually move the metric?

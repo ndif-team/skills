@@ -1,6 +1,6 @@
 ---
 name: logit-lens
-description: Decode what a model predicts at every layer by applying its final norm and unembedding to intermediate residual streams. Use to see where in depth an answer emerges, to track a specific token's probability across layers, to sanity-check that a model knows a fact before running invasive interventions, or to compare prediction trajectories between prompts. Built on nnsight 0.8; includes the one-line wiring check that catches a wrong norm, a wrong unembedding or logit softcapping before you plot, per-architecture variants, the tuned-lens caveat, and the failure modes that make a logit lens look informative when it is not.
+description: Decode what a model predicts at every layer by applying its final norm and unembedding to intermediate residual streams. Use to see where in depth an answer emerges, to track a specific token's probability across layers, to sanity-check that a model knows a fact before running invasive interventions, or to compare prediction trajectories between prompts. Includes the one-line wiring check that catches a wrong norm, a wrong unembedding or logit softcapping before you plot, per-architecture variants, the tuned-lens caveat, and the failure modes that make a logit lens look informative when it is not.
 ---
 
 # Logit Lens
@@ -55,14 +55,15 @@ layer  5: ' the'      layer 11: ' Paris'
 ```
 
 These tokens come from a float32 run, and several are near-ties: layer 9's top two
-logits are 0.14 apart, layer 10's 0.05. Loaded in bfloat16 on a GPU — what NDIF
-serves — layer 9 reads `' Paris'` instead of `' London'`. Track one token's
-probability or rank ([below](#top-k-and-the-probability-trajectory-of-one-token))
-rather than asserting a layer's exact argmax.
+logits are 0.14 apart, layer 10's 0.05. Loaded in bfloat16, layer 9 reads
+`' Paris'` instead of `' London'`. Track one token's probability or rank
+([below](#the-probability-trajectory-of-one-token)) rather than asserting a
+layer's exact argmax.
 
 The whole sweep is **one forward pass**. Calling `model.lm_head(...)` inside the
-trace runs its `forward` directly — no hooks, no ordering constraint — so you can
-apply the unembedding to a layer-5 activation without re-running anything.
+trace runs its `forward` directly with no nnsight interleaving (the module's own
+PyTorch hooks still fire), so you can apply the unembedding to a layer-5
+activation without re-running anything.
 
 Do not write `block.output[0]`: a block returns a plain tensor on every family
 tested, so that indexes batch row 0 — no error, and a lens that decodes the same
@@ -75,8 +76,13 @@ it must reproduce the model's logits exactly. One line tells you whether the
 norm, the head and the block output you picked are the right three:
 
 ```python
+cap = getattr(model.config, "final_logit_softcapping", None)   # None on GPT-2
+
 with model.trace(prompt):
-    lens = model.lm_head(model.transformer.ln_f(model.transformer.h[-1].output)).save()
+    lens = model.lm_head(model.transformer.ln_f(model.transformer.h[-1].output))
+    if cap is not None:
+        lens = torch.tanh(lens / cap) * cap
+    lens = lens.save()
     real = model.output.logits.save()
 
 assert torch.equal(lens, real), (lens - real).abs().max()
@@ -86,80 +92,61 @@ Run it on any model before plotting. A mismatch means one of three things, none
 of which raises on its own:
 
 - **the wrong norm**, or none — `lm_head(resid)` without the final norm decodes
-  `' the'` at probability `1.0000` at *every* GPT-2 layer, which looks like a
-  confident lens and reads exactly like the "does not transfer" symptom below;
-- **the wrong head or block output** — `block.output[0]` on a tensor, or a head
-  attribute the model does not have;
+  `' the'` at probability `1.0000` at *every* GPT-2 layer: a confident-looking,
+  scale-wrong lens that reads exactly like the "does not transfer" symptom below;
+- **the wrong head or block output** — a head attribute the model does not have,
+  or a block output indexed like a tuple;
 - **the model post-processes the logits.** `google/gemma-2-2b` softcaps them
-  (`config.final_logit_softcapping = 30.0`), so the check fails by `51.0` and the
-  uncapped distribution is far too sharp: max probability `0.9995` against the
-  model's `0.9257`, entropy `0.0050` against `0.6010`.
+  (`config.final_logit_softcapping = 30.0`); without the cap the check fails by
+  `51.0` and the distribution is far too sharp (max probability `0.9995` against
+  the model's `0.9257`). The `cap` lines above reapply it, so every layer is read
+  on the model's own scale. Check `model.config` rather than a list of model
+  names — Gemma-3 sets the cap to `None`.
 
-Reapply the cap yourself and every layer is read on the model's own scale. Check
-`model.config` rather than a list of model names — Gemma-3 sets
-`final_logit_softcapping` to `None`, and GPT-2 has no such attribute at all:
+## The probability trajectory of one token
 
-```python
-cap = getattr(model.config, "final_logit_softcapping", None)
-
-with model.trace(prompt):
-    logits = model.lm_head(model.transformer.ln_f(model.transformer.h[-1].output))
-    if cap is not None:
-        logits = torch.tanh(logits / cap) * cap
-    capped = logits.save()
-
-assert torch.equal(capped, real)      # cap is None here; on gemma-2 this is what makes it hold
-```
-
-## Top-k, and the probability trajectory of one token
-
-```python
-with model.trace(prompt):
-    topk_per_layer = nnsight.save([])
-    for block in model.transformer.h:
-        logits = model.lm_head(model.transformer.ln_f(block.output))
-        topk_per_layer.append(logits[0, -1].topk(5).indices)
-
-for layer, ids in enumerate(topk_per_layer):
-    print(f"layer {layer:2d}: {[model.tokenizer.decode(i) for i in ids]}")
-```
-
-Tracking one target is usually the more useful measurement — it gives a curve you
-can compare across prompts or interventions:
+Tracking one target gives a curve you can compare across prompts or
+interventions; the top-5 alongside shows what it competes with:
 
 ```python
 paris = model.tokenizer.encode(" Paris")[0]
 
 with model.trace(prompt):
     trajectory = nnsight.save([])
+    top5 = nnsight.save([])
     for block in model.transformer.h:
-        logits = model.lm_head(model.transformer.ln_f(block.output))
-        trajectory.append(logits[0, -1].softmax(dim=-1)[paris])
+        probs = model.lm_head(model.transformer.ln_f(block.output))[0, -1].softmax(dim=-1)
+        trajectory.append(probs[paris])
+        top5.append(probs.topk(5).indices)
 
-for layer, p in enumerate(trajectory):
-    print(f"layer {layer:2d}  P(' Paris') = {p.item():.4f}")
+for layer, (p, ids) in enumerate(zip(trajectory, top5)):
+    print(f"layer {layer:2d}  P(' Paris') = {p.item():.4f}  {[model.tokenizer.decode(i) for i in ids]}")
+
+assert max(range(12), key=lambda layer: trajectory[layer].item()) == 9
+assert trajectory[-1].item() < trajectory[9].item()
 ```
+
+`P(' Paris')` peaks at `0.248` at layer 9 — while `' London'` is still top-1 —
+and `' Paris'` only becomes top-1 at layer 10. The final layer gives `0.0700`,
+*less* confident than the peak. Lens probabilities locate transitions; they are
+not calibrated confidences.
 
 ## Every position, not just the last
 
-The same decode applied across the sequence gives the classic heatmap — what the
-model would predict *at each position* if it stopped at each layer:
+The same decode across the sequence gives the classic heatmap — what the model
+would predict *at each position* if it stopped at each layer:
 
 ```python
 with model.trace(prompt):
-    grid = nnsight.save([])
-    for block in model.transformer.h:
-        logits = model.lm_head(model.transformer.ln_f(block.output))
-        probs = logits[0].softmax(dim=-1)
-        best = probs.max(dim=-1)
-        grid.append(torch.stack([best.values, best.indices.float()]).cpu())
+    grid = nnsight.save([
+        model.lm_head(model.transformer.ln_f(block.output))[0].argmax(dim=-1)
+        for block in model.transformer.h
+    ])                                               # layers x [seq]
 
-stacked = torch.stack(grid)                      # (layers, 2, seq)
 tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(prompt).input_ids]
 print(f"{'':12}" + "".join(f"L{i:<7}" for i in range(0, 12, 3)))
 for pos, token in enumerate(tokens):
-    row = "".join(f"{model.tokenizer.decode(int(stacked[i, 1, pos])):<8}" for i in range(0, 12, 3))
-    print(f"{token!r:12}{row}")
+    print(f"{token!r:12}" + "".join(f"{model.tokenizer.decode(grid[i][pos]):<8}" for i in range(0, 12, 3)))
 ```
 
 ## Comparing two prompts in one pass
@@ -167,31 +154,27 @@ for pos, token in enumerate(tokens):
 Put each prompt in its own invoke — one forward pass, directly comparable curves:
 
 ```python
-paris = model.tokenizer.encode(" Paris")[0]
-rome = model.tokenizer.encode(" Rome")[0]
+answers = {"The Eiffel Tower is in the city of": " Paris",
+           "The Colosseum is in the city of": " Rome"}
 
 with model.trace() as tracer:
-    with tracer.invoke("The Eiffel Tower is in the city of"):
-        eiffel = nnsight.save([])
-        for block in model.transformer.h:
-            logits = model.lm_head(model.transformer.ln_f(block.output))
-            eiffel.append(logits[0, -1].softmax(dim=-1)[paris])
+    curves = nnsight.save({})
+    for text, answer in answers.items():
+        target = model.tokenizer.encode(answer)[0]
+        with tracer.invoke(text):
+            curves[answer] = [
+                model.lm_head(model.transformer.ln_f(block.output))[0, -1].softmax(dim=-1)[target]
+                for block in model.transformer.h
+            ]
 
-    with tracer.invoke("The Colosseum is in the city of"):
-        colosseum = nnsight.save([])
-        for block in model.transformer.h:
-            logits = model.lm_head(model.transformer.ln_f(block.output))
-            colosseum.append(logits[0, -1].softmax(dim=-1)[rome])
-
-for layer, (a, b) in enumerate(zip(eiffel, colosseum)):
+for layer, (a, b) in enumerate(zip(curves[" Paris"], curves[" Rome"])):
     print(f"layer {layer:2d}  P(Paris|Eiffel)={a.item():.3f}   P(Rome|Colosseum)={b.item():.3f}")
 ```
 
 ## Other architectures
 
-The recipe is always *final norm, then unembedding* — only the names change. A
-block's `.output` is a plain tensor in every row of this table (nnsight 0.8,
-`transformers` 5.15); none of them wants a `[0]`.
+The recipe is always *final norm, then unembedding* — only the names change
+(verified on `transformers` 5.15):
 
 | Family | Residual | Final norm | Unembed |
 |---|---|---|---|
@@ -216,24 +199,8 @@ assert decoded == [" the", " the", " the", " the", " the", " Paris"]
 
 The answer arrives at the last layer and nowhere earlier — see
 [Reading the result honestly](#reading-the-result-honestly). That is the common
-case; GPT-2's smooth trajectory is the exception.
-
-Confirm the row for your own checkpoint by running the wiring check on it. It
-catches a wrong unembedding name in one line — Pythia's, for instance, is
-`model.lm_head`, and `model.embed_out` raises `AttributeError` naming the module
-rather than the model:
-
-```python
-pythia = TransformersModel("EleutherAI/pythia-70m-deduped", dispatch=True)
-
-with pythia.trace("The capital of France is"):
-    lens = pythia.lm_head(
-        pythia.gpt_neox.final_layer_norm(pythia.gpt_neox.layers[-1].output)
-    ).save()
-    real = pythia.output.logits.save()
-
-assert torch.equal(lens, real)
-```
+case; GPT-2's smooth trajectory is the exception. Confirm the row for your own
+checkpoint by running the wiring check on it.
 
 ## During generation
 
@@ -267,26 +234,20 @@ the lens does not transfer, not that the model knows nothing. Symptoms: every
 layer decodes to the same high-frequency token, or probabilities stay near zero
 until the final layer and then jump.
 
-Before concluding that, run the wiring check. A lens missing its final norm
-produces the same symptom — one high-frequency token at probability `1.0000` on
-every layer — and no amount of tuned lens fixes a missing `ln_f`.
+Before concluding that, run the wiring check: a missing final norm produces the
+same symptom, and no tuned lens fixes a missing `ln_f`.
 
-If the wiring is right, the remedy is a **tuned lens**: keep the model's frozen
-final norm and unembedding, and learn one affine translator per layer that maps
-`h_L` into the final layer's basis first
-([Belrose et al., 2023](https://arxiv.org/abs/2303.08112)), so the decode is
-`lm_head(ln_f(A_L(h_L)))`. It costs a training pass over a corpus and makes
-cross-layer comparisons meaningful. Decoding `lm_head(A_L(h_L))` instead — with
-the norm dropped — is a different and worse thing: a LayerNorm is not affine, and
-its per-token scale varies 33x across the positions of one GPT-2 prompt.
+If the wiring is right, the remedy is a **tuned lens**
+([Belrose et al., 2023](https://arxiv.org/abs/2303.08112)): learn one affine
+translator per layer and decode `lm_head(ln_f(A_L(h_L)))`, keeping the frozen
+final norm. Dropping the norm (`lm_head(A_L(h_L))`) is worse, not equivalent — a
+LayerNorm is not affine, and its per-token scale varies 33x across one GPT-2
+prompt.
 
 Other things that quietly invalidate a reading:
 
-- **Skipping the final norm.** `lm_head(resid)` without `ln_f` produces
-  scale-wrong logits that still look like a distribution — and a *more* confident
-  one than the correct lens.
-- **Comparing probabilities across layers as if calibrated.** Use them to locate
-  transitions, not as calibrated confidences.
+- **Comparing probabilities across layers as if calibrated.** The final layer
+  can be less confident than a middle one (above); use them to locate transitions.
 - **Reading only the last position.** Where information appears in the sequence is
   often the more interesting axis.
 - **Concluding from one prompt.** Layer indices shift across paraphrases; average

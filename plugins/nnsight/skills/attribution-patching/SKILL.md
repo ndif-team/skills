@@ -1,6 +1,6 @@
 ---
 name: attribution-patching
-description: Approximate activation patching with gradients — attribution = (clean activation − corrupt activation) · gradient of the metric — so a whole layer×position×head map costs two forward passes and one backward instead of one forward pass per component. Use to screen large models or large component sets before verifying the survivors with real patching, to build circuit-level attribution heatmaps, and for edge attribution patching. Includes the validation step that tells you whether the approximation is trustworthy on your task, and the conditions under which it silently is not.
+description: Approximate activation patching with gradients — attribution = (clean activation − corrupt activation) · gradient of the metric — so a whole layer×position×head map costs two forward passes and one backward instead of one forward pass per component. Use to rank all heads or positions at once with two passes, to screen large models or large component sets before verifying the survivors with real patching, to build circuit-level attribution heatmaps, and for edge attribution (worked example in circuit-discovery). Includes the validation step that tells you whether the approximation is trustworthy on your task, and the conditions under which it silently is not.
 ---
 
 # Attribution Patching
@@ -92,8 +92,8 @@ def validate(positions, name):
         for i in range(n_layers)
     ])
 
-    # Keyed by layer, not appended: values come back in the order the model
-    # reaches the invokes, which is not necessarily the order you wrote them.
+    # Keyed by layer rather than appended: with many invokes a keyed dict
+    # stays readable and survives reordering the loop later.
     with model.trace() as tracer:
         real = nnsight.save({})
         for layer in range(n_layers):
@@ -141,11 +141,6 @@ nearly exact and the rankings agree. Across the four subject tokens it falls to
 residual at once moves the run well outside the regime a first-order term
 describes.
 
-| What is patched | Pearson r vs real patching |
-|---|---|
-| the last position only | **+0.999** |
-| four subject-token positions | +0.168 |
-
 The rule that falls out: **attribution patching is trustworthy for small, local
 interventions and decays as the intervention grows.** Patch a position, a head,
 or a feature. And run this check on your own task before believing a heatmap; it
@@ -187,7 +182,7 @@ separate slices — this is the cheap version of a head-level circuit scan:
 
 ```python
 n_heads = model.config.n_head
-head_dim = model.config.n_embd // n_heads
+head_dim = model.transformer.h[0].attn._module.head_dim   # equals n_embd // n_head on GPT-2, not on GQA/Gemma models
 
 with torch.no_grad():
     with model.trace(clean):
@@ -221,16 +216,19 @@ for index in flat.tolist():
     print(f"L{layer}H{head:<2} attribution {scores[layer, head]:+.4f}")
 ```
 
-144 head attributions from two forward passes. Verify the top few with real head
-patching (`activation-patching` skill) before believing any of them.
+144 head attributions from two forward passes. Screen by |score| — a head that
+pushes against the answer matters as much as one that pushes for it — then verify
+the top-k with real head patching (`activation-patching` skill), keeping the sign.
 
 ## Edge attribution
 
-The same trick applied to *connections* rather than components: attribute the
-effect of the path from an upstream component to a downstream one by taking the
-gradient at the downstream input and the activation difference at the upstream
-output. That is the basis of edge attribution patching and automated circuit
-discovery — see the `circuit-discovery` skill.
+The same trick applied to *connections* rather than components: pair the
+clean − corrupt difference in what an upstream component writes to the residual
+stream with the gradient at the downstream component's input, taken through that
+component only — not the gradient on the shared residual, which sums every path
+and gives back the node score. That is the basis of edge attribution patching and
+automated circuit discovery; the `circuit-discovery` skill shows the worked
+example.
 
 ## When the approximation breaks
 
@@ -241,9 +239,8 @@ discovery — see the `circuit-discovery` skill.
 | Components whose effect is gated or thresholded | attribution can be near zero for a component that fully controls the output |
 | Very deep interactions | error compounds across layers; treat late-layer scores more cautiously |
 
-Two habits that keep it honest: always report *validated* attribution (correlation
-against real patching on a subset), and always state that a heatmap is
-approximate. Integrated gradients — averaging the gradient along a path from
+State that a heatmap is approximate, and report the validation correlation with
+it. Integrated gradients — averaging the gradient along a path from
 corrupt to clean rather than taking it at one point — is the standard upgrade when
 the linearization is poor, at the cost of N backward passes.
 
@@ -256,11 +253,9 @@ the linearization is poor, at the cost of N backward passes.
 | Attribution patching | 2 forward + 1 backward, total |
 | Attribution + verification of top-K | 2 forward + 1 backward + K |
 
-The last row is the recommended workflow.
-
 ## Related skills
 
 - `activation-patching` — the ground truth this approximates, and the verification step
 - `circuit-discovery` — edge attribution and automated circuit search
 - `nnsight` — gradients, ordering rules, batching
-- `remote` — running the two passes on a model you cannot host; the backward pass needs a trusted NDIF key
+- `remote` — running the two passes on a model you cannot host. On NDIF, backward passes need a trusted API key; see the remote skill.

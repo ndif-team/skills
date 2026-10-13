@@ -1,6 +1,6 @@
 ---
 name: ablation
-description: Measure what a component contributes by removing it — zero ablation, mean ablation, resample ablation, and noise ablation applied to layers, attention heads, MLPs, neurons, and token positions. Use to test necessity ("does the model still work without this?"), to sweep every component for importance, or to knock out a candidate found by a probe or attention analysis. Covers why zero ablation systematically overstates importance, what to use instead, and how to batch a full sweep into one forward pass per layer.
+description: Measure what a component contributes by removing it — one component at a time, no contrast prompt — with zero, mean, resample or noise ablation of layers, attention heads, MLPs, neurons and token positions. Use to test necessity ("does the model still work without this?"), to sweep every component for importance, or to knock out a candidate found by a probe or attention analysis. Covers why zero ablation overstates importance, what to use instead, and how to run a whole sweep — every head of every layer plus the baseline — as one batched trace.
 ---
 
 # Ablation
@@ -20,11 +20,8 @@ model = TransformersModel("openai-community/gpt2", dispatch=True)
 prompt = "The Eiffel Tower is in the city of"
 paris = model.tokenizer.encode(" Paris")[0]
 n_layers = len(model.transformer.h)
-
-with model.trace(prompt):
-    baseline = model.output.logits[0, -1].log_softmax(-1)[paris].detach().save()
-
-print(f"baseline log P(' Paris') = {float(baseline):.3f}")
+n_heads = model.config.n_head
+head_dim = model.transformer.h[0].attn._module.head_dim  # equals n_embd//n_head on GPT-2, not on GQA/Gemma models
 ```
 
 ## The four ablations
@@ -37,178 +34,201 @@ print(f"baseline log P(' Paris') = {float(baseline):.3f}")
 | **Noise** | activation + gaussian noise | how robust is the behavior to perturbation? |
 
 **Zero ablation is the default choice and usually the wrong one.** Zero is not a
-neutral value — it is far outside the distribution the rest of the network expects,
-so the damage you measure mixes "this component mattered" with "the network was
-pushed off-distribution". Mean and resample ablation stay in-distribution and give
-the more honest answer. Use zero when you want an upper bound, and say so.
+neutral value — it pushes activations off-distribution, so the damage you measure
+mixes "this component mattered" with "the network was shocked". Layer-0 heads and
+MLPs dominate naive zero sweeps for this reason (zeroing head L0H10 drops P(' Paris')
+from 0.070 to 0.0059). Prefer mean or resample ablation for any claim; use zero as
+an upper bound, and say so.
 
-## Layer sweep — one forward pass per condition
+## Every head, one trace
 
-Every ablation of a given kind fits in one batched trace:
+Head `h` is the slice `[h*head_dim : (h+1)*head_dim]` of the attention output
+projection's **input** — after `c_proj` the hidden dimension no longer decomposes
+per head. Put the baseline and every (layer, head) ablation in their own invoke of
+one trace, keyed into a saved dict:
 
 ```python
-with model.trace() as tracer:
-    zero_scores = nnsight.save([])
-    for layer in range(n_layers):
-        with tracer.invoke(prompt):
-            model.transformer.h[layer].output[:, -1, :] = 0
-            zero_scores.append(model.output.logits[0, -1].log_softmax(-1)[paris].detach())
+def head_sweep(site, value=lambda layer, lo, hi: 0):
+    """P(' Paris'): a baseline invoke, then one invoke per (layer, head) with site(layer)[..., lo:hi] replaced."""
+    with torch.no_grad(), model.trace() as tracer:
+        p = nnsight.save({})
+        with tracer.invoke(prompt):                                    # invoke 0: baseline
+            p["baseline"] = model.output.logits[0, -1].softmax(-1)[paris]
+        for layer in range(n_layers):
+            for head in range(n_heads):
+                with tracer.invoke(prompt):
+                    lo, hi = head * head_dim, (head + 1) * head_dim
+                    site(layer)[:, :, lo:hi] = value(layer, lo, hi)
+                    p[layer, head] = model.output.logits[0, -1].softmax(-1)[paris]
+    return p
 
-for layer, score in enumerate(zero_scores):
-    print(f"layer {layer:2d}  log P = {float(score):+.3f}   drop {float(baseline) - float(score):+.3f}")
+def top(p, k=3):                                                       # largest |change| first
+    return sorted((key for key in p if key != "baseline"), key=lambda key: -abs(float(p[key] - p["baseline"])))[:k]
+
+c_proj_in = lambda layer: model.transformer.h[layer].attn.c_proj.input
+p_paris = head_sweep(c_proj_in)
+
+baseline = float(p_paris["baseline"])
+ranked = sorted((float(p), key) for key, p in p_paris.items() if key != "baseline")
+print(f"baseline P(' Paris') = {baseline:.3f}")
+for p, (layer, head) in ranked[:3] + ranked[-1:]:
+    print(f"L{layer}H{head:<2} -> {p:.4f}")
+
+assert abs(baseline - 0.070) < 1e-3
+assert abs(float(p_paris[0, 10]) - 0.0059) < 1e-3
+assert float(p_paris[0, 0]) > baseline          # ablating L0H0 *raises* P(' Paris')
+assert top(p_paris) == [(0, 10), (0, 9), (0, 7)]
 ```
 
-## Mean ablation
+The 145 invokes batch into one forward pass — an order of magnitude faster than a
+loop of 144 single-invoke traces on CPU (0.05–0.12 s against 0.8–3.1 s); the
+setup's `dispatch=True` lands on the GPU when one is present, where the gap is ~3x.
+An ablation can also *raise* the metric (L0H0 above) — report the signed change,
+not its absolute value.
 
-Compute the mean over a corpus first, then substitute it. The mean must come from
-a distribution that matches your task — a mean over unrelated text is a different
-(and weaker) control.
+**The shortcut that looks the same and is not.** `attn.output[0]` is *after*
+`c_proj`, so slicing it cuts 64 mixed hidden dimensions, not a head — and it
+ranks entirely different "heads":
 
 ```python
+wrong = head_sweep(lambda layer: model.transformer.h[layer].attn.output[0])   # WRONG site
+assert top(wrong) == [(0, 4), (0, 5), (0, 2)]                                  # vs L0H10, L0H9, L0H7
+```
+
+## Zero, mean and resample on one component
+
+The same sweep shape compares replacement values directly. This one targets each
+layer's MLP output at the last position; `attn.output[0]` works the same way:
+
+```python
+def mlp_sweep(replacement):
+    """P(' Paris') with each layer's MLP output at the last position replaced."""
+    with torch.no_grad(), model.trace() as tracer:
+        scores = nnsight.save({})
+        with tracer.invoke(prompt):
+            scores["baseline"] = model.output.logits[0, -1].softmax(-1)[paris]
+        for layer in range(n_layers):
+            with tracer.invoke(prompt):
+                model.transformer.h[layer].mlp.output[:, -1, :] = replacement(layer)
+                scores[layer] = model.output.logits[0, -1].softmax(-1)[paris]
+    return scores
+
+# mean: over prompts of the same task, not unrelated text
 corpus = [
     "The Colosseum is in the city of",
     "The Statue of Liberty is in the city of",
     "Big Ben is in the city of",
     "The Brandenburg Gate is in the city of",
 ]
+with torch.no_grad(), model.trace(corpus):   # ragged batch; GPT-2 pads left, so -1 is each prompt's last token
+    means = nnsight.save([block.mlp.output[:, -1, :].mean(0) for block in model.transformer.h])
 
-with model.trace(corpus):
-    means = nnsight.save([block.output[:, -1, :].mean(0).detach() for block in model.transformer.h])
+# resample: the value on a different input
+with torch.no_grad(), model.trace("The Colosseum is in the city of"):
+    donor = nnsight.save([block.mlp.output[:, -1, :] for block in model.transformer.h])
 
-# the corpus is ragged (10, 9, 7 and 9 tokens), so every row is padded to 10 — and
-# GPT-2 pads on the left, which is why `[:, -1, :]` still lands on each prompt's own
-# last token. An absolute index like `[:, 4, :]`, or a right-padding tokenizer, would
-# average pad activations here instead. Check `tokenizer.padding_side` before
-# indexing a ragged batch by position.
+zero = mlp_sweep(lambda layer: 0)
+mean = mlp_sweep(lambda layer: means[layer])
+resample = mlp_sweep(lambda layer: donor[layer])
 
-with model.trace() as tracer:
-    mean_scores = nnsight.save([])
-    for layer in range(n_layers):
-        with tracer.invoke(prompt):
-            model.transformer.h[layer].output[:, -1, :] = means[layer]
-            mean_scores.append(model.output.logits[0, -1].log_softmax(-1)[paris].detach())
-
-print(f"{'layer':>6} {'zero':>9} {'mean':>9}")
+print(f"baseline {float(zero['baseline']):.4f}")
+print(f"{'layer':>6} {'zero':>8} {'mean':>8} {'resample':>9}")
 for layer in range(n_layers):
-    print(f"{layer:>6} {float(zero_scores[layer]):>+9.3f} {float(mean_scores[layer]):>+9.3f}")
+    print(f"{layer:>6} {float(zero[layer]):>8.4f} {float(mean[layer]):>8.4f} {float(resample[layer]):>9.4f}")
+
+assert float(zero[0]) < 0.01 and float(mean[0]) > 0.06   # MLP0: zero shocks, mean is harmless
 ```
 
-Compare the two columns: where zero ablation reports a large drop and mean
-ablation reports little, the component was not carrying task information — you
-were measuring distribution shock.
+Where zero reports a large drop and mean reports little — MLP0 here, 0.0012 against
+0.0701 — the component was not carrying task information; you were measuring
+distribution shock. Resample with a paired prompt *is* activation patching in the
+noising direction; the `activation-patching` skill covers prompt design.
 
-## Resample ablation
-
-Replace the activation with its value on a *different* input. This is the
-strictest in-distribution control and the one circuit work generally uses.
+Per head, mean ablation writes the head's `c_proj.input` slice averaged over the
+same-task corpus, and reorders the zero-ablation ranking:
 
 ```python
-with model.trace("The Colosseum is in the city of"):
-    donor = nnsight.save([block.output[:, -1, :].detach() for block in model.transformer.h])
-
-with model.trace() as tracer:
-    resample_scores = nnsight.save([])
-    for layer in range(n_layers):
-        with tracer.invoke(prompt):
-            model.transformer.h[layer].output[:, -1, :] = donor[layer]
-            resample_scores.append(model.output.logits[0, -1].log_softmax(-1)[paris].detach())
-
-for layer in range(0, n_layers, 3):
-    print(f"layer {layer:2d}  resample log P = {float(resample_scores[layer]):+.3f}")
+with torch.no_grad(), model.trace(corpus):     # every position, pads included; masking them keeps the ranking
+    head_means = nnsight.save([block.attn.c_proj.input.mean((0, 1)) for block in model.transformer.h])
+p_mean = head_sweep(c_proj_in, lambda layer, lo, hi: head_means[layer][lo:hi])
+change = {key: float(p - p_mean["baseline"]) for key, p in p_mean.items() if key != "baseline"}
+assert top(p_mean, 1) == [(9, 8)] and abs(change[9, 8] + 0.030) < 2e-3   # L9H8 is now #1
+assert abs(change[0, 10] + 0.0095) < 1e-3                                 # L0H10: -0.064 under zero
 ```
 
-Resample ablation with a paired prompt *is* activation patching in the noising
-direction — see the `activation-patching` skill for the full treatment.
+The concrete case for "zero overstates": L0H10 loses 85% of its effect once the
+head writes a typical value instead of nothing, and a buried layer-9 head tops it.
 
-## Attention heads
-
-Heads are contiguous slices of the attention output projection's input:
-
-```python
-n_heads = model.config.n_head
-head_dim = model.config.n_embd // n_heads
-LAYER = 5
-
-with model.trace() as tracer:
-    head_scores = nnsight.save([])
-    for head in range(n_heads):
-        with tracer.invoke(prompt):
-            lo, hi = head * head_dim, (head + 1) * head_dim
-            model.transformer.h[LAYER].attn.c_proj.input[:, :, lo:hi] = 0
-            head_scores.append(model.output.logits[0, -1].log_softmax(-1)[paris].detach())
-
-for head, score in enumerate(head_scores):
-    print(f"L{LAYER}H{head:<2} drop {float(baseline) - float(score):+.3f}")
-```
-
-Scan all layers by nesting the loops — 144 head ablations on GPT-2 is 12 batched
-traces.
+Assigning to `model.transformer.h[layer].output` instead replaces the **whole
+residual stream** — everything every earlier component wrote — so it asks whether
+the information present at that layer is needed downstream, not what block `layer`
+contributes. Label it as residual-stream ablation when you use it.
 
 ## Sublayers, neurons, positions
 
 ```python
 LAYER = 8
 
-with model.trace() as tracer:
+with torch.no_grad(), model.trace() as tracer:
+    with tracer.invoke(prompt):                                    # baseline
+        base = model.output.logits[0, -1].softmax(-1)[paris].save()
+
     with tracer.invoke(prompt):                                    # whole MLP
         model.transformer.h[LAYER].mlp.output[:] = 0
-        no_mlp = model.output.logits[0, -1].log_softmax(-1)[paris].detach().save()
+        no_mlp = model.output.logits[0, -1].softmax(-1)[paris].save()
 
     with tracer.invoke(prompt):                                    # whole attention
         model.transformer.h[LAYER].attn.output[0][:] = 0
-        no_attn = model.output.logits[0, -1].log_softmax(-1)[paris].detach().save()
+        no_attn = model.output.logits[0, -1].softmax(-1)[paris].save()
 
     with tracer.invoke(prompt):                                    # one neuron
-        model.transformer.h[LAYER].mlp.source.self_act_0.output[:, :, 100] = 0
-        no_neuron = model.output.logits[0, -1].log_softmax(-1)[paris].detach().save()
+        model.transformer.h[LAYER].mlp.act.output[:, :, 100] = 0
+        no_neuron = model.output.logits[0, -1].softmax(-1)[paris].save()
 
-    with tracer.invoke(prompt):                                    # one position, all layers
+    with tracer.invoke(prompt):                                    # one position, residual stream, all layers
         for layer in range(n_layers):
             model.transformer.h[layer].output[:, 4, :] = 0
-        no_position = model.output.logits[0, -1].log_softmax(-1)[paris].detach().save()
+        no_position = model.output.logits[0, -1].softmax(-1)[paris].save()
 
 for name, value in [("mlp", no_mlp), ("attn", no_attn),
                     ("neuron 100", no_neuron), ("position 4", no_position)]:
-    print(f"{name:<12} drop {float(baseline) - float(value):+.3f}")
+    print(f"{name:<12} change {float(value) - float(base):+.4f}")
 ```
 
 Individual neurons rarely matter much on their own — that is the expected result,
-not a bug, and it is the motivation for feature-level analysis (see the
+not a bug, and the motivation for feature-level analysis (the
 `sae-and-dictionary-learning` skill).
 
 ## Skipping instead of zeroing
 
-`module.skip(value)` bypasses a module's forward entirely. Skipping with the
-module's own input turns a sublayer into a pass-through — the cleanest form of
-"remove this computation" for a residual sublayer, since the residual stream keeps
-flowing:
+`module.skip(value)` bypasses a module's forward and uses `value` as its output.
+For a residual sublayer, zero *is* the pass-through value — the block adds the
+sublayer's output to the residual stream — so skipping with zeros equals zero
+ablation and saves the sublayer's compute:
 
 ```python
-with model.trace(prompt):
-    mlp_in = model.transformer.h[8].mlp.input
-    model.transformer.h[8].mlp.skip(torch.zeros_like(mlp_in))
-    skipped = model.output.logits[0, -1].log_softmax(-1)[paris].detach().save()
+with torch.no_grad(), model.trace(prompt):
+    mlp_in = model.transformer.h[LAYER].mlp.input
+    model.transformer.h[LAYER].mlp.skip(torch.zeros_like(mlp_in))
+    skipped = model.output.logits[0, -1].softmax(-1)[paris].save()
 
-print(f"mlp skipped: {float(skipped):+.3f}")
+assert abs(float(skipped) - float(no_mlp)) < 1e-5   # same value; batching adds float noise
 ```
-
-It also saves the compute, which matters when ablating many layers of a large
-model.
 
 ## Interpreting results
 
-**Report the drop against a baseline in the same trace.** Absolute log-probs are
-not comparable across prompts.
+**Report the change against the baseline invoke of the same trace.** Absolute
+probabilities are not comparable across prompts.
 
-**Sum of parts ≠ whole.** Ablating each of two components separately can show
-little while ablating both destroys the behavior (redundancy), or the reverse
-(interaction). If you care about a set, ablate the set.
+**Sum of parts ≠ whole.** Two components can each show little while ablating both
+destroys the behavior (redundancy), or the reverse (interaction). If you care
+about a set, ablate the set.
 
 **Ablation shows necessity, not sufficiency.** Pair it with the denoising
-direction of `activation-patching` to get both.
+direction of `activation-patching`.
 
-**Small drops on small models are noise.** Establish a null distribution: ablate
-random components and see how big the drop is when nothing should happen.
+**Small changes on small models are noise.** Ablate random components to see how
+big the change is when nothing should happen.
 
 **Say which ablation you used.** "Head 5.3 is important" means nothing without
 "under zero ablation" or "under resample ablation from prompts of type X" — the
@@ -219,6 +239,5 @@ same head can look critical under one and irrelevant under the other.
 - `activation-patching` — the sufficiency direction, and paired-prompt design
 - `attribution-patching` — approximate every ablation at once with gradients
 - `attention-analysis` — deciding which heads are worth ablating
-- `nnsight/docs/patterns/per-head-attention.md` — the three routes to a per-head view, and which one actually ablates a head
 - `circuit-discovery` — ablating sets of components to isolate a circuit
-- `nnsight` — batching, `skip`, `source` for neuron-level access
+- `nnsight` — batching, `skip`, `source`

@@ -1,6 +1,6 @@
 ---
 name: circuit-discovery
-description: Find the subgraph of components a model uses for a task and prove it is the right one — task and metric design, per-head attribution to rank candidates, edge attribution and path patching for connections, greedy pruning, and the faithfulness/completeness/minimality tests that separate a circuit from a list of high-scoring components, including the empty-circuit floor an ablation score has to be scaled against and how to check that the test can fail at all. Use for IOI-style circuit analysis, for automating what activation patching does one component at a time, and whenever a claim of the form "these components implement this behavior" needs evidence.
+description: Find the subgraph of components a model uses for a task and prove it is the right one — the deliverable is a validated set of components plus the evidence. Covers task and metric design, per-head attribution to rank candidates, edge attribution and path patching for connections, greedy pruning, and the faithfulness/completeness/minimality tests that separate a circuit from a list of high-scoring components. Use for IOI-style circuit analysis, for automating what activation patching does one component at a time, and whenever a claim of the form "these components implement this behavior" needs evidence.
 ---
 
 # Circuit Discovery
@@ -28,7 +28,7 @@ from nnsight import TransformersModel
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 n_layers = len(model.transformer.h)
 n_heads = model.config.n_head
-head_dim = model.config.n_embd // n_heads
+head_dim = model.transformer.h[0].attn._module.head_dim   # equals n_embd // n_head on GPT-2, not on GQA/Gemma models
 ```
 
 ## 1–2. Task and metric
@@ -95,25 +95,28 @@ for layer in range(n_layers):
     for head in range(n_heads):
         scores[layer, head] = delta[..., head * head_dim:(head + 1) * head_dim].sum()
 
-ranked = [(int(i) // n_heads, int(i) % n_heads) for i in scores.flatten().topk(8).indices]
+ranked = [(int(i) // n_heads, int(i) % n_heads) for i in scores.flatten().abs().topk(8).indices]
 for layer, head in ranked:
-    print(f"L{layer}H{head:<2} attribution {scores[layer, head]:+.3f}")
+    print(f"{f'L{layer}H{head}':<6} attribution {scores[layer, head]:+.3f}")
 ```
 
 ```
-L8H10 attribution +1.419
-L8H6  attribution +1.349
-L5H5  attribution +1.114
-L7H9  attribution +1.070
-L9H9  attribution +1.016
-L10H0 attribution +0.613
-L7H3  attribution +0.588
-L3H0  attribution +0.499
+L8H10  attribution +1.419
+L8H6   attribution +1.349
+L10H7  attribution -1.310
+L5H5   attribution +1.114
+L11H10 attribution -1.113
+L7H9   attribution +1.070
+L9H9   attribution +1.016
+L10H0  attribution +0.613
 ```
 
-These are the published IOI heads — L9H9 and L10H0 are name movers, L8H6/L8H10 are
-S-inhibition heads, L5H5 is an induction head — recovered here from scratch. That
-agreement is reassuring but not evidence; the validation below is.
+**Screen by |score|.** A signed ranking hides the heads that push *against* the
+answer: L10H7 and L11H10, the published negative name movers, are third and fifth
+by magnitude and absent from a signed top-8. The rest are the published IOI heads
+too — L9H9 and L10H0 are name movers, L8H6/L8H10 S-inhibition heads, L5H5 an
+induction head — recovered here from scratch. That agreement is reassuring but not
+evidence; the validation below is.
 
 Attribution is a screen, not a result: it is a linear approximation and it fails
 for large interventions (see the `attribution-patching` skill). Everything it
@@ -133,6 +136,7 @@ with model.trace(clean):
         for i in range(n_layers)
     ])
 
+# signed top-10: the heads that carry the answer (the screen above used |score|)
 circuit = {(int(i) // n_heads, int(i) % n_heads) for i in scores.flatten().topk(10).indices}
 
 random.seed(0)
@@ -195,34 +199,111 @@ ablation-based score.
 Node importance does not tell you the graph. Two tools:
 
 **Edge attribution** — attribute the *connection* from an upstream component to a
-downstream one by pairing the upstream activation difference with the gradient at
-the downstream input. The same two passes give every edge, which is what makes
-automated circuit discovery tractable:
+downstream one: (clean − corrupt) of what the upstream component **writes** into
+the residual stream, dotted with the gradient of the metric at the downstream
+component's **input**, taken through that component only. The gradient on the
+residual stream itself is the wrong one — it sums every path out of that point,
+so pairing a write with it gives back the node attribution of section 3.
+
+Every component reads the residual stream through its own LayerNorm. Hand each
+norm a private copy of its input, and the gradient on that copy flows only through
+the one reader. One corrupt forward and one backward then give every edge:
 
 ```python
-UPSTREAM, DOWNSTREAM = 5, 9
+readers = []                                   # forward order: L0 attn, L0 mlp, ..., final norm
+for i, block in enumerate(model.transformer.h):
+    readers += [(f"L{i} attn", block.ln_1), (f"L{i} mlp", block.ln_2)]
+readers.append(("logits", model.transformer.ln_f))
 
 with model.trace(corrupt):
-    upstream_ref = model.transformer.h[UPSTREAM].attn.c_proj.input
-    upstream_corrupt = upstream_ref.detach().save()
-    downstream_ref = model.transformer.h[DOWNSTREAM].attn.c_proj.input
+    copies = []
+    for _, norm in readers:
+        copy = norm.input.clone()
+        norm.input = copy                      # this reader alone now consumes `copy`
+        copies.append(copy)
     with logit_diff(model.output.logits).backward():
-        downstream_grad = downstream_ref.grad.clone().save()
-        upstream_grad = upstream_ref.grad.clone().save()
+        reader_grads = nnsight.save([])
+        for copy in reversed(copies):
+            reader_grads.append(copy.grad.clone())
+reader_grads = reader_grads[::-1]
 
-for head in range(0, n_heads, 3):
+def head_write(layer, head, z):
+    """What one head adds to the residual stream: its slice of z through its rows of c_proj."""
+    # omits the c_proj bias, which cancels in the clean − corrupt difference
     lo, hi = head * head_dim, (head + 1) * head_dim
-    contribution = ((clean_heads[UPSTREAM] - upstream_corrupt)[..., lo:hi]
-                    * upstream_grad[..., lo:hi]).sum()
-    print(f"L{UPSTREAM}H{head:<2} total downstream effect {float(contribution):+.3f}")
+    return z[..., lo:hi] @ model.transformer.h[layer].attn.c_proj.weight[lo:hi]
+
+def edges_from(layer, head):
+    """Attribution of every edge out of one head, keyed by downstream reader."""
+    with torch.no_grad():
+        delta = head_write(layer, head, clean_heads[layer]) - head_write(layer, head, corrupt_heads[layer])
+        return {name: float((delta * reader_grads[k]).sum())
+                for k, (name, _) in enumerate(readers) if k > 2 * layer}   # readers after the head
+
+for layer, head in [(5, 5), (8, 6)]:
+    edges = edges_from(layer, head)
+    top = sorted(edges.items(), key=lambda kv: -abs(kv[1]))[:3]
+    print(f"L{layer}H{head} -> " + "   ".join(f"{name} {value:+.3f}" for name, value in top))
+    # the edges out of a head partition its node attribution exactly
+    assert abs(sum(edges.values()) - float(scores[layer, head])) < 1e-3
+
+random.seed(0)
+null = []
+for _ in range(100):
+    layer, head = random.randrange(n_layers), random.randrange(n_heads)
+    null.append(abs(random.choice(list(edges_from(layer, head).values()))))
+null_median = sorted(null)[len(null) // 2]
+print(f"random edge, median |attribution| {null_median:.3f}")
+assert edges_from(5, 5)["L8 attn"] > 20 * null_median
 ```
 
-**Path patching** — the precise version: patch an upstream component's output but
-let it reach only *one* downstream destination, freezing every other path. It
-answers "does A affect the output *through* B?" rather than "does A matter at
-all", and it is how the published IOI circuit distinguishes name movers from
-S-inhibition heads. Implement it by caching the frozen components' values in a
-first pass and re-imposing them while the patched value flows.
+```
+L5H5 -> L8 attn +1.140   L7 attn +0.530   L6 attn -0.240
+L8H6 -> L10 attn +0.712   L9 attn +0.399   L11 attn +0.219
+random edge, median |attribution| 0.005
+```
+
+The induction head L5H5 sends its effect almost entirely into layer 8's attention,
+where the S-inhibition heads L8H6 and L8H10 sit, and L8H6 sends its effect into the
+name-mover layers 9 and 10 — the published IOI wiring, as edges rather than as a
+ranked list. The assert inside the loop is the check to keep: a head's outgoing
+edges must sum to its node attribution, because the gradient on the residual
+stream is the sum of the gradients through each reader. Read the gradients off the
+shared residual instead of private copies and every reader gets the total, so the
+edges overcount and the identity fails.
+
+Here a downstream node is a whole layer's attention. Splitting it into heads means
+separate query, key and value inputs per head, which GPT-2's fused `c_attn` does
+not expose as separate modules; treat the layer as the node unless you need
+head-level destinations.
+Edge scores are attributions, so they inherit every limit in the
+`attribution-patching` skill; verify the edges you report with a **path patch**:
+let the upstream change reach *one* reader while every other reader still sees
+the corrupt residual — "does A act *through* B?", which is how the published IOI
+circuit tells name movers from S-inhibition heads. Add the head's clean − corrupt
+write to that one reader's input in the corrupt run:
+
+```python
+with torch.no_grad():
+    delta = head_write(8, 10, clean_heads[8]) - head_write(8, 10, corrupt_heads[8])
+    with model.trace(corrupt):
+        model.transformer.ln_f.input = model.transformer.ln_f.input + delta   # only the logits see it
+        via_logits = logit_diff(model.output.logits).save()
+
+edge_real = float(via_logits) - float(corrupt_metric)
+print(f"L8H10 -> logits: attribution {edges_from(8, 10)['logits']:+.3f}, path patch {edge_real:+.3f}")
+assert abs(edge_real - edges_from(8, 10)["logits"]) < 0.02
+```
+
+```
+L8H10 -> logits: attribution +0.752, path patch +0.754
+```
+
+Adding `delta` to every reader after L8 attn at once reproduces the real node
+patch (+1.457) to 1e-3. And the top head is not where the diagram puts it: L8H10,
+an S-inhibition head that should act through the name movers, sends roughly half
+its effect (+0.752 of +1.419) straight to the logits. Real circuits are not always
+the published one.
 
 ## 6. Prune to minimality
 
@@ -242,6 +323,11 @@ pruned_value = keep_only(current)
 print(f"pruned circuit ({len(current)} heads): {sorted(current)} -> {pruned_value:+.3f} "
       f"({(pruned_value - floor) / span * 100:.1f}% of clean)")
 assert pruned_value >= threshold
+
+# the two name movers alone clear 90% of clean − corrupt, but not 90% of clean − floor
+name_movers = keep_only({(9, 9), (10, 0)})
+assert name_movers >= 0.90 * (float(clean_metric) - float(corrupt_metric)) + float(corrupt_metric)
+assert name_movers < threshold
 ```
 
 ```
@@ -251,11 +337,11 @@ pruned circuit (3 heads): [(7, 9), (9, 9), (10, 0)] -> +2.523 (93.0% of clean)
 Ten heads prune to **three** — the name movers L9H9 and L10H0 plus the
 S-inhibition head L7H9 — while still holding 90% of the metric measured from the
 floor. Removing the lowest-scoring member first tends to find a smaller circuit
-than removing the highest. Prune against the floor: the same loop with the
-corrupt-metric threshold drops L7H9 as well, because on that scale a two-head
-circuit clears 90% without it.
+than removing the highest. Prune against the floor: on the corrupt-metric scale
+the two name movers alone clear 90% (the asserts above), so the same loop with that
+threshold drops L7H9 as well.
 
-Minimal is not the same as complete: this pair is enough to *produce* the behavior
+Minimal is not the same as complete: these three heads are enough to *produce* the behavior
 under mean ablation, but the S-inhibition and induction heads that were pruned are
 part of how the model computes which name to move. Report both the minimal set and
 the full candidate set, and say which test each survived.
