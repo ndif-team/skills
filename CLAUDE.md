@@ -93,8 +93,9 @@ make test-skill SKILL=nnsight
 make report            # per-file table of blocks run / skipped
 ```
 
-Use the `ndif2` conda env. A local NDIF for remote tests runs at
-`http://localhost:8001` (no API key needed).
+Tests run in the conda env the Makefile names (`CONDA_ENV`, override as
+needed): it needs nnsight 0.8 and its model deps installed. Remote tests
+expect a local NDIF at the Makefile's `NDIF_HOST` default (no API key needed).
 
 Models used in examples: `openai-community/gpt2` and
 `HuggingFaceTB/SmolLM2-135M-Instruct` for anything executed;
@@ -143,11 +144,12 @@ Same rules, plus two of its own:
 
 ## Source material
 
-- NDIF server source and docs: `/home/localjadenfk/wd/ndif` (`CLAUDE.md` is a
-  router into `docs/`; `docs/concepts/request-lifecycle.md` is the keystone)
-- nnsight source and docs: `/home/localjadenfk/wd/nnsight` (branch `0.8`,
-  `CLAUDE.md` routes to `docs/`)
-- nnterp: `/home/localjadenfk/wd/nnterp-0.8-refactor` (branch `0.8-refactor` of
-  `ndif-team/nnterp`; `CLAUDE.md` routes to `docs/`; every docs snippet ran against the
-  tiny checkpoints in its `tests/families/`)
-- Tutorials and paper implementations: `/home/localjadenfk/wd/nnsight-website/docs`
+Work from local checkouts of the upstream repos; in each one, `CLAUDE.md`
+routes into its `docs/`.
+
+- NDIF server: `ndif-team/ndif` (`docs/concepts/request-lifecycle.md` is the
+  keystone)
+- nnsight: `ndif-team/nnsight`, branch `dev`
+- nnterp: `ndif-team/nnterp`, branch `0.8-refactor` (every docs snippet ran
+  against the tiny checkpoints in its `tests/families/`)
+- Tutorials and paper implementations: `ndif-team/nnsight-website`, `docs/`
