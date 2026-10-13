@@ -76,10 +76,9 @@ the CPU in float32 — `vec.to(hidden.device, hidden.dtype)` inside the block.
 ## Training inside a session
 
 The optimizer loop goes in the session too, so a 500-step run is one job rather
-than 500. Training on activations works on any key; training through the model
-needs a trusted key (the remote SKILL.md, "Standard and trusted keys").
+than 500.
 
-A probe, on any key — the probe's whole graph lives in your block:
+A probe — its whole graph lives in your block:
 
 <!-- test: remote -->
 ```python
@@ -109,8 +108,7 @@ with model.session(remote=True):
 print(round(final_loss, 3), trained_probe.shape)
 ```
 
-A LoRA adapter, which **needs a trusted key** — on a standard key the loop
-completes, the loss repeats, and the assert below fails. Parameters have to be
+A LoRA adapter — parameters have to be
 created on the device the activations live on — `torch.randn` gives CPU float32
 even when the code runs next to the weights — and only plain tensors can come
 back, so hand back the trained weights rather than the adapter that holds them.
@@ -160,7 +158,7 @@ with model.session(remote=True):
     trained_WB = adapter.WB.detach().cpu().save()
 
 print([round(l, 3) for l in losses], trained_WA.shape, trained_WB.shape)
-assert losses[-1] != losses[0], "loss never moved — standard key?"
+assert losses[-1] != losses[0], "loss never moved"
 ```
 
 Rebuild the adapter from those weights to use it later. Two things that look fine

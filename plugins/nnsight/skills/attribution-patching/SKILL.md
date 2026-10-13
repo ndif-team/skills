@@ -258,4 +258,4 @@ the linearization is poor, at the cost of N backward passes.
 - `activation-patching` — the ground truth this approximates, and the verification step
 - `circuit-discovery` — edge attribution and automated circuit search
 - `nnsight` — gradients, ordering rules, batching
-- `remote` — running the two passes on a model you cannot host. On NDIF, backward passes need a trusted API key; see the remote skill.
+- `remote` — running the two passes on a model you cannot host; see the remote skill.
