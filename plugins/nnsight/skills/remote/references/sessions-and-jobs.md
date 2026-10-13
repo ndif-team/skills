@@ -23,21 +23,23 @@ aborts the whole session — so a failure costs one chunk rather than everything
 <!-- test: remote -->
 ```python
 def sweep(layers):
+    """One session per chunk; inside it, one trace with an invoke per layer."""
     with model.session(remote=True):
-        out = nnsight.save([])
-        for layer in layers:
-            with model.trace(prompt):
-                model.transformer.h[layer].output[:, -1, :] = 0
-                out.append(model.output.logits[0, -1].max().cpu())
-    return [float(x) for x in out]
+        with model.trace() as tracer:
+            out = nnsight.save({})                    # keyed: invokes finish in model order
+            for layer in layers:
+                with tracer.invoke(prompt):
+                    model.transformer.h[layer].output[:, -1, :] = 0
+                    out[layer] = model.output.logits[0, -1].max().cpu()
+    return {layer: float(value) for layer, value in out.items()}
 
-results = sweep(range(0, 3)) + sweep(range(3, 6))
-print(len(results))
+results = sweep(range(0, 6)) | sweep(range(6, 12))
+assert sorted(results) == list(range(12))
 ```
 
-Sessions cut queue and transport time, not GPU time. Inside a session you can
-still batch with `tracer.invoke(...)` — that collapses a sweep into one *forward
-pass* as well as one request. Combining both is the fastest form.
+Each chunk is one request *and* one forward pass: the session cuts queue and
+transport time, the invokes cut GPU time. A loop of single-prompt traces inside
+the session would still pay one forward pass per layer.
 
 ## Load the data on the server
 

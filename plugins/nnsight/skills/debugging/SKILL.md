@@ -20,7 +20,8 @@ replacement.
 | `OutOfOrderError: … already ran past it` | modules touched out of forward order | reorder, or split across `tracer.invoke`s |
 | `UserWarning: … was never reached`; a short result; everything after a loop missing | a `tracer.iter` loop — bounded or open — asked for a step the run did not make and was cut short | [A loop that outran the run](#a-loop-that-outran-the-run) |
 | `NameError` (module level) or `UnboundLocalError` (in a function) on a name after the block | forgot `.save()` — or a cut-short loop above the line dropped it | save it and bind it; see [Nothing came back](#nothing-came-back) |
-| `NameError` **inside** the trace body, outside any invoke, on a name an invoke saved | trace-body code between invokes runs *before* the invoke workers do | do the work inside an invoke; to accumulate across invokes, create `store = nnsight.save({})` in the body and write `store[k] = ...` inside each invoke |
+| **No error**, but a name after the block holds an old value | forgot `.save()` on a name already bound (an earlier cell, a loop, a rerun) — it silently keeps the old object | `.save()` inside the block; see [Nothing came back](#nothing-came-back) |
+| `NameError` **inside** the trace body, outside any invoke, on a name an invoke binds | trace-body code between invokes runs *before* the invoke workers do | reduce inside the invoke (before anything is transferred), or combine after the block on saved values. To collect across invokes, create `store = nnsight.save({})` in the body — the container must itself be saved or it never comes back — and write `store[k] = ...` inside each invoke (`nnsight` skill → references/batching.md, "Sharing values across invokes") |
 | `NameError` inside an invoke on a value another invoke produces | read before the producer ran, or a `tracer.barrier(n)` whose `n` is too small released it early | `tracer.barrier(n)` with the true block count, then call it: `b()` |
 | `ValueError: save() was called outside a trace` | save before/after the `with` | move it inside |
 | `ValueError: Cannot access ... outside of interleaving` | `.output` read outside a trace | open a trace, or use `model.scan` for shapes |
@@ -28,7 +29,7 @@ replacement.
 | `SyntaxError: 'return' outside function` | a `return` inside the block | save it, return after the `with` |
 | `WithBlockNotFoundError` (no message) | the block's source isn't on disk | run from a file/IPython, not stdin or `exec` of a string |
 | `AttributeError: 'NoneType' object has no attribute 'event'` | `model.trace(...)` nested inside another trace | `model.session()`, or sibling invokes |
-| `AttributeError: ... has attribute 'model'` (or `'100'`) | wrong module path for this architecture, or an index past the last layer | `scripts/inspect_model.py` in the `nnsight` skill |
+| `AttributeError: ... has attribute 'model'` (or `'<N>'` for an integer N) | wrong module path for this architecture, or an index past the last layer | `scripts/inspect_model.py` in the `nnsight` skill; `h[-1]` or stay within `len(...)` |
 | `TypeError: 'tuple' object does not support item assignment` | assigning into a tuple output | `out[0][:] = x`, or rebuild and assign the tuple |
 | Shape error deep in a later module of a batched trace | a whole-tensor write changed an invoke's row count — nothing checks it at the write | build the replacement from the activation you were served |
 | Intervention has no effect | wrote to a copy, or indexed a tensor as if it were a tuple | see [Silent failures](#silent-failures) |
@@ -149,10 +150,21 @@ assert len(seen) == 3 and ids.shape[0] == 1
 
 ## Nothing came back
 
-Three distinct causes; check them in this order.
+Four distinct causes; check them in this order.
 
 **Forgot `.save()`** — the block runs in another frame, so the name is never
 bound: `NameError` at module level, `UnboundLocalError` inside a function.
+**Unless the name was already bound** — an earlier notebook cell, a previous loop
+iteration, a rerun — in which case nothing raises and it silently keeps its *old*
+value. Wrong science, no error. Check with `"name" in globals()` before the trace
+or by comparing `id()`s, and save inside the block:
+
+```python
+stale = torch.zeros(3)                         # bound earlier
+with model.trace(prompt):
+    stale = model.transformer.h[0].output      # not saved
+assert stale.shape == (3,)                     # still the old tensor
+```
 
 <!-- test: expect-error UnboundLocalError -->
 ```python

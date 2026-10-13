@@ -34,11 +34,12 @@ Define it as a normal `torch.nn.Module` and assign it into the envoy tree:
 class SparseAutoencoder(torch.nn.Module):
     def __init__(self, d_in, d_hidden):
         super().__init__()
-        self.encoder = torch.nn.Linear(d_in, d_hidden)
+        # the ReLU lives inside `encoder`, so `encoder.output` is the feature activations
+        self.encoder = torch.nn.Sequential(torch.nn.Linear(d_in, d_hidden), torch.nn.ReLU())
         self.decoder = torch.nn.Linear(d_hidden, d_in)
 
     def encode(self, x):
-        return torch.relu(self.encoder(x - self.decoder.bias))
+        return self.encoder(x - self.decoder.bias)
 
     def forward(self, x):
         return self.decoder(self.encode(x))
@@ -76,7 +77,31 @@ print(f"clean {model.tokenizer.decode(clean)!r}  through SAE {model.tokenizer.de
 
 That comparison is the **cheapest quality check there is**: if the model's output
 changes when you route through the SAE, the reconstruction is losing something the
-model uses.
+model uses. Put a number on it — KL(original ‖ spliced) — between two controls: an
+unchanged copy (≈ 0, or the harness itself moves the output) and a zeroed layer:
+
+```python
+def splice_kl(replace):
+    """KL(original ‖ spliced) at the last position, with h[LAYER].output := replace(it)."""
+    with torch.no_grad(), model.trace() as tracer:
+        with tracer.invoke(prompt):
+            original = model.output.logits[0, -1].log_softmax(-1).save()
+        with tracer.invoke(prompt):
+            model.transformer.h[LAYER].output = replace(model.transformer.h[LAYER].output)
+            spliced = model.output.logits[0, -1].log_softmax(-1).save()
+    return float((original.exp() * (original - spliced)).sum())
+
+copy, through, zeroed = (splice_kl(f) for f in (lambda r: r.clone(), model.transformer.h[LAYER].sae,
+                                                 torch.zeros_like))
+print(f"KL  copy {copy:.1e}   SAE {through:.2f}   zeroed layer {zeroed:.2f}")
+assert copy < 1e-4 and through < zeroed
+```
+
+```
+KL  copy 0.0e+00   SAE 14.03   zeroed layer 16.56
+```
+
+This untrained SAE costs 85% of what deleting the layer does.
 
 **Replace the output, do not write into it.** `output[:] = sae(resid)` overwrites
 the SAE's own input, and any gradient through the layer then raises
@@ -93,13 +118,14 @@ with model.edit(inplace=True):
     model.transformer.h[LAYER].sae(model.transformer.h[LAYER].output, hook=True)
 
 with model.trace(prompt):
-    observed = model.transformer.h[LAYER].sae.encoder.output.save()
+    observed = model.transformer.h[LAYER].sae.encoder.output.save()   # post-ReLU features
     answer = model.output.logits[0, -1].argmax().save()
 
 print(observed.shape, repr(model.tokenizer.decode(answer)))
 model.clear_edits()
 
 assert model.tokenizer.decode(answer) == model.tokenizer.decode(clean)
+assert (observed >= 0).all()          # the encoder module contains the ReLU
 ```
 
 ```
@@ -107,7 +133,9 @@ torch.Size([1, 10, 2048]) ' Paris'
 ```
 
 The routing call and the read must be in **different** workers (edit vs trace);
-both in one trace body raises `OutOfOrderError`.
+both in one trace body raises `OutOfOrderError`. So does forgetting `hook=True` —
+`... already ran past it`, though the submodule never ran: on an attached module,
+read that message as "is it hooked?".
 
 ## Training a dictionary
 
@@ -155,9 +183,10 @@ fit vectors: (83, 768)  held-out vectors: (47, 768)
 `trace(...)` left-pads every input to the longest, so a plain
 `.reshape(-1, d_model)` over this corpus would hand the optimizer 112 vectors of
 which 29 are pad. They are not small: at GPT-2's layer 6 the mean residual norm
-is 3118 on a pad position against 377 on a real one, so an unmasked dictionary
-spends capacity modelling the padding and every feature ranking downstream
-inherits it. Take the mask from `model.inputs` inside the trace rather than
+is 3118 on a pad position against 92 on a real token past the first, so an
+unmasked dictionary spends capacity modelling the padding and every feature
+ranking downstream inherits it. Each sentence's *first* real token is the same
+kind of outlier (3044) — see the max-activation section. Take the mask from `model.inputs` inside the trace rather than
 re-tokenizing: it is the one the forward ran with. The `nnsight` skill →
 batching has the padding rule itself.
 
@@ -297,7 +326,9 @@ produces plausible-looking garbage.
 
 **Max-activating examples** — what makes a feature fire. The trace's own
 `input_ids` and mask give the token at the winning position without any
-left-padding arithmetic:
+left-padding arithmetic. Exclude the **first real token** as well as the pads:
+GPT-2's first-position residual has norm ~3000 against ~92 elsewhere, so an
+unexcluded max returns the same features for every prompt:
 
 ```python
 examples = [
@@ -315,22 +346,25 @@ with torch.no_grad():
         resid = model.transformer.h[LAYER].output
         all_features = model.transformer.h[LAYER].sae.encode(resid).detach().save()
 
-live = (all_features > 0).any(dim=0).any(dim=0).nonzero().flatten()
-feature = int(live[all_features[..., live].amax(dim=(0, 1)).argmax()])
-scores = all_features[..., feature].masked_fill(~real, float("-inf"))   # pads out
-best_example, best_position = divmod(int(scores.argmax()), scores.shape[1])
+first = real & (real.cumsum(dim=1) == 1)                  # each prompt's first real token
+keep = real & ~first                                      # pads and the first-token sink out
+acts = all_features.masked_fill(~keep[..., None], 0)
+feature = int(acts.amax(dim=(0, 1)).argmax())
+best_example, best_position = divmod(int(acts[..., feature].argmax()), acts.shape[1])
 token = model.tokenizer.decode(input_ids[best_example, best_position])
 print(f"feature {feature} fires hardest on {examples[best_example]!r} at token {token!r}")
 
-assert real[best_example, best_position]
+assert keep[best_example, best_position]
+unmasked_top = [all_features[i].amax(0).topk(5).indices.tolist() for i in range(len(examples))]
+assert all(top == unmasked_top[0] for top in unmasked_top)   # unmasked: one top-5 for every prompt
 ```
 
 ```
-feature 376 fires hardest on 'Dogs are loyal pets.' at token 'D'
+feature 1888 fires hardest on 'The Eiffel Tower is in Paris.' at token 'iff'
 ```
 
-Without the `masked_fill`, about a fifth of the live features here report a pad
-position as their top activation.
+Unmasked, 47% of the live features here put their top activation on a pad or a
+first token, and all four prompts share one top-5.
 
 Interpret features from a *large* corpus, not four sentences, and check the
 bottom of the distribution too: a feature that fires on everything is not a
@@ -361,9 +395,9 @@ for alpha in [0.5, 1.0, 2.0, 4.0]:
 ```
 base ' released'   residual norm 93.2
   alpha 0.5: ' a'
-  alpha 1.0: ' also'
-  alpha 2.0: ' also'
-  alpha 4.0: ' "'
+  alpha 1.0: ','
+  alpha 2.0: '-'
+  alpha 4.0: '-'
 ```
 
 Read the residual norm before the logits: a trace body runs in model order, so

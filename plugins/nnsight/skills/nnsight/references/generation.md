@@ -94,7 +94,8 @@ step" shorthand. A `with tracer.iter[...]:` block is deprecated in favour of the
 token *k*. Step 0 is the prefill over the whole prompt (`[B, prompt_len, H]`);
 every later step is one position (`[B, 1, H]`). So a loop intervention applies to **every prompt position** on step 0 and one
 token afterwards — use `tracer.iter[1:]` for generated tokens only. A write at
-layer L on step *k* changes that step's token; it reaches layers at or below L
+layer L on step *k* reaches the layers above L on that pass (and, through the KV
+cache, on every later step) and changes that step's token; it reaches layers at or below L
 only from step *k*+1, through the token it changed. Until a generated token
 differs, layers ≤ L stay bit-identical to the unedited run:
 

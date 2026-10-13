@@ -180,13 +180,33 @@ carry a larger norm than the real tokens beside them:
 
 ```python
 pad_norms = short[0, :-1].norm(dim=-1)
-real_norm = short[0, -1].norm()
-assert float(pad_norms.max()) > float(real_norm)       # 3118.5 vs 3029.8
+first_real = short[0, -1].norm()      # "Hello" is one token, so this is the first-token outlier
+assert float(pad_norms.max()) > float(first_real) > 1000 > float(long[0, -1].norm())   # 3118.5, 3029.8, ~93
 ```
 
 A max, mean, or top-k over the sequence axis picks them up unless you mask them —
 in a per-invoke `tracer.cache()` too, which is padded the same way. A batched
-`generate` keeps the padding in `tracer.result`.
+`generate` keeps the padding in `tracer.result`. Take the mask the forward ran with
+from `model.inputs`, first thing in the trace:
+
+```python
+prompts = ["Hello", "The Eiffel Tower is located in the city of"]
+with model.trace(prompts):
+    args, kwargs = model.inputs
+    mask = kwargs["attention_mask"].save()
+    hidden = model.transformer.h[6].output.save()
+m = mask[..., None].to(hidden.dtype)
+masked_mean = (hidden * m).sum(1) / m.sum(1)          # per prompt, real tokens only
+
+with model.trace(prompts[0]):
+    alone = model.transformer.h[6].output.mean(1).save()
+assert (masked_mean[0] - alone[0]).norm() / alone[0].norm() < 1e-3   # unmasked: off by ~71 per dim
+```
+
+A tokenizer that adds a BOS (Llama, Gemma) counts it in `m.sum(1)`. And the first
+real token is itself an outlier on GPT-2 — norm ~3030 against ~93 — so a max over
+tokens needs it excluded as well as the pads (the `sae-and-dictionary-learning`
+skill shows the mask).
 
 ## Sharing values across invokes
 
@@ -225,8 +245,11 @@ with model.trace() as tracer:
     doubled = (eiffel_norm * 2).save()       # runs first: NameError
 ```
 
-Combine across invokes by creating a saved container up front and writing into it
-from inside each invoke; do the arithmetic after the block:
+Combine across invokes by creating a saved container up front — the container
+itself must be saved, or it never comes back — and writing into it from inside each
+invoke. Both homes for arithmetic are valid: reduce *inside* the invoke to shrink
+what is transferred (the norm below), and combine across invokes *after* the block,
+on the saved values:
 
 ```python
 with model.trace() as tracer:

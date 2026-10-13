@@ -95,25 +95,28 @@ for layer in range(n_layers):
     for head in range(n_heads):
         scores[layer, head] = delta[..., head * head_dim:(head + 1) * head_dim].sum()
 
-ranked = [(int(i) // n_heads, int(i) % n_heads) for i in scores.flatten().topk(8).indices]
+ranked = [(int(i) // n_heads, int(i) % n_heads) for i in scores.flatten().abs().topk(8).indices]
 for layer, head in ranked:
-    print(f"L{layer}H{head:<2} attribution {scores[layer, head]:+.3f}")
+    print(f"{f'L{layer}H{head}':<6} attribution {scores[layer, head]:+.3f}")
 ```
 
 ```
-L8H10 attribution +1.419
-L8H6  attribution +1.349
-L5H5  attribution +1.114
-L7H9  attribution +1.070
-L9H9  attribution +1.016
-L10H0 attribution +0.613
-L7H3  attribution +0.588
-L3H0  attribution +0.499
+L8H10  attribution +1.419
+L8H6   attribution +1.349
+L10H7  attribution -1.310
+L5H5   attribution +1.114
+L11H10 attribution -1.113
+L7H9   attribution +1.070
+L9H9   attribution +1.016
+L10H0  attribution +0.613
 ```
 
-These are the published IOI heads — L9H9 and L10H0 are name movers, L8H6/L8H10 are
-S-inhibition heads, L5H5 is an induction head — recovered here from scratch. That
-agreement is reassuring but not evidence; the validation below is.
+**Screen by |score|.** A signed ranking hides the heads that push *against* the
+answer: L10H7 and L11H10, the published negative name movers, are third and fifth
+by magnitude and absent from a signed top-8. The rest are the published IOI heads
+too — L9H9 and L10H0 are name movers, L8H6/L8H10 S-inhibition heads, L5H5 an
+induction head — recovered here from scratch. That agreement is reassuring but not
+evidence; the validation below is.
 
 Attribution is a screen, not a result: it is a linear approximation and it fails
 for large interventions (see the `attribution-patching` skill). Everything it
@@ -133,6 +136,7 @@ with model.trace(clean):
         for i in range(n_layers)
     ])
 
+# signed top-10: the heads that carry the answer (the screen above used |score|)
 circuit = {(int(i) // n_heads, int(i) % n_heads) for i in scores.flatten().topk(10).indices}
 
 random.seed(0)
@@ -225,6 +229,7 @@ reader_grads = reader_grads[::-1]
 
 def head_write(layer, head, z):
     """What one head adds to the residual stream: its slice of z through its rows of c_proj."""
+    # omits the c_proj bias, which cancels in the clean − corrupt difference
     lo, hi = head * head_dim, (head + 1) * head_dim
     return z[..., lo:hi] @ model.transformer.h[layer].attn.c_proj.weight[lo:hi]
 
@@ -272,14 +277,33 @@ separate query, key and value inputs per head, which GPT-2's fused `c_attn` does
 not expose as separate modules; treat the layer as the node unless you need
 head-level destinations.
 Edge scores are attributions, so they inherit every limit in the
-`attribution-patching` skill; verify the edges you report with path patching.
+`attribution-patching` skill; verify the edges you report with a **path patch**:
+let the upstream change reach *one* reader while every other reader still sees
+the corrupt residual — "does A act *through* B?", which is how the published IOI
+circuit tells name movers from S-inhibition heads. Add the head's clean − corrupt
+write to that one reader's input in the corrupt run:
 
-**Path patching** — the precise version: patch an upstream component's output but
-let it reach only *one* downstream destination, freezing every other path. It
-answers "does A affect the output *through* B?" rather than "does A matter at
-all", and it is how the published IOI circuit distinguishes name movers from
-S-inhibition heads. Implement it by caching the frozen components' values in a
-first pass and re-imposing them while the patched value flows.
+```python
+with torch.no_grad():
+    delta = head_write(8, 10, clean_heads[8]) - head_write(8, 10, corrupt_heads[8])
+    with model.trace(corrupt):
+        model.transformer.ln_f.input = model.transformer.ln_f.input + delta   # only the logits see it
+        via_logits = logit_diff(model.output.logits).save()
+
+edge_real = float(via_logits) - float(corrupt_metric)
+print(f"L8H10 -> logits: attribution {edges_from(8, 10)['logits']:+.3f}, path patch {edge_real:+.3f}")
+assert abs(edge_real - edges_from(8, 10)["logits"]) < 0.02
+```
+
+```
+L8H10 -> logits: attribution +0.752, path patch +0.754
+```
+
+Adding `delta` to every reader after L8 attn at once reproduces the real node
+patch (+1.457) to 1e-3. And the top head is not where the diagram puts it: L8H10,
+an S-inhibition head that should act through the name movers, sends roughly half
+its effect (+0.752 of +1.419) straight to the logits. Real circuits are not always
+the published one.
 
 ## 6. Prune to minimality
 

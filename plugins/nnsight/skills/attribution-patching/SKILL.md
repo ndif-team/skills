@@ -1,6 +1,6 @@
 ---
 name: attribution-patching
-description: Approximate activation patching with gradients — attribution = (clean activation − corrupt activation) · gradient of the metric — so a whole layer×position×head map costs two forward passes and one backward instead of one forward pass per component. Use to rank all heads or positions at once with two passes, to screen large models or large component sets before verifying the survivors with real patching, to build circuit-level attribution heatmaps, and for edge attribution patching. Includes the validation step that tells you whether the approximation is trustworthy on your task, and the conditions under which it silently is not.
+description: Approximate activation patching with gradients — attribution = (clean activation − corrupt activation) · gradient of the metric — so a whole layer×position×head map costs two forward passes and one backward instead of one forward pass per component. Use to rank all heads or positions at once with two passes, to screen large models or large component sets before verifying the survivors with real patching, to build circuit-level attribution heatmaps, and for edge attribution (worked example in circuit-discovery). Includes the validation step that tells you whether the approximation is trustworthy on your task, and the conditions under which it silently is not.
 ---
 
 # Attribution Patching
@@ -216,8 +216,9 @@ for index in flat.tolist():
     print(f"L{layer}H{head:<2} attribution {scores[layer, head]:+.4f}")
 ```
 
-144 head attributions from two forward passes. The top few still need real head
-patching (`activation-patching` skill) before they are results.
+144 head attributions from two forward passes. Screen by |score| — a head that
+pushes against the answer matters as much as one that pushes for it — then verify
+the top-k with real head patching (`activation-patching` skill), keeping the sign.
 
 ## Edge attribution
 

@@ -36,6 +36,7 @@ negative = ["I hate this", "This is terrible", "What an awful day", "I am so sad
 
 with model.trace() as tracer:
     with tracer.invoke(positive):
+        # detach: a saved activation's live grad_fn keeps the whole forward graph alive
         pos_mean = model.transformer.h[LAYER].output[:, -1, :].mean(0).detach().save()
     with tracer.invoke(negative):
         neg_mean = model.transformer.h[LAYER].output[:, -1, :].mean(0).detach().save()
@@ -113,7 +114,7 @@ comparable.
 | **Layer** | Middle layers (⅓–⅔ depth) usually work best. Early layers get overwritten; late layers only nudge the surface form. Sweep it like α. |
 | **Positions** | `[:, -1, :]` steers only the token being predicted; `[:, :, :]` steers every position and is stronger but blunter. |
 | **Every step vs first step** | Inside a `tracer.iter[...]` loop the write repeats on every forward **pass**. Pass 0 is the *prefill*, whose hidden state is `[B, prompt_len, H]`: a `[:, -1, :]` write there touches only the last prompt position, and `[:, :, :]` touches all of them — the slice decides what gets steered, not the step. Passes 1+ carry one generated token each, so `tracer.iter[1:12]` steers only generated tokens. Applied once, the effect decays. |
-| **Timing** | A layer-L write on step k changes the token predicted at step k, and reaches layers below L only from step k+1, through the KV cache. |
+| **Timing** | A layer-L write on step k reaches the layers *above* L on that same pass, and the KV cache carries it to layers above L on every later step. Layers ≤ L stay bit-identical to the unedited run until a generated token actually changes: a 0.3× edit that does not flip the argmax leaves layers 3 and 6 (pre-edit) identical on later steps while layer 9 differs. So an edit on `tracer.iter[a:b]` can first change generated token a (absolute position prompt_len + a — the slice counts forward passes, step 0 is the prefill), and a later one only if it was too weak to flip that argmax. |
 
 ## Persistent steering
 

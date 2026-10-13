@@ -199,6 +199,21 @@ print(local_model.tokenizer.decode(check))
 Develop against a small model locally, dry-run with `remote="local"`, then switch
 the model id and `remote=True`.
 
+It does **not** sandbox — weights readable, device real, like a trusted key, so
+none of the four standard-key failures reproduce; a forgotten `.save()` passes
+(client-side mutations still come back); `CONFIG.APP.DEBUG` prints no payload
+bytes. It does catch the round trip — an unpicklable capture fails only here:
+
+<!-- test: expect-error TypeError -->
+```python
+import threading
+lock = threading.Lock()
+with local_model.trace(prompt):                   # plain local: fine
+    busy = nnsight.save(lock.locked())
+with local_model.trace(prompt, remote="local"):   # TypeError: cannot pickle '_thread.lock' object
+    busy = nnsight.save(lock.locked())
+```
+
 ## Reviewing remote code
 
 Walk these in order; the first two are usually worth orders of magnitude.
@@ -214,7 +229,7 @@ Walk these in order; the first two are usually worth orders of magnitude.
 | A helper from the user's own file called inside a trace | `nnsight.register(...)` or inline it |
 | One long session | split into several — sessions have a time limit |
 | N forward passes for N layers/heads/positions | batch with `tracer.invoke` per variant (`nnsight` skill → batching) |
-| Only layers 0..L matter | `tracer.stop()` after L |
+| Only layers 0..L matter | `tracer.stop()` after L — it halts the whole forward, so every invoke must be done by then (it is not per-invoke) |
 
 Say what the fix buys — request count and megabytes — rather than just asserting
 it. If the user is prototyping and wants simple code first, agree, and flag what

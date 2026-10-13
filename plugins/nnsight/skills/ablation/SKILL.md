@@ -48,16 +48,25 @@ per head. Put the baseline and every (layer, head) ablation in their own invoke 
 one trace, keyed into a saved dict:
 
 ```python
-with torch.no_grad(), model.trace() as tracer:
-    p_paris = nnsight.save({})
-    with tracer.invoke(prompt):                                    # invoke 0: baseline
-        p_paris["baseline"] = model.output.logits[0, -1].softmax(-1)[paris]
-    for layer in range(n_layers):
-        for head in range(n_heads):
-            with tracer.invoke(prompt):
-                lo, hi = head * head_dim, (head + 1) * head_dim
-                model.transformer.h[layer].attn.c_proj.input[:, :, lo:hi] = 0
-                p_paris[layer, head] = model.output.logits[0, -1].softmax(-1)[paris]
+def head_sweep(site, value=lambda layer, lo, hi: 0):
+    """P(' Paris'): a baseline invoke, then one invoke per (layer, head) with site(layer)[..., lo:hi] replaced."""
+    with torch.no_grad(), model.trace() as tracer:
+        p = nnsight.save({})
+        with tracer.invoke(prompt):                                    # invoke 0: baseline
+            p["baseline"] = model.output.logits[0, -1].softmax(-1)[paris]
+        for layer in range(n_layers):
+            for head in range(n_heads):
+                with tracer.invoke(prompt):
+                    lo, hi = head * head_dim, (head + 1) * head_dim
+                    site(layer)[:, :, lo:hi] = value(layer, lo, hi)
+                    p[layer, head] = model.output.logits[0, -1].softmax(-1)[paris]
+    return p
+
+def top(p, k=3):                                                       # largest |change| first
+    return sorted((key for key in p if key != "baseline"), key=lambda key: -abs(float(p[key] - p["baseline"])))[:k]
+
+c_proj_in = lambda layer: model.transformer.h[layer].attn.c_proj.input
+p_paris = head_sweep(c_proj_in)
 
 baseline = float(p_paris["baseline"])
 ranked = sorted((float(p), key) for key, p in p_paris.items() if key != "baseline")
@@ -68,19 +77,23 @@ for p, (layer, head) in ranked[:3] + ranked[-1:]:
 assert abs(baseline - 0.070) < 1e-3
 assert abs(float(p_paris[0, 10]) - 0.0059) < 1e-3
 assert float(p_paris[0, 0]) > baseline          # ablating L0H0 *raises* P(' Paris')
-```
-
-```
-baseline P(' Paris') = 0.070
-L0H10 -> 0.0059
-L0H9  -> 0.0131
-L0H7  -> 0.0261
-L0H0  -> 0.1105
+assert top(p_paris) == [(0, 10), (0, 9), (0, 7)]
 ```
 
 The 145 invokes batch into one forward pass — an order of magnitude faster than a
-loop of 144 single-invoke traces (measured on CPU: 0.05–0.12 s against 0.8–3.1 s). An ablation can also *raise* the metric
-(L0H0 above) — report the signed change, not its absolute value.
+loop of 144 single-invoke traces on CPU (0.05–0.12 s against 0.8–3.1 s); the
+setup's `dispatch=True` lands on the GPU when one is present, where the gap is ~3x.
+An ablation can also *raise* the metric (L0H0 above) — report the signed change,
+not its absolute value.
+
+**The shortcut that looks the same and is not.** `attn.output[0]` is *after*
+`c_proj`, so slicing it cuts 64 mixed hidden dimensions, not a head — and it
+ranks entirely different "heads":
+
+```python
+wrong = head_sweep(lambda layer: model.transformer.h[layer].attn.output[0])   # WRONG site
+assert top(wrong) == [(0, 4), (0, 5), (0, 2)]                                  # vs L0H10, L0H9, L0H7
+```
 
 ## Zero, mean and resample on one component
 
@@ -130,6 +143,21 @@ Where zero reports a large drop and mean reports little — MLP0 here, 0.0012 ag
 0.0701 — the component was not carrying task information; you were measuring
 distribution shock. Resample with a paired prompt *is* activation patching in the
 noising direction; the `activation-patching` skill covers prompt design.
+
+Per head, mean ablation writes the head's `c_proj.input` slice averaged over the
+same-task corpus, and reorders the zero-ablation ranking:
+
+```python
+with torch.no_grad(), model.trace(corpus):     # every position, pads included; masking them keeps the ranking
+    head_means = nnsight.save([block.attn.c_proj.input.mean((0, 1)) for block in model.transformer.h])
+p_mean = head_sweep(c_proj_in, lambda layer, lo, hi: head_means[layer][lo:hi])
+change = {key: float(p - p_mean["baseline"]) for key, p in p_mean.items() if key != "baseline"}
+assert top(p_mean, 1) == [(9, 8)] and abs(change[9, 8] + 0.030) < 2e-3   # L9H8 is now #1
+assert abs(change[0, 10] + 0.0095) < 1e-3                                 # L0H10: -0.064 under zero
+```
+
+The concrete case for "zero overstates": L0H10 loses 85% of its effect once the
+head writes a typical value instead of nothing, and a buried layer-9 head tops it.
 
 Assigning to `model.transformer.h[layer].output` instead replaces the **whole
 residual stream** — everything every earlier component wrote — so it asks whether

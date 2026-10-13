@@ -53,7 +53,11 @@ with model.trace("The Eiffel Tower is in the city of"):
 assert len(per_layer) == 12
 ```
 
-There is no `.value` in 0.8 — the saved variable *is* the tensor.
+There is no `.value` in 0.8 — the saved variable *is* the tensor. Saved
+activations arrive with `requires_grad=True` and a live `grad_fn` that keeps the
+forward graph alive: `.detach()` anything you keep or reuse (full story: the
+`sae-and-dictionary-learning` skill and
+[references/gradients.md](references/gradients.md)).
 
 **2. Access modules in forward-pass order.** Reading layer 8 then layer 2 raises
 `OutOfOrderError`: your code is a worker that parks until the model produces each
