@@ -1,6 +1,6 @@
 ---
 name: nnsight
-description: Read, modify, and analyze the internals of neural networks with nnsight — tracing activations with model.trace, intervening on modules, batching interventions, gradients, caching, generation, and running on NDIF. Use for any task that touches model internals rather than just model outputs: interpretability experiments, activation extraction, ablation, patching, steering, probing, circuit analysis, or debugging existing nnsight code — and whenever you would otherwise reach for PyTorch forward hooks (register_forward_hook) to read or edit activations. Covers nnsight 0.8 (TransformersModel, tracer.result, no .value) — load this before writing any nnsight code, since idioms from older versions are still widespread and silently wrong.
+description: "Read, modify, and analyze the internals of neural networks with nnsight — tracing activations with model.trace, intervening on modules, batching interventions, gradients, caching, generation, and running on NDIF. Use for any task that touches model internals rather than just model outputs: interpretability experiments, activation extraction, ablation, patching, steering, probing, circuit analysis, or debugging existing nnsight code — and whenever you would otherwise reach for PyTorch forward hooks (register_forward_hook) to read or edit activations. Covers nnsight 0.8 (TransformersModel, tracer.result, no .value) — load this before writing any nnsight code, since idioms from older versions are still widespread and silently wrong."
 ---
 
 # nnsight
@@ -41,7 +41,9 @@ still lands on the GPU; see the device table in
 
 **1. `.save()` or it never existed.** Assignments inside a trace body do not escape
 it — the body runs in a different frame. Bind what you save (`x = ....save()`; a
-bare `....save()` on its own line returns nothing), and when collecting, save the
+bare `....save()` on its own line returns nothing; neither does `float(x.save())`,
+because the call around it still runs in the trace, so bind the saved value and
+convert it after the block), and when collecting, save the
 **container** and append raw values:
 
 ```python
@@ -114,7 +116,11 @@ assert sorted(scores) == list(range(12))        # 12 ablations, one forward pass
 ```
 
 Inside an invoke, index as if that input were alone — `[:, -1, :]` means "this
-invoke's rows, last position". Trace-body code *outside* the invokes runs before
+invoke's rows, last position". That holds for the last position only: inputs are
+left-padded to the longest, so a full-sequence or absolute index includes the pads;
+slice `[:, -len(ids):]` or see
+[references/batching.md](references/batching.md#positions-shift-with-the-batch).
+Trace-body code *outside* the invokes runs before
 any of them, so it raises `NameError` on a name an invoke binds — combine across
 invokes through a `nnsight.save({})` written from inside each one, as above.
 

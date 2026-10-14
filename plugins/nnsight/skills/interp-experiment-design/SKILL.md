@@ -1,6 +1,6 @@
 ---
 name: interp-experiment-design
-description: A planning checklist and router for interpretability experiments, not a technique. Use to plan a study, when asking "is this result real?" or "is this too good to be true?", to decide which method answers a question (logit lens, probing, patching, causal tracing, ablation, attribution, circuits, SAEs, steering, editing), or to choose what controls and which metric an experiment needs. Covers logit-difference metrics, the no-op and extreme-intervention wiring checks, controls and baselines, minimal pairs, the correlational-to-causal ladder, and statistical hygiene.
+description: A planning checklist and router for interpretability experiments, not a technique. Use to plan a study, when asking "is this result real?", to decide which method answers a question (logit lens, probing, patching, tracing, ablation, attribution, circuits, SAEs, steering, editing), or to choose controls and a metric. Covers logit-difference metrics, wiring checks, nulls, minimal pairs, held-out splits, and the correlational-to-causal ladder.
 ---
 
 # Designing an Interpretability Experiment
@@ -125,7 +125,7 @@ An effect is only evidence if the null does worse:
 | this component matters | the same intervention on a random component |
 | this direction encodes X | a random direction of the same norm |
 | this circuit is the mechanism | a random subgraph of the same size, **and the empty circuit** |
-| this probe found a representation | shuffled labels; a probe at layer 0 |
+| this probe found a representation | shuffled labels; a probe at layer 0; held-out *words*, not rows |
 | this steering vector works | the negated vector; a random vector |
 
 ```python
@@ -188,35 +188,58 @@ rather than trusting the set.
 - **Effect sizes over binaries.** "Recovers 60% of the gap", not "patching worked".
 - **State the search space** and any truncation behind a top-K list.
 
-## 7. Compute budget
+## 7. Readable here is not used here
 
-Sweep in invokes: N variants of one intervention are N `tracer.invoke`s in one
-forward pass, so a 144-condition head scan is 12 batched traces, not 144. The
-`nnsight` skill has the rest of the primitives (caching, `tracer.stop()`), and the
-`remote` skill covers models too large to host.
+**Position migration.** Probe accuracy at a position says nothing about whether
+that position is the causal route. On subject-verb agreement in GPT-2 ("The keys
+near the cabinet" → ` are`), subject number is decodable at the final position
+from layer 2, yet patching that position recovers nothing until layer 7: through
+layer 6 the later layers re-read number from the subject's own position, and only
+then does it migrate to the end. A probe-site claim ("the model represents X
+*here* and uses it") made from the probe alone would be wrong for five layers.
+**Pair every probe-site claim with a patch or a direction interchange at the same
+(layer, position)** — the `probing` skill's interchange measures both on one table.
 
-## 8. Before you claim it
+## 8. From question to design
+
+A compound claim — "GPT-2 represents subject number linearly *and* uses that
+representation for agreement" — decomposes into steps, each owned by a skill:
+
+1. **Stimuli that decorrelate confounds.** Cross the variable with its nearest
+   confound — subject number × attractor number — so neither predicts the other.
+2. **Minimal pairs of equal length**, differing only in the variable, with the
+   token-count assert from section 5 run over the whole set.
+3. **Split by lexical item.** Hold out subject nouns, not rows (`probing`).
+4. **Correlational pass.** Probes by layer and position, with shuffled-label and
+   random-direction floors (`probing`).
+5. **Causal pass.** A layer × position patch map with self-patch and random-donor
+   nulls (`activation-patching`); then interchange and mean-ablation along the
+   probe direction against a magnitude-matched random shift (`probing`).
+6. **Falsifiers, written before running.** E.g. "if the 1-D interchange recovers
+   under half of the full-residual patch, the linear claim fails at that site".
+
+Sweep in invokes throughout: N variants of one intervention are N `tracer.invoke`s
+in one forward pass (the `nnsight` skill).
+
+## 9. Before you claim it
 
 - No-op and extreme checks pass; the baseline ran in the same trace.
 - A control did worse; the effect is a fraction of a known span.
 - More than one prompt, plus a held-out set; search space stated.
 - Ablation type, patch direction, and corrupt distribution stated.
 - The claim matches the rung: readable ≠ used, sufficient ≠ necessary,
-  correlated ≠ causal.
+  correlated ≠ causal, decodable here ≠ routed through here.
+- The falsifier was written down before the run, and checked.
 - Negative results reported too.
 
 ## Common ways experiments go wrong
 
 - **Measuring the intervention instead of the model.** Large interventions push
   the network off-distribution; prefer mean/resample over zero where you can.
-- **Confirming the hypothesis you started with.** Decide in advance what result
-  would falsify the claim, and check for it.
 - **Reading a heatmap as a mechanism.** A bright cell says an intervention there
   changed the output, not what the component computes.
 - **Trusting an unvalidated approximation.** Attribution patching, probes, and SAEs
   are models of the model; validate against ground truth on a subset.
-- **Generalizing across scale.** Where something lives rarely transfers across
-  model families or sizes without re-running.
 
 ## Related skills
 

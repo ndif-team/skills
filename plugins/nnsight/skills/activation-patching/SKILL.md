@@ -1,6 +1,6 @@
 ---
 name: activation-patching
-description: Establish which components causally carry a behavior by copying activations from one run into another — test specific components on a clean/corrupt prompt pair, by denoising (clean into corrupt) and noising (corrupt into clean), across layers, positions, attention heads, and MLPs. Use to localize where a fact or capability lives, to confirm that a component found by a probe or attention pattern is actually causal, to build layer×position causal maps, and for IOI-style paired-prompt designs. Includes distributed alignment search (learned subspace patching) and the metric and prompt-design mistakes that produce confident wrong answers.
+description: Establish which components causally carry a behavior by copying activations between a clean and a corrupt prompt — denoising and noising across layers, positions, attention heads and MLPs. Use to localize where a fact or capability lives, to confirm a component found by a probe or attention pattern is causal, to build layer×position maps, and for IOI-style paired prompts. Includes distributed alignment search and metric and prompt-design traps.
 ---
 
 # Activation Patching
@@ -359,9 +359,19 @@ which one a number came from.
 sweep you report.
 
 **One pair is an anecdote.** Layer indices move across paraphrases. Average over a
-set of pairs before making a claim about "the model". When the component count
-gets large (every head × layer × position), screen with the
-`attribution-patching` skill and confirm the survivors here.
+set of pairs before making a claim about "the model" — and run the random donor on
+the map as well as the sweep: on a 5-token agreement map it reached ~0.4 recovery
+in some cells, which a single-pair study would read as a site. Aggregate recovery
+over a set as a **ratio of means**, `(mean patched − mean corrupt) / (mean clean −
+mean corrupt)`, not the mean of per-pair ratios, which pairs with a near-zero
+clean − corrupt gap blow up. When the component count gets large (every head ×
+layer × position), screen with the `attribution-patching` skill and confirm the
+survivors here.
+
+**Cost.** A layer × position map over a few hundred prompts is minutes on CPU for
+GPT-2 when each layer is one trace with one invoke per position, each invoke
+carrying the whole prompt batch; one trace per (layer, position, prompt)
+multiplies the forward passes by the number of prompts.
 
 ## Related skills
 

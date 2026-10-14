@@ -1,6 +1,6 @@
 ---
 name: causal-tracing
-description: Localize where a model stores and retrieves a fact using the ROME protocol — corrupt the subject tokens with noise, restore individual hidden states from the clean run, and measure how much of the correct answer's probability comes back. Use for factual-recall localization, for producing a (layer × position) causal trace with an early subject site and a late last-token site, for severed traces that ask whether MLPs or attention carry the recovery, and when there is no natural corrupt prompt to pair against. Distinct from activation-patching, which transplants between two real prompts.
+description: Localize where a model stores and retrieves a fact using the ROME protocol — corrupt the subject tokens with noise, restore individual hidden states from the clean run, and measure how much of the correct answer's probability comes back. Use for factual-recall localization, for producing a (layer × position) causal trace with an early subject site and a late last-token site, for windowed sublayer restoration and severed traces that ask whether MLPs or attention carry the recovery, and when there is no natural corrupt prompt to pair against. Distinct from activation-patching, which transplants between two real prompts.
 ---
 
 # Causal Tracing
@@ -94,7 +94,7 @@ assert float(clean_prob) > 0.5
 ```
 
 ```
-clean P(' Paris') = 0.8008
+clean P(' Paris') = 0.8164
 ```
 
 ## Step 2: calibrate the noise, then draw it
@@ -126,8 +126,8 @@ for scale in (1, 3, 5):
 ```
 
 ```
-1σ  worst seed 0.9297   mean 0.8699
-3σ  worst seed 0.9258   mean 0.2355
+1σ  worst seed 0.9297   mean 0.8598
+3σ  worst seed 0.9297   mean 0.2231
 5σ  worst seed 0.0012   mean 0.0005
 ```
 
@@ -158,14 +158,15 @@ print("corrupt P per seed:", " ".join(f"{p:.4f}" for p in corrupt_probs))
 ```
 
 ```
-corrupt P per seed: 0.0004 0.0005 0.0011 0.0012 0.0002 0.0001 0.0007 0.0001 0.0008 0.0001
+corrupt P per seed: 0.0004 0.0005 0.0011 0.0012 0.0002 0.0001 0.0007 0.0001 0.0008 0.0002
 ```
 
 ## Step 3: single-state restoration
 
 One clean state at a time, every (layer, position) cell, averaged over the ten
 noise draws. Every (seed, position) pair is an invoke, so each layer is one
-forward pass:
+forward pass: the full 36-layer × 10-position × 10-seed grid is 36 traces of 100
+invokes, about 8 s on one A6000. There is no reason to subsample layers or seeds.
 
 <!-- test: gpu slow -->
 ```python
@@ -187,7 +188,12 @@ for layer in range(n_layers):
         per_seed[seed, layer, pos] = recovery(float(p), seed)
 grid = per_seed.mean(0)
 
-print(f"{'token':>10} " + "".join(f"L{l:<6}" for l in range(0, n_layers, 3)))
+peak_layer, peak_pos = divmod(int(grid.argmax()), n_pos)
+late_onset = int((grid[:, -1] > 0.9).nonzero()[0])
+print(f"peak: L{peak_layer} {tokens[peak_pos]!r} {grid[peak_layer, peak_pos]:.3f};"
+      f" last token first above 0.9 at L{late_onset}")
+
+print(f"{'token':>10} " + "".join(f"L{l:<6}" for l in range(0, n_layers, 3)))   # display only
 for pos, token in enumerate(tokens):
     print(f"{token!r:>10} " + "".join(f"{grid[l, pos]:.3f}  " for l in range(0, n_layers, 3)))
 
@@ -196,33 +202,36 @@ assert grid[24:, -1].max() > 0.9 and grid[:15, -1].max() < 0.1
 ```
 
 ```
+peak: L11 ' Tower' 1.140; last token first above 0.9 at L26
      token L0     L3     L6     L9     L12    L15    L18    L21    L24    L27    L30    L33
-     'The' 0.000  -0.000  0.000  0.000  -0.000  0.000  -0.000  -0.000  0.000  0.000  0.000  -0.000
-      ' E' 0.000  0.000  0.000  0.000  0.000  0.000  0.000  0.000  0.000  -0.000  -0.000  0.000
-     'iff' 0.451  0.383  0.260  0.297  0.083  0.026  0.028  0.011  0.001  0.001  0.000  0.000
-      'el' 0.237  0.766  0.813  0.628  0.341  0.182  0.215  0.128  0.027  0.006  0.004  0.000
-  ' Tower' 0.498  0.722  1.104  1.093  1.159  0.985  0.769  0.205  0.010  0.002  0.002  0.000
-     ' is' 0.000  0.000  0.000  0.000  0.002  0.003  0.002  0.001  0.001  0.000  0.000  0.000
-     ' in' 0.000  -0.000  -0.000  0.000  0.001  0.002  0.003  0.001  0.020  0.009  0.005  0.001
-    ' the' -0.000  0.000  -0.000  0.000  -0.000  -0.000  0.000  0.000  0.001  0.000  0.000  0.000
+     'The' 0.000  -0.000  -0.000  -0.000  -0.000  -0.000  -0.000  0.000  0.000  -0.000  0.000  -0.000
+      ' E' 0.000  0.000  0.000  0.000  0.000  0.000  0.000  0.000  0.000  -0.000  0.000  0.000
+     'iff' 0.447  0.385  0.251  0.286  0.078  0.026  0.027  0.011  0.001  0.001  0.000  0.000
+      'el' 0.223  0.733  0.802  0.616  0.334  0.177  0.210  0.125  0.027  0.006  0.005  -0.000
+  ' Tower' 0.499  0.691  1.082  1.074  1.138  0.976  0.758  0.201  0.009  0.002  0.002  0.000
+     ' is' 0.000  0.000  0.000  0.000  0.002  0.002  0.002  0.001  0.001  0.000  0.000  0.000
+     ' in' 0.000  0.000  -0.000  0.000  0.001  0.002  0.003  0.001  0.019  0.009  0.005  0.001
+    ' the' -0.000  -0.000  -0.000  0.000  -0.000  -0.000  0.000  0.000  0.001  0.000  0.000  0.000
    ' city' -0.000  0.000  0.000  -0.000  -0.000  0.000  0.000  0.000  0.001  0.000  0.000  0.000
-     ' of' -0.000  0.000  -0.000  -0.000  -0.000  -0.000  0.000  0.002  0.728  0.980  1.016  0.975
+     ' of' -0.000  0.000  -0.000  -0.000  -0.000  -0.000  0.000  0.002  0.720  0.966  1.002  0.961
 ```
 
 Two sites, from single states, with no window needed:
 
 - an **early site** at the last subject token `' Tower'`, full recovery from layer 6
   to layer 15, gone by layer 24 — where the fact is looked up
-- a **late site** at the final token `' of'`, nothing until layer 21 and then full
-  recovery from layer 24 on — where the retrieved fact determines the output
+- a **late site** at the final token `' of'`, nothing until layer 21, then rising
+  from layer 23 and above 0.9 from layer 26 on — where the retrieved fact
+  determines the output
 
 The tokens between them stay at zero throughout. Recovery slightly above 1.0 is
 ordinary: a restored state can leave the model more confident than the clean run.
 
-## Severed traces: which sublayer carries the recovery
+## Windowed sublayer restoration: which sublayers carry the recovery
 
-Restoring a window of one sublayer's outputs asks whether that component is what
-repairs the residual stream. A sublayer's output at layer *w* is added to the
+Restoring a window of one sublayer's clean outputs asks whether that component
+alone can repair the residual stream. This is ROME's windowed restoration, not
+severing (next section). A sublayer's output at layer *w* is added to the
 stream rather than replacing it, so a run of them compounds. One helper serves
 both sublayers; `site` picks the output to restore:
 
@@ -230,7 +239,7 @@ both sublayers; `site` picks the output to restore:
 ```python
 WINDOW = 10
 
-def severed_trace(site):
+def windowed_restore(site):
     """Recovery from restoring `site(block)` over a window of layers, per window start."""
     with model.trace(prompt):
         clean_site = nnsight.save([site(block).detach() for block in model.model.layers])
@@ -252,8 +261,8 @@ def severed_trace(site):
             out[start, pos] += recovery(float(p), seed) / len(SEEDS)
     return out
 
-mlp_grid = severed_trace(lambda block: block.mlp.output)
-attn_grid = severed_trace(lambda block: block.self_attn.output[0])
+mlp_grid = windowed_restore(lambda block: block.mlp.output)
+attn_grid = windowed_restore(lambda block: block.self_attn.output[0])
 
 for name, g in (("MLP", mlp_grid), ("attention", attn_grid)):
     print(f"{name:>10} " + "".join(f"W{l:<6}" for l in range(0, n_layers, 3)))
@@ -266,15 +275,15 @@ assert attn_grid[15:24, -1].max() > 0.8 and attn_grid[:12, -1].max() < 0.2
 
 ```
        MLP W0     W3     W6     W9     W12    W15    W18    W21    W24    W27    W30    W33
-     'iff' 0.561  0.288  0.507  0.263  0.020  0.004  0.002  0.002  0.000  0.000  -0.000  -0.000
-      'el' 0.755  0.887  0.711  0.393  0.015  0.037  0.025  0.008  0.000  0.000  0.000  -0.000
-  ' Tower' 1.065  1.066  1.118  0.983  0.120  0.124  0.039  0.010  0.001  0.000  0.000  0.000
-     ' of' -0.000  -0.000  -0.000  -0.000  -0.000  0.003  0.101  0.424  0.146  0.005  -0.001  -0.001
+     'iff' 0.548  0.286  0.486  0.254  0.019  0.004  0.002  0.002  0.000  0.000  -0.000  -0.000
+      'el' 0.721  0.869  0.699  0.382  0.015  0.037  0.025  0.009  0.000  0.000  0.000  -0.000
+  ' Tower' 1.041  1.048  1.096  0.971  0.119  0.120  0.038  0.009  0.000  0.000  0.000  0.000
+     ' of' -0.000  -0.000  -0.000  -0.000  -0.000  0.003  0.101  0.421  0.144  0.004  -0.001  -0.001
  attention W0     W3     W6     W9     W12    W15    W18    W21    W24    W27    W30    W33
-     'iff' 0.141  0.000  0.000  0.000  0.000  0.000  0.000  0.000  0.000  -0.000  -0.000  0.000
-      'el' 0.780  0.001  -0.000  0.000  -0.000  -0.000  -0.000  0.000  0.000  0.000  0.000  -0.000
-  ' Tower' 0.187  0.001  -0.000  0.000  0.000  -0.000  -0.000  -0.000  0.000  0.000  -0.000  0.000
-     ' of' -0.000  -0.000  -0.000  0.000  0.001  0.754  0.914  0.935  0.521  0.192  0.061  0.003
+     'iff' 0.140  0.000  0.000  0.000  0.000  -0.000  -0.000  0.000  0.000  -0.000  0.000  0.000
+      'el' 0.756  0.001  -0.000  0.000  -0.000  -0.000  -0.000  0.000  0.000  0.000  -0.000  -0.000
+  ' Tower' 0.186  0.001  -0.000  0.000  0.000  -0.000  -0.000  -0.000  0.000  0.000  -0.000  -0.000
+     ' of' -0.000  -0.000  -0.000  0.000  0.001  0.753  0.892  0.924  0.506  0.194  0.061  0.003
 ```
 
 The two grids split the work cleanly. MLPs at the subject over layers 0–13 account
@@ -290,6 +299,67 @@ to every printed digit. Windowing the residual only buys anything across several
 positions that feed each other; for one position, window the sublayer outputs as
 above.
 
+## Severed traces: which path the restored state needs
+
+Severing asks the converse: restore the clean residual at one site, then hold
+every **later** MLP (or attention) output at that position at its corrupted
+value. If recovery dies, the restored state needed that path to reach the
+answer. The corrupted sublayer outputs come from one batched pass:
+
+<!-- test: gpu slow -->
+```python
+with model.trace() as tracer:
+    corrupt_attn, corrupt_mlp = nnsight.save({}), nnsight.save({})
+    for seed in SEEDS:
+        with tracer.invoke(prompt):
+            model.model.embed_tokens.output[:, SUBJECT, :] += noises[seed]
+            corrupt_attn[seed], corrupt_mlp[seed] = [], []
+            for block in model.model.layers:        # attention before mlp, layer by layer
+                corrupt_attn[seed].append(block.self_attn.output[0].detach().clone())
+                corrupt_mlp[seed].append(block.mlp.output.detach().clone())
+
+def severed(layer, pos, freeze=None):
+    """Mean recovery from restoring (layer, pos) with `freeze` held corrupted above it."""
+    with model.trace() as tracer:
+        out = nnsight.save({})
+        for seed in SEEDS:
+            with tracer.invoke(prompt):
+                model.model.embed_tokens.output[:, SUBJECT, :] += noises[seed]
+                model.model.layers[layer].output[:, pos, :] = clean_states[layer][:, pos, :]
+                for later in range(layer + 1, n_layers):
+                    block = model.model.layers[later]
+                    if freeze == "attn":
+                        block.self_attn.output[0][:, pos, :] = corrupt_attn[seed][later][:, pos, :]
+                    if freeze == "mlp":
+                        block.mlp.output[:, pos, :] = corrupt_mlp[seed][later][:, pos, :]
+                out[seed] = model.output.logits[0, -1].softmax(-1)[answer].detach()
+    return sum(recovery(float(out[seed]), seed) for seed in SEEDS) / len(SEEDS)
+
+print("' Tower' at layer: full / MLPs frozen / attention frozen")
+results = {}
+for layer in (0, 2, 4, peak_layer):
+    results[layer] = [severed(layer, peak_pos, freeze) for freeze in (None, "mlp", "attn")]
+    print(f"  L{layer:<2}  " + " / ".join(f"{r:.3f}" for r in results[layer]))
+
+full, mlp_frozen, attn_frozen = results[peak_layer]
+assert full > 0.9 and mlp_frozen < 0.1 and attn_frozen > 0.9
+assert all(results[layer][2] < 0.3 for layer in (0, 2, 4))
+```
+
+```
+' Tower' at layer: full / MLPs frozen / attention frozen
+  L0   0.501 / 0.000 / 0.017
+  L2   0.713 / 0.000 / 0.027
+  L4   0.824 / -0.000 / 0.079
+  L11  1.138 / 0.011 / 1.123
+```
+
+At the peak, freezing the later MLPs kills the recovery and freezing attention
+leaves it whole: the clean `' Tower'` state needs the MLPs above it, which is the
+ROME picture. Restoring earlier, at layers 0–4, recovery also dies with attention
+frozen. Early attention gathers the subject's tokens into `' Tower'` before the
+MLPs act on it, so the earliest restorations need both paths.
+
 ## Reading a causal trace
 
 **Report recovery, not raw probability.** `(restored − corrupt) / (clean − corrupt)`
@@ -304,28 +374,31 @@ of the picture survive redrawing it:
 subject_curve = per_seed[:, :, SUBJECT].mean(-1)          # [seed, layer]
 last_curve = per_seed[:, :, -1]
 
+onsets = [int((c > 0.9).nonzero()[0]) for c in last_curve]
 print("early-site peak layer per seed:", [int(c.argmax()) for c in subject_curve])
-print("late-site  peak layer per seed:", [int(c.argmax()) for c in last_curve])
 print("early-site peak recovery:      ",
       " ".join(f"{float(c.max()):.2f}" for c in subject_curve))
+print("late site above 0.9 from layer:", onsets)
 
 # every seed puts the two sites on the correct sides of the model
 assert all(int(c.argmax()) < n_layers // 2 for c in subject_curve)
-assert all(int(c.argmax()) > n_layers // 2 for c in last_curve)
+assert all(onset > n_layers // 2 for onset in onsets)
 # but the exact early peak is not resolved by a single seed
 assert len({int(c.argmax()) for c in subject_curve}) > 1
 ```
 
 ```
-early-site peak layer per seed: [6, 6, 8, 10, 1, 3, 6, 6, 1, 1]
-late-site  peak layer per seed: [31, 31, 31, 31, 31, 35, 30, 31, 31, 35]
-early-site peak recovery:       0.47 0.70 0.59 0.78 0.70 0.47 0.62 0.52 0.53 0.52
+early-site peak layer per seed: [10, 5, 8, 10, 1, 3, 6, 6, 1, 1]
+early-site peak recovery:       0.45 0.69 0.58 0.76 0.68 0.44 0.62 0.53 0.52 0.50
+late site above 0.9 from layer: [26, 26, 26, 25, 26, 27, 26, 26, 26, 27]
 ```
 
 Every seed agrees on where the sites are and none of them agrees on the early
-peak, which ranges over layers 1–10 and over recoveries of 0.47 to 0.78. Report the
+peak, which ranges over layers 1–10 and over recoveries of 0.45 to 0.76. Report the
 site; do not report a layer index from a single seed as if the protocol resolved
-one. The exact indices shift a little between runs — bfloat16 arithmetic is not
+one. The late site has no peak to report at all: from layer 26 it is a
+plateau near 1.0, so a per-seed argmax there picks a layer at random. Report where
+it starts. The exact indices shift a little between runs — bfloat16 arithmetic is not
 reproducible across devices or batch shapes — which is the same point from the
 other side.
 
@@ -333,8 +406,32 @@ other side.
 position at the last block reproduces whichever run the donor came from, and
 restoring any non-final position at the last block cannot reach the last position's
 logits at all. Both hold for any donor, so neither is a check that the sweep is
-wired correctly. The control that can fail is restoring from the *corrupted* run's
-own states, which must leave the metric where it was.
+wired correctly. The control that can fail is restoring the *corrupted* run's own
+state, which must leave the metric where it was:
+
+<!-- test: gpu slow -->
+```python
+with model.trace(prompt):
+    model.model.embed_tokens.output[:, SUBJECT, :] += noises[0]
+    own_state = model.model.layers[peak_layer].output[:, peak_pos, :].detach().save()
+    unrestored = model.output.logits[0, -1].softmax(-1)[answer].detach().save()
+
+with model.trace(prompt):
+    model.model.embed_tokens.output[:, SUBJECT, :] += noises[0]
+    model.model.layers[peak_layer].output[:, peak_pos, :] = own_state
+    self_restored = model.output.logits[0, -1].softmax(-1)[answer].detach().save()
+
+print(f"restored with its own state: {float(self_restored):.5f}   unrestored: {float(unrestored):.5f}")
+assert abs(recovery(float(self_restored), 0)) < 0.01
+```
+
+```
+restored with its own state: 0.00038   unrestored: 0.00038
+```
+
+If this moves the metric, the restore itself is changing the run (a different
+noise draw, a write at the wrong position), and every cell of the grid carries
+that error.
 
 **Corruption must be at the embeddings.** Corrupting later layers conflates "the
 subject was unreadable" with "the computation was disturbed".
