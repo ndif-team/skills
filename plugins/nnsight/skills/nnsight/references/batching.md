@@ -102,6 +102,24 @@ print(a.shape[0], b.shape[0], whole.shape[0])       # 1 2 3
 print(torch.equal(torch.cat([a, b]), whole))        # True
 ```
 
+It sees the batch's **module values**. What a sibling invoke wrote into a saved
+container follows the parking rule ([below](#sharing-values-across-invokes)), so
+reading it before the empty invoke has touched a module raises `KeyError`:
+
+<!-- test: expect-error KeyError -->
+```python
+with model.trace() as tracer:
+    vals = nnsight.save({})
+    with tracer.invoke("The Eiffel Tower is in"):
+        vals["a"] = model.output.logits[0, -1]
+    with tracer.invoke():
+        doubled = (vals["a"] * 2).save()            # KeyError: 'a'
+```
+
+So compute a loss that spans invokes, such as a target loss plus a KL term on
+other prompts, **inside** the empty invoke from the module values, row by row
+(`model.output.logits[i, -1]`), and open its backward there too.
+
 ## Which values are scoped to your rows
 
 Scoping is decided by a value's **leading dimension**, not where it came from. A

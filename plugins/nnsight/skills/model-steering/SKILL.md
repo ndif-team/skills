@@ -1,6 +1,6 @@
 ---
 name: model-steering
-description: Change a model's behavior at inference time by adding a direction to its residual stream — contrastive activation addition, steering vectors, always-on steering via model.edit(), and function vectors extracted from in-context-learning prompts. Use to induce or suppress a behavior (sentiment, refusal, style, a task), to test whether a direction found by a probe is causal, or to keep a steering vector applied on every run (weight-level changes belong to model-editing-and-lora). Covers the two things that decide whether steering works: scaling the vector relative to the activation norm, and sweeping the coefficient to find the band where behavior changes before fluency collapses.
+description: "Change a model's behavior at inference time by adding a direction to its residual stream — contrastive activation addition, steering vectors, always-on steering via model.edit(), and function vectors extracted from in-context-learning prompts. Use to induce or suppress a behavior (sentiment, refusal, style, a task), to test whether a direction found by a probe is causal, or to keep a steering vector applied on every run (weight-level changes belong to model-editing-and-lora). Covers the two things that decide whether steering works: scaling the vector relative to the activation norm, and sweeping the coefficient to find the band where behavior changes before fluency collapses."
 ---
 
 # Model Steering

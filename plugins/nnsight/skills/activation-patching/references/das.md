@@ -66,7 +66,12 @@ three nulls before claiming a subspace:
 
 - **held-out prompts** — report transfer on pairs the direction was not trained on
 - **a random direction** trained the same way — if it does nearly as well, the
-  subspace claim is empty
+  subspace claim is empty. That is DAS with another seed, though, and it inherits
+  the optimizer's freedom. The cleaner null is untrained: shift the activation by
+  the *same per-pair magnitude* as the learned swap, `|delta @ unit|`, along a
+  random unit vector. On subject-number pairs that shift moved recovery by at most
+  0.08 at layers 7–11, where the real direction recovered 0.46–0.97 (the probing
+  skill's interchange runs it)
 - **an arbitrary target** — train the same subspace to emit an unrelated answer,
   or from a donor prompt that does not contain the fact. A subspace that can be
   pointed at any answer is not carrying this one

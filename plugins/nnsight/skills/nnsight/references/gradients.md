@@ -208,10 +208,17 @@ assert losses[0] > losses[-1] and direction.norm() > 0     # the vector is learn
 
 The model's own parameters are untouched — only `direction` receives updates.
 
-**Edit at the point you intercept.** Form does not matter: at the module you just
-read, `module.output = f(module.output)`, `module.output[:] = new_tensor` and
-`module.output += delta` all differentiate (a replacement built from nothing does
-not — [below](#replacements-and-the-graph)). Position matters. Reading a *later* module's output advances the
+**Replace, don't write through, when the new value is computed from the old.**
+`module.output = f(module.output)` and `module.output += delta` differentiate.
+`module.output[:] = f(module.output)` raises `RuntimeError: one of the variables
+needed for gradient computation has been modified by an inplace operation`
+whenever `f`'s backward needs the tensor being overwritten, as a LoRA's
+`hidden + lora(hidden)` does. `output[:] = output * 2` happens to pass because
+scaling by a constant saves nothing, so don't rely on it. A replacement built from
+nothing cuts the graph instead
+([below](#replacements-and-the-graph)).
+
+**Edit at the point you intercept.** Reading a *later* module's output advances the
 forward past the earlier one, and an in-place write after that point lands on a
 value the model has already consumed:
 
@@ -262,7 +269,8 @@ seen and cuts the graph there, with two different consequences:
   the forward bit-identical and the upstream gradient wrong, with no warning.
 
 `output[:] = 0` writes through the existing tensor and keeps the graph; so does any
-replacement built from the old value (`output * 0`, `output + steering`). A long
+replacement built from the old value (`output = output * 0`,
+`output = output + steering`). A long
 number where an error should name a module path means this happened; with no
 error, audit fresh-tensor replacements for a silently partial gradient.
 
