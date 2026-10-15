@@ -236,7 +236,7 @@ your threat model accordingly.
 - **No multi-tenancy.** All users share the same deployments and GPUs.
 - **No secret management.** Credentials are environment variables.
 - **No authentication on the backing services.** The dev compose publishes Redis,
-  Postgres, MinIO, InfluxDB, Loki, Prometheus, Grafana, the Ray dashboard and the
+  Postgres, RustFS, InfluxDB, Loki, Prometheus, Grafana, the Ray dashboard and the
   Ray client port on every interface.
 - **No test CI and no compatibility guarantees.** The workflows build and publish;
   none of them runs tests.
@@ -259,7 +259,7 @@ your threat model accordingly.
 | 9 | Head/worker split correct: `NDIF_RAY_HEAD_ADDRESS` on workers only | `ndif status` lists every GPU node |
 | 10 | 6385 / 8076 / 52366 open between nodes only; 6379, 5432, 10001, 8265, 9001 and the telemetry ports never public | a scan from outside shows only your TLS endpoint (and the object store, if public) |
 | 11 | TLS-terminating proxy in front of 8001; 8001 not directly exposed | `https://` endpoint answers `/ping` |
-| 12 | Persistent volumes for the HF cache, MinIO, Postgres, Loki, Influx, dashboard data | survives `just down` |
+| 12 | Persistent volumes for the HF cache, RustFS, Postgres, Loki, Influx, dashboard data | survives `just down` |
 | 13 | `HF_TOKEN` set on `ray` for gated checkpoints | the gated model deploys |
 | 14 | `NDIF_ENVIRONMENT` set to something other than `dev` | Grafana can separate this deployment |
 | 15 | `NDIF_DEFAULT_EXECUTION_TIMEOUT_SECONDS` set — **unset means no cap at all** | a runaway block stops holding its replica forever |

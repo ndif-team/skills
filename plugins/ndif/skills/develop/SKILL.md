@@ -15,7 +15,7 @@ way, by process.
 1. **One image, one service per container.** Every service is the same Docker
    image, whose `ENTRYPOINT` is the `ndif` CLI and whose default command is
    `start --foreground`. `NDIF_SERVICE` — one name, a space/comma list, or the
-   image default `all` (redis, minio, ray, api) — selects what that container
+   image default `all` (redis, rustfs, ray, api) — selects what that container
    runs. There is no per-service build.
 2. **The API process cannot talk to Ray.** Only the **dispatcher** — a separate
    process spawned by gunicorn's `on_starting` hook — holds a Ray client. Every

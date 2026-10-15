@@ -307,7 +307,7 @@ bodies: `docs/operating/dashboard.md`.
   nnsight, torch, transformers, ray, peft, accelerate, and `cuda` (the CUDA line
   the installed torch wheel was built for). `--write PATH` dumps it as JSON; the
   image runs exactly that at build time into `/etc/ndif/build.json`.
-- `ndif doctor` probes the *host*: Python, the `ray`/`redis-server`/`minio`
+- `ndif doctor` probes the *host*: Python, the `ray`/`redis-server`/`rustfs`
   binaries, a GPU visible to `nvidia-smi` and torch, and connectivity. Its
   Binaries section fails by design on a compose-only machine; the version and
   connectivity sections never set the exit code.
