@@ -9,8 +9,8 @@ three), `docker/README.md` (route 1, including the tag table),
 ## Route 1 — `docker run ndif/ndif`
 
 One container runs the whole request path. `NDIF_SERVICE` defaults to `all`,
-which resolves to **redis, minio, ray, api** — the image carries its own
-`redis-server` and `minio` binaries.
+which resolves to **redis, rustfs, ray, api** — the image carries its own
+`redis-server` and `rustfs` binaries.
 
 ```bash
 docker run -d --name ndif --gpus all --shm-size 4g \
@@ -51,17 +51,8 @@ with `~/.local/bin` on `PATH`).
 
 ```bash
 git clone https://github.com/ndif-team/ndif.git && cd ndif
-# fix the MinIO image first (below), then:
 just up
 ```
-
-**The pinned MinIO image is not currently pullable anonymously.** Both the
-compose `minio` service (`minio.image`) and the Dockerfile's MinIO build stage
-(`ARG MINIO_IMAGE`) name `quay.io/minio/minio:RELEASE...`, which returns
-401/denied from quay and from Docker Hub, so a fresh `just up` fails in the
-build. Before it, either point both at a MinIO image you can pull, or retag a
-copy you already have under the pinned name
-(`docker tag <cached-minio> quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z`).
 
 The first `just up` builds one image and runs it three times — as `api`, `ray`
 and `dashboard` — selected per container by `NDIF_SERVICE`. Expect ten minutes
@@ -78,7 +69,7 @@ or more, ~8 GB of image and ~8 GB of build cache under Docker's data root.
 
 What a fresh install runs into:
 
-- **Every port is published on `0.0.0.0`**, unauthenticated: the API, MinIO,
+- **Every port is published on `0.0.0.0`**, unauthenticated: the API, RustFS,
   the admin dashboard (dev mode, no login), the Ray dashboard, Grafana, and also
   Redis 6379, Postgres 5432, Loki, Influx, Prometheus and the Ray client port
   10001 — anyone who reaches Redis or 10001 runs code on the cluster. Edit each
@@ -143,7 +134,7 @@ build, and torch is deliberately not in `requirements.txt`. Without a checkout,
 
 ```bash
 ndif doctor
-ndif start                 # redis, minio, ray, api in dependency order, detached
+ndif start                 # redis, rustfs, ray, api in dependency order, detached
 ndif start dashboard       # opt-in; a bare `ndif start` never pulls it in
 ndif info                  # tracked PIDs + reachability of each endpoint
 ndif stop
@@ -152,15 +143,14 @@ ndif stop
 State lives under `NDIF_HOME` (`~/.ndif`). `ndif stop` only knows about
 processes it started.
 
-- **`ndif doctor` requires `redis-server` and `minio` on `PATH`,** and MinIO
-  publishes no standalone server binaries any more. Use
-  `conda install --override-channels -c conda-forge redis-server minio-server`.
-  The image the Dockerfile pins is not currently pullable anonymously; if you
-  have some MinIO image locally (or can pull one), lift the binary from it:
+- **`ndif doctor` requires `redis-server` and `rustfs` on `PATH`.**
+  `redis-server`: `conda install --override-channels -c conda-forge redis-server`.
+  `rustfs`: a release from https://github.com/rustfs/rustfs/releases (zip,
+  `.deb` or `.rpm`), or lift it from the image the Dockerfile pins:
 
   ```bash
-  cid=$(docker create <a-minio-image-you-have>)
-  docker cp "$cid:/usr/bin/minio" /usr/local/bin/minio && docker rm "$cid"
+  cid=$(docker create rustfs/rustfs:1.0.1)
+  docker cp "$cid:/usr/bin/rustfs" /usr/local/bin/rustfs && docker rm "$cid"
   ```
 
   With an existing S3-compatible store, point `NDIF_OBJECT_STORE_URL` at it and

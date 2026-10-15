@@ -45,7 +45,7 @@ still shares the actor's user, filesystem, network and GPUs).
 | `NDIF_RAY_HEAD_ADDRESS` | unset | Empty ⇒ this node starts a head. Every worker sets it to `HEAD:6385`. |
 | `NDIF_OBJECT_STORE_URL` | `http://localhost:9000` | The endpoint the *server* uploads through. Empty means real AWS S3. |
 | `NDIF_OBJECT_STORE_PUBLIC_URL` | empty → falls back to the above | The endpoint presigned URLs are **signed with**; must be the address clients reach, host and port exactly. |
-| `NDIF_OBJECT_STORE_ACCESS_KEY` / `_SECRET_KEY` | `minioadmin` / `minioadmin` | Real credentials — or both empty so boto3 uses its own chain. |
+| `NDIF_OBJECT_STORE_ACCESS_KEY` / `_SECRET_KEY` | `rustfsadmin` / `rustfsadmin` | Real credentials — or both empty so boto3 uses its own chain. |
 | `NDIF_POSTGRES_URL` | empty | Empty ⇒ no auth ⇒ every request trusted. |
 | `NDIF_MODEL_IMPORT_PATH` | in-process `ModelActor` in code; compose sets the legacy `NDIF_DEFAULT_MODEL_ACTOR_CLASS` to `SandboxModelActor` | Only a sandbox actor class runs untrusted code in a separate runner; auth alone does not. The image and a from-source install set neither. |
 | `NDIF_TP_MODEL_ACTOR_CLASS` | unset (tensor parallelism off) | If you turn TP on for untrusted traffic, use `ndif.services.ray.tp.model.SandboxedTPModelActor` — a TP placement swaps the actor class, and `TPModelActor` has no runner. |

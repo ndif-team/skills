@@ -15,7 +15,7 @@ about the *client's* code rather than the server belongs to the nnsight plugin's
 
 ```bash
 just ps                      # container status + health (compose), or `docker ps`
-just logs api                # follow one service: api | ray | dashboard | redis | minio
+just logs api                # follow one service: api | ray | dashboard | redis | rustfs
 curl -s localhost:8001/ping        # "pong" — only proves the web process is alive
 curl -i localhost:8001/connected   # 200 = Ray reachable, 503 = dispatcher reconnecting
 ndif status                        # what the controller thinks is deployed, and where
@@ -62,7 +62,7 @@ in that service's `start.sh` or its first import.
 
 | What the log shows | Cause |
 |---|---|
-| Nothing at all, the container never runs | A `depends_on: service_healthy` gate — `api` waits on four health checks (`redis`, `minio`, `postgres`, `influxdb`) even though it can run without the last two. Fix the unhealthy one or drop its `depends_on` entry |
+| Nothing at all, the container never runs | A `depends_on: service_healthy` gate — `api` waits on four health checks (`redis`, `rustfs`, `postgres`, `influxdb`) even though it can run without the last two. Fix the unhealthy one or drop its `depends_on` entry |
 | `ERROR: Cannot write to Ray temp directory` | `NDIF_RAY_TEMP_DIR` is not writable |
 | `validate_socket_filename failed: AF_UNIX path length cannot exceed 107 bytes` in the ray log | `NDIF_RAY_TEMP_DIR` is too long for Ray's socket paths; use a short one such as `/tmp/ndif-ray` |
 | `ndif start` said ✓ but `ndif info` says `stopped` | The service died after the 2 s liveness check; read `$NDIF_HOME/logs/<service>.log` |
@@ -177,7 +177,7 @@ A presigned URL signs the host, so it must carry the address the client hits:
 
 | Variable | Compose value | Role |
 |---|---|---|
-| `NDIF_OBJECT_STORE_URL` | `http://minio:9000` | what the **server** uploads through |
+| `NDIF_OBJECT_STORE_URL` | `http://rustfs:9000` | what the **server** uploads through |
 | `NDIF_OBJECT_STORE_PUBLIC_URL` | `http://localhost:9000` | what the client's GET is **signed with** — must be reachable **from the client** |
 
 Swap them and every large or non-blocking job completes and then fails to

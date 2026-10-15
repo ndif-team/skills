@@ -51,7 +51,7 @@ covers what turning them on changes.
 
 | Route | Command | Take it when |
 |---|---|---|
-| **1. Published image** | `docker run --gpus all ndif/ndif` | You want an NDIF, not a checkout. One container runs redis, minio, ray and the API. |
+| **1. Published image** | `docker run --gpus all ndif/ndif` | You want an NDIF, not a checkout. One container runs redis, rustfs, ray and the API. |
 | **2. Compose dev stack** | `just up` from a clone | You are changing NDIF, or want Postgres and the telemetry tier (Loki/Influx/Prometheus/Grafana) alongside. |
 | **3. From source** | `pip install "ndif[api,ray]"`, then `ndif start` | No Docker on the box, or you want the services as ordinary host processes. |
 
@@ -105,7 +105,7 @@ Every example here assumes the machine is yours. On a shared host:
   `-p 127.0.0.1:9100:9000 -e NDIF_OBJECT_STORE_PUBLIC_URL=http://localhost:9100`
   — moving 9000 always needs the public URL to follow it. Route 2 is below.
 - **Bind published ports to `127.0.0.1`.** The compose stack publishes Redis,
-  Postgres, MinIO, the Ray client port and the telemetry tier on every
+  Postgres, RustFS, the Ray client port and the telemetry tier on every
   interface, unauthenticated; anyone who reaches Redis or 10001 can run code on
   the cluster.
 
@@ -119,28 +119,20 @@ docker run -d --name ndif --gpus all --shm-size 4g \
 ```
 
 - **8001** is the API — the only port a client posts to.
-- **9000** is MinIO. Publish it: a result over the inline cap, and every
+- **9000** is RustFS. Publish it: a result over the inline cap, and every
   non-blocking result, comes back as a presigned URL the *client* fetches.
   Unpublished, those results complete server-side and then fail to download.
 - The **HF cache mount** is what makes weights survive `docker rm`; they land
   under `<cache>/hub/models--<org>--<name>`.
 - Serving gated checkpoints (Llama, Gemma)? Add `-e HF_TOKEN`.
 
-`NDIF_SERVICE` defaults to `all` — redis + minio + ray + api in one container.
+`NDIF_SERVICE` defaults to `all` — redis + rustfs + ray + api in one container.
 `NDIF_SERVICE="all dashboard"` adds the admin UI on 8081. Manage it through
 `docker exec ndif ndif <verb>` or over HTTP (`GET /status` is the same payload as
 `ndif status --json-output`). `docker stop ndif` is a clean shutdown; `docker rm`
 discards which models were HOT but not the weights.
 
 ## Route 2 — the compose dev stack
-
-**Check the MinIO image first.** The compose `minio` service and the
-Dockerfile's MinIO build stage both use a pinned
-`quay.io/minio/minio:RELEASE...` image that is not currently pullable
-anonymously (401/denied from quay and Docker Hub), so a fresh build stops there.
-Point compose's `minio.image` and the Dockerfile's `MINIO_IMAGE` build arg at a
-MinIO image you can pull or already have (`docker tag <cached> <pinned name>`
-works), before the first `just up`.
 
 ```bash
 git clone https://github.com/ndif-team/ndif.git && cd ndif
@@ -149,7 +141,7 @@ just ps            # container status and health
 just logs ray      # follow one service; Ctrl-C detaches without stopping it
 ```
 
-Ten containers: redis, minio, api, ray (required), postgres and influxdb
+Ten containers: redis, rustfs, api, ray (required), postgres and influxdb
 (health-gated — the API waits on them but uses neither unless configured), loki,
 prometheus, grafana, dashboard. `docs/operating/compose-stack.md` reads them
 service by service. What a fresh install runs into:
@@ -209,15 +201,14 @@ Full procedure: `docs/developing/nnsight-integration.md#developing-against-a-loc
 pip install torch --index-url https://download.pytorch.org/whl/cu126   # FIRST — match your driver
 pip install "ndif[api,ray]"                       # add metrics,postgres,dashboard as needed
 ndif doctor        # versions, binaries, GPU, connectivity — read this before starting
-ndif start         # redis, minio, ray, api — detached, PID files under ~/.ndif
+ndif start         # redis, rustfs, ray, api — detached, PID files under ~/.ndif
 ndif info
 ndif stop
 ```
 
 torch first: with no wheel present pip takes PyPI's default, the CUDA 13 build.
-Route-specific traps — the MinIO binary (none is published standalone, and the
-pinned image is not currently pullable anonymously; conda-forge's
-`minio-server` works),
+Route-specific traps — the `rustfs` binary (a GitHub release, or lifted from the
+pinned image),
 a temp dir too long for AF_UNIX sockets, and what a ✓ from `ndif start` does not
 prove — are in [references/routes.md](references/routes.md).
 
