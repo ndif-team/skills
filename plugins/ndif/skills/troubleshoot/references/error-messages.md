@@ -17,9 +17,13 @@ failures are deliberately sentences: every frame at that point is server-side.
 
 **Read a traceback from the bottom.** Only nnsight's frames (and those of the
 actor's own `format_error` file) are stripped, so asyncio, Ray, NDIF and
-torch/transformers frames still come *before* the user's lines. Judge by the last
-frames: the user's code is a user error; **a traceback whose last frames are
-greenlet/threading or NDIF paths is a server fault**.
+torch/transformers frames still come *before* the user's lines. A traceback whose
+last frame is the user's own line is a user error — their code raised there, and
+the fix is in that line. A traceback ending in NDIF paths is a server fault. **The
+cross-thread failure is identified by its message, not its frames**:
+`ValueError: Cannot switch to a different thread` or
+`ValueError: parent cannot be on a different thread` is a server fault even though
+the last frames are ordinary torch/transformers lines.
 
 Nearly everything reaches the user as `RemoteError`, which carries no structure —
 the *text* is the diagnostic.
@@ -58,7 +62,7 @@ compares major.minor only.
 
 Neither is fatal to the replica.
 
-**Every remote `.save()` failing with `AttributeError`** is the server's nnsight
+**Every remote `.save()` failing with `AttributeError: 'Tensor' object has no attribute 'save'`** is the server's nnsight
 lacking its compiled `nnsight._c` extension — the published wheels ship it; an
 sdist install with no compiler, or an unbuilt checkout bind-mounted into the
 container, does not.
@@ -71,9 +75,9 @@ container, does not.
 | `OutOfOrderError: '<location>' was requested but the model already ran past it` | User: modules accessed out of forward-pass order |
 | `ValueError: A barrier was never reached by every block it waits for…` | User: a `tracer.barrier(n)` whose `n` exceeds the blocks that call it |
 | `Your job exceeded the execution timeout of Ns.` | **There is no default** — only emitted when a timeout is configured |
-| `Request cancelled by operator.` | `ndif kill`. Queued: removed. Executing: errored and its dispatch cancelled — a blocking client shows this first `ERROR` with an **empty description** — while the actor runs the block to completion. The replica must be restarted before it takes new work (`operate` skill, "Killing a request") |
-| `Replica was evicted while processing your request.` | The worker task was cancelled mid-dispatch. After a kill or a purge it arrives **second**: a blocking client has already raised; a non-blocking job's stored response shows it until the still-running actor's own final response (`COMPLETED` or an `ERROR`) overwrites it. An ordinary eviction re-queues instead |
-| A traceback ending in greenlet/threading frames: `ValueError: Cannot switch to a different thread` or `… parent cannot be on a different thread` | **Server**: new work was dispatched to a replica whose killed block is still running. Restart the replica, then retry |
+| `Request cancelled by operator.` | `ndif kill`. Queued: removed. Executing: its dispatch cancelled while the actor runs the block to completion. A **blocking** client gets this as its one `ERROR`, with an **empty description** line; the log shows one `ndif.request` ERROR and a `ndif.queue.replica` WARNING `request errored: cancelled mid-dispatch`. Restart the replica only while the block still runs (`operate` skill, "Killing a request") |
+| `Replica was evicted while processing your request.` | The worker task was cancelled mid-dispatch. After a kill, this is what a **non-blocking** client raises; its stored response shows it until the actor's own final response overwrites it (often `COMPLETED`). It is not a second status for a blocking client. An ordinary eviction re-queues instead |
+| `ValueError: Cannot switch to a different thread` or `ValueError: parent cannot be on a different thread` — the last frames are ordinary torch/transformers lines | **Server**: new work was dispatched to a replica whose killed block is still running. Restart the replica, then retry; once the killed block has finished, no restart is needed |
 | `Error starting model.` / `Error provisioning model.` | The controller could not place or ready a replica **and did not say why**; the traceback is in the API log under `ndif.queue.processor`. Every queued request for the model gets it at once. Right after `ray` is recreated it is instead the API's stale compute connection (`ConnectionError` in the log), and the next request may 503 |
 | `Could not deploy this model. <reason>` | The controller refused and explained: a mistyped `repo_id`, a gated repo, or `CANT_ACCOMMODATE`. "Try again later" is wrong advice for all three |
 | `Error submitting request to model deployment.` | The Ray call to the actor raised something that is not an eviction. If the logged class is `ActorUnavailableError`, the actor is restarting after a fatal CUDA error and the worker waits for it — retry |
@@ -132,13 +136,15 @@ index error naming the limit (gpt2: 1024 positions).
 These poison the process's CUDA context permanently, so the actor restarts
 itself and Ray brings it back with a reload, costing every other user of that
 model a load cycle. The triggering request is still a user error and still gets
-its traceback.
+its traceback. No operator action is needed: `ndif status` keeps showing the
+replica HOT through the restart, and the next request works.
 
 ## After `COMPLETED`: download failures
 
-`data` is either the result itself (a blocking result at or under the inline cap,
-8 MiB on stock redis:7) or a presigned URL the client fetches — for anything over
-the cap and for **every non-blocking job**.
+`data` is either the result itself (a blocking result whose **compressed blob** is
+at or under the inline cap, 8 MiB on stock redis:7 — a 7.5 MiB blob goes inline,
+a 9 MiB one by URL) or a presigned URL the client fetches — for anything over the
+cap and for **every non-blocking job**.
 
 | Text the user sees | Whose fault | Fix |
 |---|---|---|

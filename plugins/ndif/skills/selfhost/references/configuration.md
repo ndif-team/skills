@@ -33,7 +33,8 @@ environment edit takes `just up <svc>`; `just restart` keeps the old environment
 exports its Redis, object-store, Loki and Influx settings into each actor's Ray
 `runtime_env`. The sandbox runner is the opposite: it starts from an allowlist,
 so `HF_TOKEN`, `NDIF_POSTGRES_URL` and the object-store credentials are not
-inherited by a sandboxed block.
+inherited by a sandboxed block (an environment allowlist, not a jail: the runner
+still shares the actor's user, filesystem, network and GPUs).
 
 ## What must change to leave single-host
 
@@ -54,8 +55,15 @@ inherited by a sandboxed block.
 | `NDIF_DEFAULT_EXECUTION_TIMEOUT_SECONDS` | unset — no cap | A runaway block otherwise holds its replica indefinitely. |
 
 The actor class is the row that bites: a bare `pip install` plus `ndif start`
-does **not** run the same execution path as `just up`.
+does **not** run the same execution path as `just up`. The sandboxed path is
+process separation, not a hardened jail — the runner shares the actor's user,
+filesystem, network and GPUs — and what it guarantees is that untrusted
+requests cannot read or edit weights or train.
 `docs/operating/production.md#the-sandboxed-actor-class`.
+
+**If 9000 is remapped** on the host (a shared box), set
+`NDIF_OBJECT_STORE_PUBLIC_URL` to the new host port on **both** `api` and `ray`;
+each signs presigned URLs.
 
 ## What persists
 

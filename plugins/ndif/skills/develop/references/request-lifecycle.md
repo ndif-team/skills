@@ -24,8 +24,11 @@ Source of record: `docs/concepts/request-lifecycle.md` (the keystone),
 | 10 — download | presigned URL signed for the wrong host | `COMPLETED`, then a client-side download failure |
 | 10 | near-cap inline results published to a subscriber that is not draining | about three reach Redis's hard pubsub limit, the subscriber is dropped, and `COMPLETED` never arrives |
 
-On a cold start the processor is already provisioning when it replies, so the
-first status is `PROVISIONING`, not `QUEUED`.
+`RECEIVED` always arrives first, over HTTP. On a cold start the processor is
+already provisioning when it replies, so the first **websocket** status is
+`PROVISIONING`, not `QUEUED`. The full cold sequence is `RECEIVED` →
+`PROVISIONING` → `DEPLOYING` → `QUEUED` ("Moved to position N") → `DISPATCHED` →
+`RUNNING` → `COMPLETED`.
 
 ## The queue objects
 
@@ -70,8 +73,11 @@ result back, publishes exactly one `COMPLETED` or `ERROR`, and restores state in
 `finally`. The result route: a blocking request's blob at or under
 `RedisProvider.max_publish_bytes` (`min(soft, hard // 2)` of Redis's pubsub
 limits; 8 MiB on stock Redis; raise Redis's limits to raise it) rides on
-`COMPLETED`, otherwise it is uploaded and presigned. The published frame is up
-to ~1.5x the compressed blob. The seven obligations a custom actor keeps are in
+`COMPLETED`, otherwise it is uploaded and presigned. The cap is checked against
+the **compressed blob** (a 7.5 MiB blob goes inline, a 9 MiB one by URL on the
+stock cap). The published frame is up to ~1.5x that blob, which sets how fast
+undrained results fill Redis's pubsub buffer toward the hard limit — not where
+the inline/URL boundary sits. The seven obligations a custom actor keeps are in
 [extending.md](extending.md#the-contract).
 
 `cancel()`'s `reason` matters: unset means "genuinely cancelled" and the user is

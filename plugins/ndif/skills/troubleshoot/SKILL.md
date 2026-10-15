@@ -1,6 +1,6 @@
 ---
 name: troubleshoot
-description: Diagnose a self-hosted NDIF that is broken — container won't start, no GPU, 503 "compute backend is reconnecting", requests that hang in QUEUED or DEPLOYING, CANT_ACCOMMODATE, CUDA out of memory on deploy or inside a block, "COMPLETED but the client can't download", "The model architecture on this server doesn't match", "Your request payload could not be read", "Cannot switch to a different thread", "Starting Ray client server failed", code changes with no effect, a blank dashboard, empty Grafana panels. Use when someone pastes an NDIF server log, an nnsight RemoteError from their own deployment, or asks where NDIF's logs are, how to read `ndif queue`, or how to reconstruct a failed request. For the public ndif.us service use the nnsight plugin's `remote` skill instead.
+description: Diagnose a self-hosted NDIF that is broken — container won't start, no GPU, 503 "compute backend is reconnecting", requests that hang in QUEUED or DEPLOYING, CANT_ACCOMMODATE, CUDA out of memory on deploy or inside a block, "COMPLETED but the client can't download", "The model architecture on this server doesn't match", "Your request payload could not be read", "Cannot switch to a different thread" / "parent cannot be on a different thread", "Starting Ray client server failed", code changes with no effect, a blank dashboard, empty Grafana panels. Use when someone pastes an NDIF server log, an nnsight RemoteError from their own deployment, or asks where NDIF's logs are, how to read `ndif queue`, or how to reconstruct a failed request. For the public ndif.us service use the nnsight plugin's `remote` skill instead.
 ---
 
 # Troubleshooting a self-hosted NDIF
@@ -38,12 +38,14 @@ page are a client and a server disagreeing about nnsight, transformers or torch.
 | `/connected` says `reconnecting`, api logs `Error connecting to Ray` once a second | [Ray is still booting — or is not](#ray-is-still-booting--or-is-not) |
 | `/ping` 200 but every request hangs; `redis-cli llen queue` growing | [Healthy API, dead dispatcher](#healthy-api-dead-dispatcher) |
 | A request sits in `QUEUED` / `PROVISIONING` / `DEPLOYING` for ages | [Stuck requests](#stuck-requests) |
-| Requests fail right after an `ndif kill`, greenlet `ValueError: Cannot switch to a different thread` | [Stuck requests](#stuck-requests) — restart the replica |
+| Requests fail right after an `ndif kill` with `ValueError: Cannot switch to a different thread` or `ValueError: parent cannot be on a different thread` (last frames ordinary torch/transformers lines) | [Stuck requests](#stuck-requests) — restart the replica while the killed block still runs |
+| `RemoteError` whose traceback ends in **your own** line | User code raised there — reading a traceback from the bottom, in [references/error-messages.md](references/error-messages.md#rules-that-do-most-of-the-triage) |
+| `device-side assert triggered` / `an illegal memory access was encountered` | [The two fatal CUDA errors](references/error-messages.md#the-two-fatal-cuda-errors) — the actor restarts itself, status stays HOT, the next request works |
 | `CANT_ACCOMMODATE`, `CUDA out of memory`, a replica cycling `RUNNING` → `UNHEALTHY` | [OOM on deploy vs OOM in a block](#oom-on-deploy-vs-oom-in-a-block) |
 | The first request after `just up ray` errors `Error starting model.` | [OOM on deploy vs OOM in a block](#oom-on-deploy-vs-oom-in-a-block) — not an OOM |
 | Job reaches `COMPLETED`, then the client fails to download | [COMPLETED but no result](#completed-but-no-result) |
 | `The model architecture on this server doesn't match...` / `Your request payload could not be read (...)` | [Version mismatch](#version-mismatch) |
-| Every remote `.save()` fails with `AttributeError` | [Version mismatch](#version-mismatch) — the `nnsight._c` extension |
+| Every remote `.save()` fails with `AttributeError: 'Tensor' object has no attribute 'save'` | [Version mismatch](#version-mismatch) — the `nnsight._c` extension |
 | `Starting Ray client server failed` after ~40 s, from `ndif status` or the dashboard | [Ray client server failed](#ray-client-server-failed) |
 | A code change or an env edit has no effect | [The stale image](#the-stale-image) |
 | Every API key suddenly 403s | Postgres lost its anonymous volume on `just down` / `just ta`; re-insert the keys (`operate` skill, production reference) |
@@ -129,10 +131,13 @@ request id to root cause (`docs/runbooks/debug-a-stuck-request.md`).
 
 **Unsticking one is the `operate` skill's "Killing a request".** What bites here:
 `ndif kill` on an *executing* request cancels only the dispatch — the actor runs
-the block to completion — so **restart the replica**
-(`ndif restart <checkpoint> --replica <id>`) before it takes new work, or that work
-fails with a greenlet `ValueError` (`Cannot switch to a different thread`). A
-wedged replica gets the same restart.
+the block to completion. **While that block still runs**, work dispatched to the
+replica fails with `ValueError: Cannot switch to a different thread` or
+`ValueError: parent cannot be on a different thread` (the message is the tell; the
+last frames are ordinary torch/transformers lines), so restart it:
+`ndif restart <checkpoint> --replica <id>`. Once the block finishes on its own
+(Loki `{service="model"} |= "<request id>"` shows `Your job has been completed.`)
+the next request is clean with no restart. A wedged replica gets the same restart.
 
 ## OOM on deploy vs OOM in a block
 
@@ -164,7 +169,10 @@ response over Redis pub/sub; a larger one — and **every non-blocking result** 
 uploaded, and the client downloads a presigned URL. The cap is
 `RedisProvider.max_publish_bytes`, `min(soft, hard // 2)` of Redis's
 `client-output-buffer-limit pubsub`: **8 MiB on stock redis:7**, no env var (raise
-the Redis limits to raise it); the published frame is ~1.5× the compressed blob.
+the Redis limits to raise it). The cap is checked against the **compressed blob**
+(a 7.5 MiB blob goes inline, a 9 MiB one by URL). The published frame is ~1.5×
+that blob, which sets how fast undrained results fill the Redis buffer toward its
+hard limit — not where the inline/URL boundary sits.
 A presigned URL signs the host, so it must carry the address the client hits:
 
 | Variable | Compose value | Role |
@@ -202,7 +210,7 @@ counts as unset, so changing either needs `just up api`, not `just restart api`.
 An nnsight installed from a source tree sends an **empty** version, which with a
 minimum configured is a 400 `Client nnsight version was not provided.`
 
-**Every remote `.save()` failing with `AttributeError`** is the server's nnsight
+**Every remote `.save()` failing with `AttributeError: 'Tensor' object has no attribute 'save'`** is the server's nnsight
 missing its compiled `nnsight._c` extension. The published wheels ship it; an
 sdist install with no compiler silently skips it, and a fresh nnsight checkout
 bind-mounted over the image has none until it is built in place

@@ -184,10 +184,14 @@ runner process, which is a real stop.
 **Step 7 — unstick it.** Queued: `ndif kill <id>` removes it and the user gets
 `ERROR` "Request cancelled by operator." Executing: `ndif kill <id>` errors the
 request and cancels only the dispatch — the actor keeps running the block to
-completion — so follow it with `ndif restart <checkpoint> --replica <id>` (the id
-from the `⚙` line of `ndif queue`) **before the replica takes new work**, or that
-work fails with `ValueError: Cannot switch to a different thread`. Requests sent
-to the replica during the restart are re-queued or errored. A wedged replica with
+completion. **While that block is still running**, new work dispatched to the
+replica fails with `ValueError: Cannot switch to a different thread` or
+`ValueError: parent cannot be on a different thread`, so restart it:
+`ndif restart <checkpoint> --replica <id>` (the id from the `⚙` line of
+`ndif queue`). Once the block finishes on its own —
+`{service="model"} |= "<request id>"` shows `Your job has been completed.` — the
+next request is clean with no restart. Requests sent to the replica during a
+restart are re-queued or errored. A wedged replica with
 no single culprit gets the same restart; if `ndif restart` cannot get the actor
 handle, the actor is dead for good. Exact-key variants: the `operate` skill's CLI
 reference, and `docs/runbooks/debug-a-stuck-request.md` step 8.
@@ -241,20 +245,25 @@ The **last stage reached** localizes the failure:
 | `running` | execution failed — the interesting case |
 
 **Decide whose fault it is.** *A traceback ending in their lines means their
-code; one of a handful of fixed English sentences — or a traceback whose last
-frames are greenlet/threading or NDIF paths — means ours.* The runner (or the
+code; one of a handful of fixed English sentences, a traceback whose last frames
+are NDIF paths, or the message `ValueError: Cannot switch to a different thread` /
+`ValueError: parent cannot be on a different thread` means ours.* The
+cross-thread messages are the tell — their last frames are ordinary
+torch/transformers lines. The runner (or the
 actor) formats the traceback where it is live — tracebacks do not survive
 cloudpickle — and ships the text. On the trusted path `format_error` strips only
 nnsight's frames and those of its own file, so asyncio, Ray, other NDIF wrapper
 frames and torch/transformers frames still come before the user's lines: **read
 it from the bottom**.
 
-**A killed job** leaves two `ERROR`s in a row — `Request cancelled by operator.`
-then the eviction sentence — and the actor keeps running. A blocking client raised
-on the first, with an empty description. A non-blocking job's
-`responses/{id}.json` shows the eviction sentence until the actor's own final
-response (`COMPLETED`, or an `ERROR` with a traceback) overwrites it, so a killed
-job can later read `COMPLETED`.
+**A killed job** keeps running in the actor. For a blocking client the log shows
+one `ndif.request` ERROR (`Request cancelled by operator.`; the client's
+description line is empty) plus a `ndif.queue.replica` WARNING
+`request errored: cancelled mid-dispatch` — the eviction sentence is not a second
+status. A non-blocking client raises `Replica was evicted while processing your
+request.`, and its `responses/{id}.json` shows that until the actor's own final
+response overwrites it — often `COMPLETED`, so a killed job can later read
+`COMPLETED`.
 
 **A preempted job** (demoted HOT→WARM mid-run) records `execution_time` with the
 status tag `preempted` and re-runs; the user saw a second `QUEUED`, not an error.

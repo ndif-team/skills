@@ -78,8 +78,9 @@ timeout — normally as `initialization failed - <error>`. If the CLI is still
 waiting minutes after the controller log shows `failed during create`, the actor
 is already gone; interrupt it and read the log.
 
-Per-model status ends `READY`, `PARTIAL` (some replicas failed) or `ERROR`;
-evictions the controller performed to make room are listed at the end.
+Each model gets one status line, e.g. `✓ <model_key> [b7f60]: ready` (the
+bracket is the replica id), or a `✗` line with the error; evictions the
+controller performed to make room are listed at the end.
 
 ### `trusted` on a deploy
 
@@ -107,6 +108,21 @@ pass is used as-is *and* decides which live replica counts as a match to copy th
 rest from, so `ndif scale gpt2 --gpus 1` copies the single-GPU replica rather than
 a sharded one. With nothing running there is nothing to copy and it behaves as a
 plain deploy.
+
+When a WARM replica of the key exists, `scale` re-promotes it under its old
+replica id and settings rather than placing a fresh one. `pinned` is not copied
+on this path — it defaults to false — so `scale` is not a way to pin.
+
+### Pinning a model already deployed
+
+`pinned` is set only when a replica is created, and `deploy --pinned` is
+additive: it places a second, pinned replica beside the unpinned one. To pin in
+place:
+
+```bash
+ndif deploy <checkpoint> --pinned            # new pinned replica
+ndif evict <checkpoint> --replica <old_id>   # drop the unpinned one
+```
 
 ## `ndif evict`
 
@@ -141,7 +157,7 @@ ndif restart CHECKPOINT [--revision REV] [--task TASK] [--replica ID] [--ray-add
 Kills each replica's actor with `no_restart=False` and waits for Ray to respawn
 it (`max_restarts=-1`) and reload the weights. Use it to drop cached state,
 reload weights, recover a wedged replica, or clean up after `ndif kill` of an
-executing request, without giving up its GPU placement. Requests sent to that
+executing request whose block is still running, without giving up its GPU placement. Requests sent to that
 replica during the restart are re-queued or errored. It sends **no** reconcile
 event. `✗ <model_key>: no HOT replicas to restart` also exits 0. Unrelated to
 `ndif start --restart`, which restarts local *services*.
@@ -178,17 +194,17 @@ ndif export (-f FILE | --stdout) [--ray-address ADDR]
 Collapses the current HOT per-replica list into one entry per model key and
 writes a `models.yaml` you can feed back to `ndif deploy -f`. Each entry carries
 the full `model_key` (task and envoy class included, used verbatim on redeploy)
-plus `revision`, `pinned`, `replicas`, `trusted`, `dtype`,
-`execution_timeout_seconds`, `gpus` (when more than one) and `actor_class` —
-**only where they differ from the defaults**.
+plus `dtype` and `actor_class`, **always written**, and `revision`, `pinned`,
+`replicas`, `trusted`, `execution_timeout_seconds` and `gpus` (when more than
+one) **only where they differ from the defaults**.
 
 What it loses:
 
 - **`padding_factor`, `padding_bias`, `size_bytes` and `max_tp`** — deploy-time
   sizing inputs never stored on the deployment. A restored model is re-sized from
   the cluster defaults unless you add them back.
-- **Per-replica differences** — replicas of one key with different settings (one
-  pinned, one not) are merged into one entry.
+- **Per-replica differences** — replicas of one key with different settings are
+  merged into one entry; if any replica was pinned, the entry is `pinned: true`.
 
 So run `ndif status --json-output` first and keep it beside the file. `-f`
 writes where the CLI runs — inside the `ray` container on compose — so use
@@ -204,27 +220,38 @@ ndif kill REQUEST_ID [--redis-url URL]
 `queue` snapshots every live Processor: lifecycle status (`uninitialized`,
 `provisioning`, `deploying`, `ready`, `cancelled`), the replicas in its pool and
 whether each is busy (`⚙ [replica] executing <request> (for 0:00:07)`), queue
-depth, and the first few queued request ids. **A model with no in-flight work
-has no Processor**, so an idle cluster prints `No active processors.` even with
-HOT deployments.
+depth, and the first few queued request ids. A Processor is created by the
+first request for a model and **persists when idle**, so a model with nothing in
+flight still shows a `ready` processor with an empty queue; a model never
+requested since the API started has none. After an eviction a processor can
+show a stale `Replicas: N` for a while — the pool drops evicted replicas lazily,
+on its next dispatch.
 
 `kill` first scans every Processor's queue:
 
 - **Still queued** — removed; the client gets `ERROR` "Request cancelled by
   operator." The CLI prints `✓ Request <id> removed from the queue.`
-- **Executing** — the CLI prints `✓ Request <id> cancelled while executing.` The
-  client gets the same `ERROR` (a blocking client shows an empty description),
-  then `Replica was evicted while processing your request.` second. Only the
-  **dispatch** is cancelled: the model actor is not interrupted and runs the block
-  to completion, and a non-blocking job's stored response is later overwritten by
-  the actor's own final response (`COMPLETED`, or an `ERROR`).
+- **Executing** — the CLI prints `✓ Request <id> cancelled while executing.`
+  Only the **dispatch** is cancelled: the model actor is not interrupted and runs
+  the block to completion.
+  - A **blocking** client gets one `ERROR` status, "Request cancelled by
+    operator.", with an empty description line. The log shows one
+    `ndif.request` ERROR and a `ndif.queue.replica` WARNING
+    `request errored: cancelled mid-dispatch`.
+  - A **non-blocking** client raises
+    `Replica was evicted while processing your request.`; the stored response
+    shows that until the actor's own final response overwrites it (often
+    `COMPLETED`).
 - **Unknown id** — exits non-zero with a pointer to `ndif queue`.
 
-After killing an executing request, **restart the replica before it takes new
-work** (`ndif restart <checkpoint> --replica <id>`, the id from the `⚙` line):
-the processor can hand the same replica new work while the killed block still
-runs, and that work fails with greenlet errors
-(`ValueError: Cannot switch to a different thread`).
+While the killed block is still running, the processor can hand the same
+replica new work, and that work fails with
+`ValueError: Cannot switch to a different thread` or
+`ValueError: parent cannot be on a different thread` — so **restart the replica
+while the block runs** (`ndif restart <checkpoint> --replica <id>`, the id from
+the `⚙` line). Once the block finishes on its own — Loki
+`{service="model"} |= "<request id>"` shows `Your job has been completed.` —
+the next request is clean with no restart.
 
 Both are Redis-stream round trips with a 5 s timeout.
 `No response from the dispatcher` means the API is down, not Redis — or that the
@@ -264,7 +291,9 @@ curl -s -b jar -H 'content-type: application/json' $D/api/deployments/deploy \
   -d '{"checkpoint":"<repo_id>","model_key":"<model_key>","trusted":false}'
 ```
 
-`replica` is optional on evict and restart. A dashboard deploy defaults to
+`replica` is optional on evict and restart. An unknown replica still returns
+HTTP 200: the `✗` line is inside the response body's `logs[]`, so check the
+body, not the status code. A dashboard deploy defaults to
 `trusted: true`; send `false` unless you mean `trust_remote_code`. Endpoint
 bodies: `docs/operating/dashboard.md`.
 

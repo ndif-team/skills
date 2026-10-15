@@ -60,9 +60,11 @@ ndif kill <request_id>           # see "Killing a request" below
 ndif env                         # the cluster's python + packages (vs `--local`)
 ```
 
-`ndif queue` lists a model only while it has work in flight; `ndif status` is the
-readiness surface. Every flag: [references/cli-commands.md](references/cli-commands.md),
-`docs/operating/cli.md`.
+`ndif queue` lists a model once a request has created its processor, and the
+processor stays listed when idle; its `Replicas: N` can lag an eviction until
+the next dispatch. `ndif status` is the readiness surface. A deploy prints one
+line per model, `✓ <model_key> [b7f60]: ready`. Every flag:
+[references/cli-commands.md](references/cli-commands.md), `docs/operating/cli.md`.
 
 **`deploy` vs `scale`.** Both are additive; `deploy` takes unspecified settings
 from the controller's defaults, `scale` copies a live replica — so `scale` a
@@ -111,10 +113,12 @@ Other fields: `revision`, `trusted`, `padding_factor`, `padding_bias`, `max_tp`,
 `envoy_class`, `model_key`; unknown keys are silently dropped. `--sync` evicts
 every HOT key not in the file, trims surplus replicas, and deploys the shortfall.
 
-**`ndif export` is not a full snapshot.** It writes only non-default fields,
-drops `padding_factor`, `padding_bias`, `size_bytes` and `max_tp` (never stored on
-the deployment, so a restore is re-sized from cluster defaults), and merges
-replicas of one key that differ. Save `ndif status --json-output` first.
+**`ndif export` is not a full snapshot.** It always writes `dtype` and
+`actor_class` but other fields only where non-default, drops `padding_factor`,
+`padding_bias`, `size_bytes` and `max_tp` (never stored on the deployment, so a
+restore is re-sized from cluster defaults), and merges replicas of one key that
+differ — one pinned replica makes the whole entry `pinned: true`. Save
+`ndif status --json-output` first.
 
 ## Sizing in one paragraph
 
@@ -160,6 +164,13 @@ makes a deploy on a full cluster come back `CANT_ACCOMMODATE` because the occupa
 landed 40 minutes ago — deploy the incoming model `--pinned`, evict the occupant,
 or lower the variable.
 
+**Pinning a model already deployed.** `pinned` is set only when a replica is
+created, and deploy is additive: `ndif deploy <ckpt> --pinned` adds a second,
+pinned replica beside the old one. To pin in place, deploy `--pinned`, then
+`ndif evict <ckpt> --replica <old id>`. `ndif scale` will not do it — it
+re-promotes an existing WARM replica under its old id and settings, and
+`pinned` is not copied (it defaults to false on that path).
+
 **Changing a controller variable** (that one, the padding defaults, the actor
 class) means editing the `ray` service's `environment:` and `just up ray` — not
 `just restart ray` (old environment), not `just ta ray` (whole stack down). It is
@@ -176,18 +187,23 @@ when the *head of the queue* has waited past `NDIF_AUTOSCALING_WAIT_THRESHOLD_S`
 HTTP). What it does depends on where the request is:
 
 - **Queued** — removed; the client gets `ERROR` "Request cancelled by operator."
-- **Executing** — the client gets the same `ERROR` (a blocking client shows an
-  empty description), then the eviction sentence second, and only the
-  **dispatch** is cancelled. The actor is not interrupted: it runs the block to
-  completion, holding its GPU memory. A killed non-blocking job's stored response
-  is later overwritten by the actor's own final response (`COMPLETED`, or an
-  `ERROR`).
+- **Executing** — only the **dispatch** is cancelled. A blocking client gets one
+  `ERROR`, "Request cancelled by operator." with an empty description line; the
+  log shows one `ndif.request` ERROR plus a `ndif.queue.replica` WARNING
+  `request errored: cancelled mid-dispatch`. A non-blocking client raises
+  `Replica was evicted while processing your request.`, and its stored response
+  shows that until the actor's own final response overwrites it (often
+  `COMPLETED`). The actor is not interrupted: it runs the block to completion,
+  holding its GPU memory.
 
-**Restart the replica before it takes new work**:
+**Restart the replica only while the killed block is still running**:
 `ndif restart <checkpoint> --replica <id>` (the id is on the `⚙` line of
-`ndif queue`). Work dispatched to an actor whose killed block is still running
-fails with greenlet errors (`Cannot switch to a different thread`). Requests sent
-to that replica during the restart are re-queued or errored.
+`ndif queue`). Work dispatched to it meanwhile fails with
+`ValueError: Cannot switch to a different thread` or
+`ValueError: parent cannot be on a different thread`. Once the block finishes
+on its own — Loki `{service="model"} |= "<request id>"` shows
+`Your job has been completed.` — the next request is clean with no restart.
+Requests sent to a replica during its restart are re-queued or errored.
 `No response from the dispatcher` means the API is down — or restarted under
 five seconds ago.
 
@@ -197,7 +213,9 @@ inferred task's key. For any other key, pass the `model_key` from
 `ndif.cli.lib.evict.evict`, or POST the dashboard's `/api/deployments/{evict,
 restart}` (`{model_key, replica}`) or `/api/deployments/deploy`
 (`{checkpoint, model_key?, trusted}`) — recipes in
-[references/cli-commands.md](references/cli-commands.md).
+[references/cli-commands.md](references/cli-commands.md). An unknown replica
+still returns HTTP 200, with the `✗` line inside the response's `logs[]`: check
+the body, not the status code.
 
 ## The dashboard
 

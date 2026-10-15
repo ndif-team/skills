@@ -100,7 +100,10 @@ Each hop in full, with its code: `docs/concepts/request-lifecycle.md`.
 4. **Dispatcher pops** (`BRPOP` plus a non-blocking drain) and routes by
    `model_key` to a lazily created `Processor`.
 5. **Processor queues and provisions.** With a replica serving the reply is
-   `QUEUED`; on a cold start it is `PROVISIONING`, then `DEPLOYING`.
+   `QUEUED`; on a cold start it is `PROVISIONING`, then `DEPLOYING`, then
+   `QUEUED` ("Moved to position N") once the replica is ready. A cold request's
+   full sequence is `RECEIVED` → `PROVISIONING` → `DEPLOYING` → `QUEUED` →
+   `DISPATCHED` → `RUNNING` → `COMPLETED`.
 6. **Controller places a replica** — size on meta, pick node and GPUs, evict if
    it must, create a detached Ray actor.
 7. **Replica dispatches**: wait on `__ray_ready__`, publish `DISPATCHED`, make
@@ -115,6 +118,11 @@ Each hop in full, with its code: `docs/concepts/request-lifecycle.md`.
    `{request.id}.pt` and presigned for an hour.
 10. **Client collects** off the frame or the URL and pushes the values into the
     caller's frame.
+
+To watch the statuses from a client, set `nnsight.CONFIG.APP.DEBUG = True`
+(each status on its own line instead of one overwritten line); for a
+non-blocking job, poll `curl localhost:8001/response/<id>`, which returns only
+the latest status.
 
 What breaks at each hop, the queue objects and the `run()` contract:
 [references/request-lifecycle.md](references/request-lifecycle.md).
@@ -232,14 +240,19 @@ a `LOG`.
 **Against a local nnsight, compose first:**
 
 `NNSIGHT_PATH=<checkout>/src/nnsight` (the **package** dir) on **every** `just`
-call bind-mounts it over the image's copy; auto-detection needs a host `python`
-with an editable nnsight and silently skips otherwise. A fresh checkout lacks the
-compiled `_c` extension, so every remote `.save()` fails with a bare
-`AttributeError` until you run
-`docker run --rm --entrypoint python -v <checkout>:/src -w /src dev-ray setup.py build_ext --inplace`.
-Under the mount `nnsight.__version__` still reports the image's version — check
-`/proc/self/mountinfo` instead. Outside Docker, `pip install -e` nnsight
-**before** ndif. Procedure:
+call bind-mounts it over the image's copy. Auto-detection runs
+`python -c "import nnsight"` and needs an editable nnsight, so a host with only
+`python3` always detects nothing, silently; `just nnsight` is the only reliable
+pre-check (`just --dry-run up` always shows the overlay). A fresh checkout lacks
+the compiled `_c` extension, so every remote `.save()` fails with
+`AttributeError: 'Tensor' object has no attribute 'save'` until you run
+`docker run --rm --entrypoint python -v <checkout>:/src -w /src dev-ray setup.py build_ext --inplace`
+(as root — it leaves root-owned build artifacts in the checkout). Under the mount
+`nnsight.__version__` still reports the image's version — check
+`grep nnsight /proc/self/mountinfo` instead, where a mounted line reads
+`... 259:2 /u/me/nnsight/src/nnsight /usr/local/lib/python3.12/site-packages/nnsight ...`
+and the source column is relative to its filesystem's root, not the host path.
+Outside Docker, `pip install -e` nnsight **before** ndif. Procedure:
 `docs/developing/nnsight-integration.md#developing-against-a-local-nnsight`; what
 to check when the pin moves:
 `docs/developing/nnsight-integration.md#bumping-the-client`.

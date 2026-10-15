@@ -29,6 +29,9 @@ Face repo can execute that repo's code on your GPU node.
 trusted; the **model actor class** decides whether that makes a difference. Only
 the sandbox actor classes run an untrusted request in a separate runner process —
 the base `ModelActor` runs every request in-process regardless of `trusted`.
+That runner is process separation, not a hardened jail (same user, filesystem,
+network and GPUs); what it guarantees is that an untrusted request cannot read
+or edit the weights or train.
 Only the compose stack selects a sandbox class. The published image and a
 from-source install run untrusted code in-process **even with auth on**, until
 you set, on the `ray` service:
@@ -98,6 +101,9 @@ Every example here assumes the machine is yours. On a shared host:
 - **The container runs as root**, so anything it writes into a bind mount — the
   Ray temp dir, new files in the HF cache — is root-owned afterwards. Clean up
   through a container (`docker run --rm -v /path:/v alpine rm -rf /v/...`).
+- **A port already taken: remap only the host side.** Route 1:
+  `-p 127.0.0.1:9100:9000 -e NDIF_OBJECT_STORE_PUBLIC_URL=http://localhost:9100`
+  — moving 9000 always needs the public URL to follow it. Route 2 is below.
 - **Bind published ports to `127.0.0.1`.** The compose stack publishes Redis,
   Postgres, MinIO, the Ray client port and the telemetry tier on every
   interface, unauthenticated; anyone who reaches Redis or 10001 can run code on
@@ -116,7 +122,8 @@ docker run -d --name ndif --gpus all --shm-size 4g \
 - **9000** is MinIO. Publish it: a result over the inline cap, and every
   non-blocking result, comes back as a presigned URL the *client* fetches.
   Unpublished, those results complete server-side and then fail to download.
-- The **HF cache mount** is what makes weights survive `docker rm`.
+- The **HF cache mount** is what makes weights survive `docker rm`; they land
+  under `<cache>/hub/models--<org>--<name>`.
 - Serving gated checkpoints (Llama, Gemma)? Add `-e HF_TOKEN`.
 
 `NDIF_SERVICE` defaults to `all` — redis + minio + ray + api in one container.
@@ -126,6 +133,14 @@ docker run -d --name ndif --gpus all --shm-size 4g \
 discards which models were HOT but not the weights.
 
 ## Route 2 — the compose dev stack
+
+**Check the MinIO image first.** The compose `minio` service and the
+Dockerfile's MinIO build stage both use a pinned
+`quay.io/minio/minio:RELEASE...` image that is not currently pullable
+anonymously (401/denied from quay and Docker Hub), so a fresh build stops there.
+Point compose's `minio.image` and the Dockerfile's `MINIO_IMAGE` build arg at a
+MinIO image you can pull or already have (`docker tag <cached> <pinned name>`
+works), before the first `just up`.
 
 ```bash
 git clone https://github.com/ndif-team/ndif.git && cd ndif
@@ -146,8 +161,13 @@ service by service. What a fresh install runs into:
 - **The project name is fixed at `dev`.** Containers are `dev-api-1`,
   `dev-ray-1`; a second `just up` on the same host takes over an existing `dev`
   stack, and existing `dev-*` images are retagged by the next build.
-- **The HF cache is fixed at `${HOME}/.cache/huggingface`**, written as root. A
-  cache shared with other work makes every model in it show up as COLD.
+- **The HF cache is `${HOME}/.cache/huggingface`**, written as root; weights
+  land under `<cache>/hub/models--<org>--<name>`. To move it, edit the `ray`
+  volume line in `docker/docker-compose.yml` or symlink the host path. A cache
+  shared with other work makes every model in it show up as COLD.
+- **A host port already taken:** remap only the host side,
+  `"127.0.0.1:<newport>:<port>"`; if 9000 moves, set
+  `NDIF_OBJECT_STORE_PUBLIC_URL` to the new port on **both** `api` and `ray`.
 - **Code changes need `just ta`** (down → build → up): the source is baked into
   the image, so `just up` or `just restart` runs the old build. `just ta <svc>`
   still tears the **whole** stack down and starts only that service and its
@@ -168,13 +188,18 @@ just up
 
 - **Every `just` call must carry `NNSIGHT_PATH`** — a `just up` or `just ta`
   without it recreates the containers without the mount.
-- Without `NNSIGHT_PATH`, auto-detection needs a host `python` that imports an
-  *editable* nnsight; with no such `python` it is skipped silently.
-- **A fresh checkout has no compiled `_c` extension**, and every remote `.save()`
-  then fails with a bare `AttributeError`. Build it with the image's toolchain:
+- Auto-detection without it runs `python -c "import nnsight"` for an editable
+  install; a host with only `python3` always detects nothing, silently. **`just
+  nnsight` is the only reliable pre-check** — `just --dry-run up` always shows
+  the overlay.
+- **A fresh checkout has no compiled `_c` extension**: every remote `.save()`
+  fails with `AttributeError: 'Tensor' object has no attribute 'save'`. Build it
+  with the image's toolchain (as root, leaving root-owned build artifacts):
   `docker run --rm --entrypoint python -v <checkout>:/src -w /src dev-ray setup.py build_ext --inplace`.
 - **`nnsight.__version__` reports the image's version under the mount.** Verify
-  with `grep nnsight /proc/self/mountinfo` inside the container.
+  with `grep nnsight /proc/self/mountinfo` in the container; its source column is
+  filesystem-relative, not the host path (example line in
+  [references/routes.md](references/routes.md)).
 
 Full procedure: `docs/developing/nnsight-integration.md#developing-against-a-local-nnsight`.
 
@@ -190,7 +215,9 @@ ndif stop
 ```
 
 torch first: with no wheel present pip takes PyPI's default, the CUDA 13 build.
-Route-specific traps — the MinIO binary (none is published standalone any more),
+Route-specific traps — the MinIO binary (none is published standalone, and the
+pinned image is not currently pullable anonymously; conda-forge's
+`minio-server` works),
 a temp dir too long for AF_UNIX sockets, and what a ✓ from `ndif start` does not
 prove — are in [references/routes.md](references/routes.md).
 
@@ -212,7 +239,7 @@ cannot see a GPU.
 
 Then the first remote trace. Nothing needs to be deployed first: the queue is
 lazy, so the first request for a checkpoint replies `PROVISIONING` and then
-`DEPLOYING` while the weights download.
+`DEPLOYING` while the weights download, then `QUEUED`, `DISPATCHED`, `RUNNING`.
 
 <!-- test: skip -->
 ```python
@@ -277,9 +304,11 @@ What must change off single-host and what survives a restart:
   anything larger goes through the object store. The cap is `min(soft, hard // 2)`
   of Redis's `client-output-buffer-limit pubsub` — **8 MiB on stock Redis** — and
   there is no env var for it: raise Redis's pubsub limits to raise it. The cap is
-  on the compressed blob; the published frame is up to ~1.5x that, so about
-  three near-cap results to a subscriber that is not draining reach the hard
-  limit, Redis drops the subscriber, and `COMPLETED` never arrives.
+  checked against the **compressed blob** (a 7.5 MiB blob goes inline, a 9 MiB
+  one by URL). The published frame is up to ~1.5x that blob, which affects only
+  buffer pressure, not the boundary: about three near-cap results to a
+  subscriber that is not draining reach the hard limit, Redis drops the
+  subscriber, and `COMPLETED` never arrives.
   `docs/concepts/status-and-results.md`.
 - **A block that allocates a lot of GPU memory dies with `CUDA out of memory ...
   N MiB allowed` even on an almost-empty card.** The actor caps per-process GPU

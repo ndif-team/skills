@@ -32,7 +32,15 @@ running container, `docker exec ndif ndif <verb>`.
 - **`--gpus all` hands over every GPU;** `--gpus '"device=0,1"'` restricts it.
 - **The image runs untrusted code in-process even with auth on** — set
   `NDIF_MODEL_IMPORT_PATH` to the sandbox actor before anyone else submits
-  (`docs/operating/production.md#the-sandboxed-actor-class`).
+  (`docs/operating/production.md#the-sandboxed-actor-class`). The sandbox is
+  process separation, not a hardened jail (same user, filesystem, network and
+  GPUs); it keeps untrusted requests from reading or editing weights and from
+  training.
+- **Weights land under `<cache>/hub/models--<org>--<name>`** in the mounted
+  cache.
+- **A port already taken: remap only the host side**
+  (`-p 127.0.0.1:<newport>:<port>`). Moving 9000 also needs
+  `-e NDIF_OBJECT_STORE_PUBLIC_URL=http://localhost:<newport>`.
 - **The dashboard is opt-in:** `-e NDIF_SERVICE="all dashboard"` plus
   `-p 127.0.0.1:8081:8081`.
 
@@ -43,8 +51,17 @@ with `~/.local/bin` on `PATH`).
 
 ```bash
 git clone https://github.com/ndif-team/ndif.git && cd ndif
+# fix the MinIO image first (below), then:
 just up
 ```
+
+**The pinned MinIO image is not currently pullable anonymously.** Both the
+compose `minio` service (`minio.image`) and the Dockerfile's MinIO build stage
+(`ARG MINIO_IMAGE`) name `quay.io/minio/minio:RELEASE...`, which returns
+401/denied from quay and from Docker Hub, so a fresh `just up` fails in the
+build. Before it, either point both at a MinIO image you can pull, or retag a
+copy you already have under the pinned name
+(`docker tag <cached-minio> quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z`).
 
 The first `just up` builds one image and runs it three times — as `api`, `ray`
 and `dashboard` — selected per container by `NDIF_SERVICE`. Expect ten minutes
@@ -69,8 +86,14 @@ What a fresh install runs into:
   A `docker-compose.override.yml` is not read: the justfile passes `-f`.
 - **The project name is fixed at `dev`.** An existing `dev` stack on the host is
   taken over, and existing `dev-*` images are retagged by the next build.
-- **The HF cache path is fixed** at `${HOME}/.cache/huggingface` and written as
-  root; a shared cache makes every model in it appear as COLD.
+- **The HF cache path is** `${HOME}/.cache/huggingface`, written as root;
+  weights land under `<cache>/hub/models--<org>--<name>`, and a shared cache
+  makes every model in it appear as COLD. To move it, edit the `ray` service's
+  volume line in `docker/docker-compose.yml`, or symlink the host path.
+- **A host port already taken:** remap only the host side of the `ports:`
+  entry, `"127.0.0.1:<newport>:<port>"`. If 9000 is remapped, set
+  `NDIF_OBJECT_STORE_PUBLIC_URL: http://localhost:<newport>` on **both** `api`
+  and `ray` — each signs presigned URLs.
 - **`api` waits on `postgres` and `influxdb` health checks** even though it runs
   without either. If `api` never starts and has no logs, check those two in
   `just ps`.
@@ -80,17 +103,29 @@ What a fresh install runs into:
 
 **A local nnsight** is mounted by `docker/docker-compose.nnsight.yml`. Set
 `NNSIGHT_PATH=<checkout>/src/nnsight` — the package directory — and carry it on
-every `just` call; auto-detection without it needs a host `python` with an
-editable nnsight and silently skips otherwise. A fresh checkout lacks the
-compiled `_c` extension, so every remote `.save()` fails with a bare
-`AttributeError` until you build it:
+every `just` call. Auto-detection without it runs `python -c "import nnsight"`
+and needs an editable nnsight; a host with only `python3` always detects
+nothing, silently. **`just nnsight` is the only reliable pre-check** —
+`just --dry-run up` always shows the overlay file. A fresh checkout lacks the
+compiled `_c` extension, so every remote `.save()` fails with
+`AttributeError: 'Tensor' object has no attribute 'save'` until you build it:
 
 ```bash
 docker run --rm --entrypoint python -v <checkout>:/src -w /src dev-ray setup.py build_ext --inplace
 ```
 
+It runs as root, so the build artifacts it leaves in the checkout are
+root-owned.
+
 `nnsight.__version__` reports the image's version under the mount; check
-`/proc/self/mountinfo` inside the container instead.
+`grep nnsight /proc/self/mountinfo` inside the container instead. A mounted line:
+
+```text
+1517 1490 259:2 /u/me/nnsight/src/nnsight /usr/local/lib/python3.12/site-packages/nnsight rw,relatime - ext4 /dev/nvme0n1p2 rw
+```
+
+The fourth column, the source, is relative to the root of its filesystem, so it
+need not match the host path you exported.
 `docs/developing/nnsight-integration.md#developing-against-a-local-nnsight`.
 
 ## Route 3 — from source with the `ndif` CLI
@@ -119,11 +154,12 @@ processes it started.
 
 - **`ndif doctor` requires `redis-server` and `minio` on `PATH`,** and MinIO
   publishes no standalone server binaries any more. Use
-  `conda install --override-channels -c conda-forge redis-server minio-server`,
-  or lift it from the image the Dockerfile uses:
+  `conda install --override-channels -c conda-forge redis-server minio-server`.
+  The image the Dockerfile pins is not currently pullable anonymously; if you
+  have some MinIO image locally (or can pull one), lift the binary from it:
 
   ```bash
-  cid=$(docker create quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z)
+  cid=$(docker create <a-minio-image-you-have>)
   docker cp "$cid:/usr/bin/minio" /usr/local/bin/minio && docker rm "$cid"
   ```
 
@@ -136,7 +172,9 @@ processes it started.
   `/connected` still says `reconnecting` after two minutes, check `ndif info`
   and `$NDIF_HOME/logs/ray.log`.
 - **No sandbox by default.** Nothing sets the actor class, so untrusted code runs
-  in-process until you set `NDIF_MODEL_IMPORT_PATH`.
+  in-process until you set `NDIF_MODEL_IMPORT_PATH` (and even then the sandbox
+  is process separation, not a hardened jail — it stops weight reads, edits and
+  training, not access to the user, filesystem, network or GPUs).
 
 ## More than one GPU machine
 
