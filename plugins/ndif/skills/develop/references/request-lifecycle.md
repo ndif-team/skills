@@ -2,7 +2,7 @@
 
 Source of record: `docs/concepts/request-lifecycle.md` (the keystone),
 `docs/developing/queue-internals.md`, `docs/developing/model-actor.md`,
-`docs/developing/sandbox-internals.md`.
+`docs/developing/controller-internals.md`, `docs/developing/sandbox-internals.md`.
 
 ## Where it can go wrong, hop by hop
 
@@ -14,141 +14,108 @@ Source of record: `docs/concepts/request-lifecycle.md` (the keystone),
 | 3 | client too old | `400` naming the minimum version |
 | 4 — dispatch | dispatcher process dead | the request sits in Redis; no `QUEUED` ever arrives |
 | 5 — provision | model never deploys | stuck on `PROVISIONING`/`DEPLOYING`, then `ERROR` |
-| 6 — placement | won't fit on any node | `ERROR` mentioning `CANT_ACCOMMODATE` |
+| 6 — placement | won't fit on any node | `ERROR` "Could not deploy this model." with a node's stated reason, `CANT_ACCOMMODATE` when none gave one |
 | 7 — replica | evicted mid-flight | silently re-queued at the front (no error) |
-| 8 — execution | the block raises | `ERROR` with the user's own traceback |
+| 8 — execution | the block raises | `ERROR` with a traceback ending at the user's line. Only nnsight's frames are stripped, so asyncio/Ray/NDIF wrapper and torch/transformers frames precede it |
 | 8 | the block exceeds the timeout | `ERROR` "exceeded the execution timeout of Ns" |
-| 8 | a module the payload references is missing | a `PayloadError` sentence at deserialize |
+| 8 | a module the payload references is missing | `ModuleNotFoundError` at deserialize |
 | 8a | the runner dies mid-run | `ERROR` carrying the runner's formatted traceback |
 | 9 — upload | object store unreachable | `ERROR` after a successful run (object-store route only) |
 | 10 — download | presigned URL signed for the wrong host | `COMPLETED`, then a client-side download failure |
-| 10 | `NDIF_MAX_SOCKET_RESULT_BYTES` raised or set to `0` | the result exceeds Redis's pubsub output-buffer limit, the subscriber is dropped, and `COMPLETED` never arrives |
+| 10 | near-cap inline results published to a subscriber that is not draining | about three reach Redis's hard pubsub limit, the subscriber is dropped, and `COMPLETED` never arrives |
+
+`RECEIVED` always arrives first, over HTTP. On a cold start the processor is
+already provisioning when it replies, so the first **websocket** status is
+`PROVISIONING`, not `QUEUED`. The full cold sequence is `RECEIVED` →
+`PROVISIONING` → `DEPLOYING` → `QUEUED` ("Moved to position N") → `DISPATCHED` →
+`RUNNING` → `COMPLETED`.
 
 ## The queue objects
 
 One process, one asyncio loop, so a blocking call anywhere here stalls **every**
 model.
 
-- **`Dispatcher`** — `BRPOP`s the shared Redis list with a 10 s timeout, drains up
-  to 31 more with non-blocking `RPOP`, and routes each request by `model_key` to a
-  lazily created `Processor`. It also owns the `ray:connected` flag: deleted on
-  entering `connect()`, set once Ray and the `Controller` actor answer, **with no
-  expiry** — which is why a dead dispatcher leaves the API reporting healthy.
-- **`Processor`** — one per model. Holds that model's in-memory `asyncio.Queue`,
-  provisions replicas, and runs the autoscaling loop. `RequestQueue.put` stamps
-  `enqueued_at` and orders by `(group, prepend, enqueued_at)`. On a failure before
-  `READY` it calls `purge()`, which errors **every** queued request for that model,
-  so several users see the same canned message at once.
-- **`Replica`** — one per deployed actor. `wait()` polls `__ray_ready__` forever,
-  treating a lookup `ValueError` as "not registered yet"; then a worker task pulls
-  from the model's queue, publishes `DISPATCHED`, and makes
-  `handle.run.remote(request)`.
+- **`Dispatcher`** — `BRPOP`s the shared Redis list with a timeout, drains more
+  with non-blocking `RPOP`, and routes by `model_key` to a lazily created
+  `Processor`. It owns the `ray:connected` flag, set **with no expiry** — so a
+  dead dispatcher leaves the API reporting healthy.
+- **`Processor`** — one per model: its in-memory queue, replica provisioning,
+  autoscaling. `RequestQueue.put` orders by `(group, prepend, enqueued_at)`. A
+  failure before `READY` calls `purge()`, which errors **every** queued request
+  for that model with the same message.
+- **`Replica`** — one per deployed actor. `wait()` polls `__ray_ready__` every
+  second with **no timeout**, treating `ValueError` (not created yet) and
+  `ActorUnavailableError` (restarting) as "not yet"; then a worker pulls from the
+  queue, publishes `DISPATCHED`, and calls `handle.run.remote(request)`.
 
-Autoscaling checks the queue **head** every `NDIF_AUTOSCALING_INTERVAL_S` (5 s)
-and adds a replica if it has waited past `NDIF_AUTOSCALING_WAIT_THRESHOLD_S`
-(30 s), up to `NDIF_AUTOSCALING_MAX_REPLICAS` (3), then backs off
-`NDIF_AUTOSCALING_BACKOFF_S` (120 s). It never scales down.
+Autoscaling checks the queue **head** every `NDIF_AUTOSCALING_INTERVAL_S` and adds
+a replica once it has waited past `NDIF_AUTOSCALING_WAIT_THRESHOLD_S`, up to
+`NDIF_AUTOSCALING_MAX_REPLICAS`, then backs off. It never scales down.
 
-The three failure classes, distinguished **by type, not by message**:
+`Replica.dispatch` splits failures **by type, not by message**:
 
-<!-- test: skip -->
-```python
-EVICTED_ERRORS = (ValueError, ActorDiedError, CachedActorError)
-```
+| Caught | Result |
+|---|---|
+| `asyncio.CancelledError` | error the user, then re-raise (it is a `BaseException`, so a plain `except Exception` would leave them on `DISPATCHED`) |
+| `ValueError` / `ActorDiedError` / `CachedActorError` | drop the replica, re-queue the request at the **front** |
+| `ActorUnavailableError` | error that request, then `wait()` until the same replica serves again — nothing re-queued, replica kept |
+| anything else | error the user, keep serving |
 
-On any of them the replica ends its own worker loop and re-queues the in-flight
-request at the **front**. `asyncio.CancelledError` gets its own branch (it
-inherits from `BaseException`, so a plain `except Exception` would miss it) and
-answers the user before re-raising. Everything else is errored to the user.
+Over Ray Client the `RayTaskError` wrapper arrives plain, so the check reads
+`.cause`; a bare `isinstance` would match nothing and turn every HOT→WARM
+demotion into a user-facing error.
 
-Reading an actor's exception across the Ray boundary needs `.cause`: over Ray
-Client the `RayTaskError` wrapper arrives plain, so a bare `isinstance` matches
-nothing — silently.
+## The `run()` contract
 
-## The `run()` template
+`BaseModelDeployment.run` publishes `RUNNING`, applies `request.env`, races
+`execute()` on a worker thread against the timeout and the kill switch, sends the
+result back, publishes exactly one `COMPLETED` or `ERROR`, and restores state in
+`finally`. The result route: a blocking request's blob at or under
+`RedisProvider.max_publish_bytes` (`min(soft, hard // 2)` of Redis's pubsub
+limits; 8 MiB on stock Redis; raise Redis's limits to raise it) rides on
+`COMPLETED`, otherwise it is uploaded and presigned. The cap is checked against
+the **compressed blob** (a 7.5 MiB blob goes inline, a 9 MiB one by URL on the
+stock cap). The published frame is up to ~1.5x that blob, which sets how fast
+undrained results fill Redis's pubsub buffer toward the hard limit — not where
+the inline/URL boundary sits. The seven obligations a custom actor keeps are in
+[extending.md](extending.md#the-contract).
 
-`BaseModelDeployment.run` publishes `RUNNING`, snapshots GPU counters and the
-linecache/`SOURCES`/`BLOCKS` globals, applies `request.env`, races `execute()` on
-a worker thread against `execution_timeout` and the kill switch, emits metrics and
-event logs, sends the result back, publishes exactly one `COMPLETED` or `ERROR`,
-and restores state in `finally`.
-
-The contract it upholds, which any custom actor must keep:
-
-1. **Exactly one terminal response per request.** A request with no terminal
-   response hangs the client's websocket until it times out.
-2. **`COMPLETED` carries either the bytes or a presigned URL** — the route is
-   decided by `max_socket_result_bytes` and whether there is a live socket.
-   `prepare_result` compresses iff `request.compress` and meters the size on both
-   routes, so the blob is byte-identical either way.
-3. **Saved values are `nnsight.save()`-marked locals**, matched by identity in the
-   block's frame. The sandbox runner reuses the same `cpu_pickle_module` so the
-   blob format is identical.
-4. **`execute` returns `(blob, deserialize_ms)`**; `deserialize_ms` may be `None`.
-5. **Be interruptible.** `run()` calls `interrupt()` and returns *without waiting
-   for the thread*, so an executor that can block outside Python must be
-   unblockable or the thread leaks.
-6. **Raise `CachedActorError` when WARM**, so the queue re-queues instead of
-   erroring the user.
-7. **Do not let request state outlive the request.**
-
-`cancel()`'s `reason` matters: the default means "genuinely cancelled" and the
-user is told. `KILL_REASON_PREEMPTED` means the request is blameless and still
-runnable — it raises `CachedActorError` so the queue re-queues it *at the front*,
-so mislabelling a deliberate cancellation re-runs it forever.
+`cancel()`'s `reason` matters: unset means "genuinely cancelled" and the user is
+told. `KILL_REASON_PREEMPTED` raises `CachedActorError` so the queue re-queues it
+*at the front* — mislabel a deliberate cancellation and it re-runs forever.
 
 ## Where state lives
 
 | State | Lives in | Survives a restart? |
 |---|---|---|
 | Queued requests | Redis list (`NDIF_QUEUE_KEY`) | Yes — until popped |
-| In-flight requests | dispatcher process memory | **No** |
-| Status / env caches | Redis, TTL'd | Rebuilt on demand |
+| Popped and in-flight requests | dispatcher process memory | **No** |
 | Live status updates | Redis pub/sub → websocket | Not stored at all |
-| Non-blocking responses | object store, latest only | Yes |
-| Result blobs | object store, `{request_id}.pt` | Yes — nothing deletes them |
+| Result blobs, non-blocking responses | object store | Yes — nothing deletes them |
 | Deployment state | controller actor memory + Ray | Rebuilt from the cluster |
 | Model weights (WARM) | node CPU RAM | No |
-| Dashboard schedule/logs | `dashboard_data` volume | Yes |
 
 Redis keys are **unprefixed** — `queue`, `status`, `env`, `ray:connected` — so two
-NDIF deployments sharing one Redis instance steal each other's requests. Give
-each its own Redis, or its own logical database.
+NDIF deployments sharing one Redis steal each other's requests.
 
-## Model actors, concretely
+## Model actors and the controller
 
-A deployment is a set of detached Ray actors, one per replica, created as:
+A replica is a detached Ray actor named `{replica_id}:ModelActor:{model_key}` in
+namespace `NDIF`, pinned with `resources={f"node:{node_name}": 0.01}` and **no
+`num_gpus`**: placement is by node, and GPU targeting happens inside the actor
+via accelerate's `max_memory` plus a per-process allocator cap. A tensor-parallel
+placement swaps the actor class for `NDIF_TP_MODEL_ACTOR_CLASS`. The
+controller exports its Redis, object-store, Loki and Influx settings into each
+actor's `runtime_env`, so **you configure model actors by configuring the `ray`
+service.**
 
-<!-- test: skip -->
-```python
-actor_class.options(
-    name=self.name,                        # "{replica_id}:ModelActor:{model_key}"
-    resources={f"node:{node_name}": 0.01}, # pin to the chosen node
-    namespace="NDIF",
-    lifetime="detached",                   # survives the controller
-    runtime_env={"env_vars": env_vars},    # provider config + CUDA flags
-).remote(**deployment_args.model_dump())
-```
+The controller does not re-adopt or reconcile actors
+(`docs/developing/controller-internals.md`):
 
-Note `resources={f"node:{node_name}": 0.01}` and **no `num_gpus`**: placement is
-by node, and GPU targeting happens inside the actor via accelerate's `max_memory`
-plus a per-process allocator cap.
-
-The `runtime_env` is how config crosses the one boundary it crosses by itself:
-the controller exports its own Redis, object-store, Loki and Influx settings into
-every actor, plus `NDIF_SERVICE=model` so the actor's telemetry attributes to the
-model rather than to the controller. **You configure model actors by configuring
-the `ray` service.**
-
-Actors are declared `max_restarts=-1`, which is what makes
-`BaseModelDeployment.restart()` — used after a CUDA-context-corrupting failure —
-work at all.
-
-## Known TODOs in the controller
-
-Two are marked in the source and are worth knowing before you debug around them:
-
-- **Detached model actors from a previous controller are not re-adopted.** A
-  rebuilt cluster starts empty and can re-place onto GPUs those orphans still
-  hold, over-committing memory.
-- **`check_nodes` reconciles *nodes* against reality but never *actors*.**
+- **A restarted controller starts from a blank cluster** while the detached
+  actors survive, still holding GPU memory it believes is free; the next deploy
+  can over-commit. Kill the orphans directly — `ndif evict` won't find them.
+- **`check_nodes` checks nodes, not actors**, so a permanently dead actor's
+  record and GPU reservation outlive it until `ndif evict` clears them.
+- **A node that drops out of the `ALIVE` list even briefly** has every actor on it
+  purged on the next pass.
