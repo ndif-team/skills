@@ -88,8 +88,8 @@ instrumentation. A big `status_time{queued}` with a successful run means the use
 experienced "hung", not "failed"; a big `execution_time.deserialize_ms` means a
 large serialized block; a big `upload_ms` means a large result.
 
-Absence of metrics is **not** evidence of absence of requests — Influx is
-optional and fail-open.
+Absence of metrics is **not** evidence of absence of requests — Influx is off
+until `NDIF_INFLUX_URL` is set, and fail-open.
 
 ## Procedure: a stuck request
 
@@ -142,12 +142,23 @@ Deployments are plain detached Ray actors named
 Serve here and no `serve status` to run. Find them in the Ray dashboard's Actors
 view, which also gives you the node, the pid, and the logs.
 
-**Step 5 — where is it executing?** Depends on `request.trusted`. Trusted: the
-block runs in-process in the model actor, one thread, no socket, and a hang is
-user code or the forward pass itself. Untrusted: a fresh runner subprocess runs
-the block and the actor drives the forward pass over a Unix socket, so a hang can
-be on either side. With auth off every request is trusted by default, so on a
-default local stack you are always in the in-process case.
+**Step 5 — where is it executing?** Two things decide it: `request.trusted`
+(from the key with auth on; `True` by default with auth off) **and** the actor
+class. Only an untrusted request on `SandboxModelActor` (or
+`SandboxedTPModelActor`) runs in a runner subprocess, with the actor driving the
+forward pass over a Unix socket — a hang can be on either side. Everything else
+runs in-process in the model actor, one thread, no socket, and a hang is user code
+or the forward pass itself. The actor class comes from `NDIF_MODEL_IMPORT_PATH`
+(legacy fallback `NDIF_DEFAULT_MODEL_ACTOR_CLASS`); only the compose file sets it,
+so the published image and a source install run in-process even with auth on.
+Check the replica's `actor_class` in `ndif status --json-output`.
+
+No log record carries `trusted`. The only way to tell which path one request took
+is the runner pids: runners are children of the model actor
+(`ndif.services.ray.sandbox.runner`), **pooled**, and replaced after each
+untrusted request — so their presence proves nothing; compare pids before and
+after the request (the `/proc` walk is in the `operate` skill's production
+reference and `docs/runbooks/enable-auth.md`).
 
 Two signals: user `print()` output arrives as `LOG` responses, so a console still
 printing means the block is running, not blocked; and `ndif.modeling` shows
@@ -162,7 +173,7 @@ whether `run` ever got past `Your job has started running.`
 | Per-model queue wait | none | — (autoscaling is the only relief) |
 | Waiting for a replica to be ready | none — `Replica.wait` polls forever | — |
 | **Execution** | `NDIF_DEFAULT_EXECUTION_TIMEOUT_SECONDS`, or a per-deployment `execution_timeout_seconds` | **unset — no cap at all** |
-| `ndif queue` / `ndif kill` round trip | event round-trip | 5 s |
+| `ndif queue` / `ndif kill` round trip | event round-trip | 5 s (and `No response from the dispatcher` for ~5 s after an API restart) |
 
 The execution timeout is enforced by injecting an exception into the execution
 thread, which CPython delivers only at a bytecode boundary — it **cannot
@@ -170,9 +181,16 @@ interrupt a native call already in flight**, so a single enormous CUDA kernel
 runs to completion first. On the sandboxed path the interrupt also stops the
 runner process, which is a real stop.
 
-**Step 7 — unstick it.** `ndif kill <id>`, or
-`ndif restart <checkpoint> --replica <id>` (the in-flight request is re-queued,
-not dropped).
+**Step 7 — unstick it.** Queued: `ndif kill <id>` removes it and the user gets
+`ERROR` "Request cancelled by operator." Executing: `ndif kill <id>` errors the
+request and cancels only the dispatch — the actor keeps running the block to
+completion — so follow it with `ndif restart <checkpoint> --replica <id>` (the id
+from the `⚙` line of `ndif queue`) **before the replica takes new work**, or that
+work fails with `ValueError: Cannot switch to a different thread`. Requests sent
+to the replica during the restart are re-queued or errored. A wedged replica with
+no single culprit gets the same restart; if `ndif restart` cannot get the actor
+handle, the actor is dead for good. Exact-key variants: the `operate` skill's CLI
+reference, and `docs/runbooks/debug-a-stuck-request.md` step 8.
 
 ## Procedure: reconstructing a failed job
 
@@ -222,12 +240,24 @@ The **last stage reached** localizes the failure:
 | `dispatched` | the handoff to the actor failed, or the replica was evicted mid-flight |
 | `running` | execution failed — the interesting case |
 
-**Decide whose fault it is.** *A traceback means their code; one of a handful of
-fixed English sentences means ours.* That holds by construction: the runner (or
-the actor) formats the traceback where it is live — tracebacks do not survive
-cloudpickle — and ships the text, after stripping nnsight plumbing and the
-actor's own frames, so the user reads a traceback of *their own* source lines,
-produced on the server.
+**Decide whose fault it is.** *A traceback ending in their lines means their
+code; one of a handful of fixed English sentences — or a traceback whose last
+frames are greenlet/threading or NDIF paths — means ours.* The runner (or the
+actor) formats the traceback where it is live — tracebacks do not survive
+cloudpickle — and ships the text. On the trusted path `format_error` strips only
+nnsight's frames and those of its own file, so asyncio, Ray, other NDIF wrapper
+frames and torch/transformers frames still come before the user's lines: **read
+it from the bottom**.
+
+**A killed job** leaves two `ERROR`s in a row — `Request cancelled by operator.`
+then the eviction sentence — and the actor keeps running. A blocking client raised
+on the first, with an empty description. A non-blocking job's
+`responses/{id}.json` shows the eviction sentence until the actor's own final
+response (`COMPLETED`, or an `ERROR` with a traceback) overwrites it, so a killed
+job can later read `COMPLETED`.
+
+**A preempted job** (demoted HOT→WARM mid-run) records `execution_time` with the
+status tag `preempted` and re-runs; the user saw a second `QUEUED`, not an error.
 
 **Where the result would have gone.** Two objects in the same bucket:
 `{request_id}.pt` written **only on success**, and `responses/{request_id}.json`

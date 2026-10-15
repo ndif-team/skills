@@ -1,19 +1,25 @@
 # Error messages, both sides
 
-Source of record: `docs/errors/client-side-failures.md`,
-`docs/errors/server-exceptions.md`, `docs/errors/index.md`.
+Source of record: `docs/reference/error-messages.md` (exact-text lookup); the
+whole-stack entry point is `docs/operating/troubleshooting.md`.
 
-## Two rules that do most of the triage
+## Rules that do most of the triage
 
 **An HTTP status code means the request was rejected at ingress and never entered
-the queue. An `ERROR` status means it got past ingress.** `RECEIVED` is the only
-status that travels over HTTP; everything after it arrives on the `/subscribe`
-websocket or via `GET /response/{id}`.
+the queue. An `ERROR` status means it got past ingress.** The user sees an
+ingress rejection as `RemoteError: Failed to send request: <server sentence>`.
+`RECEIVED` is the only status that travels over HTTP; everything after it arrives
+on the `/subscribe` websocket or via `GET /response/{id}`.
 
-**A traceback means their code ran and failed; a sentence means the server
-refused the request before their code existed.** Deserialization failures are
-deliberately not tracebacks: every frame at that point is server-side, so a
-traceback would leak module layout while telling the caller nothing.
+**A traceback ending in the user's own lines means their code ran and failed; a
+sentence means the server refused or failed the request.** Deserialization
+failures are deliberately sentences: every frame at that point is server-side.
+
+**Read a traceback from the bottom.** Only nnsight's frames (and those of the
+actor's own `format_error` file) are stripped, so asyncio, Ray, NDIF and
+torch/transformers frames still come *before* the user's lines. Judge by the last
+frames: the user's code is a user error; **a traceback whose last frames are
+greenlet/threading or NDIF paths is a server fault**.
 
 Nearly everything reaches the user as `RemoteError`, which carries no structure —
 the *text* is the diagnostic.
@@ -24,78 +30,90 @@ the *text* is the diagnostic.
 |---|---|---|---|
 | 401 | `Missing or invalid API key...` | Auth is on and no `ndif-api-key` header arrived | Set the key client-side |
 | 400 | `Invalid API key format: '<key>'...` | Not parseable as a UUID — usually a truncated paste | Re-copy the key |
-| 403 | `Invalid API key.` | A well-formed UUID with **no row in `keys`**. Validity is exactly "the row exists" | Issue a key, or check they are pointed at the right NDIF |
-| 422 | a pydantic error list | The `data` form field is not JSON, or does not validate as a `BackendRequestModel` — almost always a schema mismatch | Upgrade nnsight |
-| 400 | `Client nnsight version X is below the minimum supported Y.` | The version gate | Tell them the minimum |
+| 403 | `Invalid API key.` | A well-formed UUID with **no row in `keys`** — including every key after Postgres lost its volume on `just down` / `just ta` | Issue or re-insert the key |
+| 422 | a pydantic error list, or `Invalid JSON: …` | Client/server schema mismatch on the `data` form field | Upgrade nnsight |
+| 400 | `Client nnsight version X is below the minimum supported Y.` and friends | The version gate (below) | Tell them the minimum |
 | 503 | `Service temporarily unavailable: compute backend is reconnecting.` | The `ray:connected` flag is absent | Operator problem — check the ray container |
-| 503 | `Auth backend unavailable.` | Postgres errored. Auth **fails closed**: a DB outage rejects everything rather than admitting unverified requests | Bring Postgres back |
-| 500 | `Internal server error.` | Anything unhandled in ingress | The real traceback is only in the API log, logger `ndif.api` |
+| 503 | `Auth backend unavailable.` | Postgres errored, or `NDIF_POSTGRES_URL` is set with `asyncpg` missing. Auth **fails closed** | Bring Postgres back / install the `postgres` extra |
+| 503 | `Could not retrieve cluster status.` / `Could not retrieve cluster env.` | On `GET /status` or `/env`, the dispatcher's refresh from the controller failed | Retry; check the dispatcher |
+| 504 | `Timed out waiting for cluster status.` / `… cluster env.` | No refresh within `NDIF_STATUS_TIMEOUT_S` / `NDIF_ENV_TIMEOUT_S` — the dispatcher is busy, wedged or gone | See the dead-dispatcher section of the skill |
+| 500 | `Internal server error.` | Anything unhandled in ingress | The traceback is only in the API log, `api unhandled error` under `ndif.api` |
 
 **401 or 403 proves auth is configured.** With `NDIF_POSTGRES_URL` unset,
-`verify_api_key` returns immediately and no key check happens at all.
+`verify_api_key` returns immediately and no key check happens. `/whoami` answers a
+malformed key with 400 and an unknown one with `{"email": null, "tags": []}`.
 
-Every version-gate rejection is a 400: a *missing* header (read as "outdated
-nnsight" — old clients do not send it), an *unparseable* version (a source
-checkout with no installed distribution reports `""`), or one *below* the
-minimum. The python check compares major.minor only.
+The version gate (only when `NDIF_MIN_NNSIGHT_VERSION` / `NDIF_MIN_PYTHON_VERSION`
+is set) is always a 400: `Client nnsight version was not provided.` (an old client,
+or an nnsight run from a source checkout, which sends an empty version),
+`Malformed nnsight version '<v>'.`, or below the minimum. The python check
+compares major.minor only.
 
 ## Sentences, not tracebacks
 
 | Message begins | Class | What to tell the user |
 |---|---|---|
-| `Your request payload could not be read (` | `PayloadError` | Re-send it — most are transit damage. If it repeats it is a client/server nnsight mismatch, or a package the block imports that the server lacks. Compare `ndif env` with `ndif env --local` |
-| `The model architecture on this server doesn't match the one your code was traced against` | `ArchitectureMismatchError` | The message carries the fix: run `nnsight.compare()` and align whatever it flags — almost always `transformers` |
+| `Your request payload could not be read (` | `PayloadError` | Re-send it once. If it repeats: a `ModuleNotFoundError` in the detail is a package the server lacks; an `AttributeError`/`UnpicklingError` on a class is an nnsight version mismatch. Compare `ndif env` with `ndif env --local` |
+| `The model architecture on this server doesn't match the one your code was traced against` | `ArchitectureMismatchError` | Run `ndif.compare()` and align whatever it flags — almost always `transformers`. The named path is the *first* divergence, not the layer they reached for |
 
-Neither is fatal to the replica. The architecture case names the **first** path
-where the two module trees diverge, not the layer the user was reaching for,
-because the block references the whole envoy tree — do not read the named module
-as the one they got wrong.
+Neither is fatal to the replica.
 
-Underlying failures, all classified in one place (`BackendRequestModel.deserialize`),
-so the trusted and sandboxed paths cannot drift:
+**Every remote `.save()` failing with `AttributeError`** is the server's nnsight
+lacking its compiled `nnsight._c` extension — the published wheels ship it; an
+sdist install with no compiler, or an unbuilt checkout bind-mounted into the
+container, does not.
 
-| Underlying | Reported as | Cause |
-|---|---|---|
-| `ModuleNotFoundError` | `PayloadError` | The block references a package installed on the client, not the server. nnsight auto-registers *local, non-installed* modules, so this is normally an installed third-party package |
-| `AttributeError` / `UnpicklingError` on a class | `PayloadError` | Client and server disagree on a type's shape — an nnsight version mismatch |
-| `UnknownPersistentIdError` | `ArchitectureMismatchError` | A `Module:<path>` id the server's tree has no entry for |
-| `ModuleNotFoundError: nnsight._c` | `PayloadError` | The optional C extension did not compile — `value.save()` on a non-tensor breaks server-side while working locally. `nnsight.save(x)` is the portable form |
-
-## Canned server-side messages
+## ERROR responses after ingress
 
 | Message | Means |
 |---|---|
-| `Your job exceeded the execution timeout of Ns.` | The execution race lost. **There is no default** — an unconfigured deployment never emits this |
-| `Your job was cancelled or preempted by the server.` | The kill switch fired for a reason other than parking — somebody deliberately cancelled it. A HOT→WARM demotion does *not* land here |
-| `Replica was evicted while processing your request.` | The worker task was cancelled mid-dispatch — `ndif kill`, or a purge. An ordinary eviction re-queues instead |
-| `Error starting model.` / `Error provisioning model.` | The controller could not place or ready a replica **and did not say why**. The real traceback is in the API log. On a failure before `READY` the Processor purges, so several users see this at once |
-| `Could not deploy this model. <reason>` | The controller refused and explained: a mistyped `repo_id`, a gated repo, or `CANT_ACCOMMODATE`. These are the actionable cases — "try again later" would be wrong advice for all three |
-| `Request cancelled by operator.` | Someone ran `ndif kill` on a still-queued request |
-| `Error submitting request to model deployment.` | The Ray call to the actor raised something unclassified |
+| A traceback through the user's own lines | User code raised. Not fatal (except the two CUDA errors below). Retry is pointless until the code changes |
+| `OutOfOrderError: '<location>' was requested but the model already ran past it` | User: modules accessed out of forward-pass order |
+| `ValueError: A barrier was never reached by every block it waits for…` | User: a `tracer.barrier(n)` whose `n` exceeds the blocks that call it |
+| `Your job exceeded the execution timeout of Ns.` | **There is no default** — only emitted when a timeout is configured |
+| `Request cancelled by operator.` | `ndif kill`. Queued: removed. Executing: errored and its dispatch cancelled — a blocking client shows this first `ERROR` with an **empty description** — while the actor runs the block to completion. The replica must be restarted before it takes new work (`operate` skill, "Killing a request") |
+| `Replica was evicted while processing your request.` | The worker task was cancelled mid-dispatch. After a kill or a purge it arrives **second**: a blocking client has already raised; a non-blocking job's stored response shows it until the still-running actor's own final response (`COMPLETED` or an `ERROR`) overwrites it. An ordinary eviction re-queues instead |
+| A traceback ending in greenlet/threading frames: `ValueError: Cannot switch to a different thread` or `… parent cannot be on a different thread` | **Server**: new work was dispatched to a replica whose killed block is still running. Restart the replica, then retry |
+| `Error starting model.` / `Error provisioning model.` | The controller could not place or ready a replica **and did not say why**; the traceback is in the API log under `ndif.queue.processor`. Every queued request for the model gets it at once. Right after `ray` is recreated it is instead the API's stale compute connection (`ConnectionError` in the log), and the next request may 503 |
+| `Could not deploy this model. <reason>` | The controller refused and explained: a mistyped `repo_id`, a gated repo, or `CANT_ACCOMMODATE`. "Try again later" is wrong advice for all three |
+| `Error submitting request to model deployment.` | The Ray call to the actor raised something that is not an eviction. If the logged class is `ActorUnavailableError`, the actor is restarting after a fatal CUDA error and the worker waits for it — retry |
 | `Critical server error occurred.` | A Ray connection error purged every Processor; everything queued at that moment was errored |
+| `Your job was cancelled or preempted by the server.` | **No current path sends it.** The actor's only cancel caller is the HOT→WARM demotion, which passes the preempt reason and re-queues instead |
+
+## No error text at all
+
+| What happens | Meaning |
+|---|---|
+| The status shows `QUEUED` a second time | An eviction — `CachedActorError` (demoted to WARM before or during the run), `ActorDiedError`, or an actor-lookup `ValueError`. The request goes back to the **front** of its queue and re-runs from the start. A demotion mid-run is a preemption: it logs `model execution preempted; requeued` and records `execution_time` with status tag `preempted` |
+| Sits on `RECEIVED`, `QUEUED`, `PROVISIONING` or `DEPLOYING` | The stuck-request procedure in [reading-logs.md](reading-logs.md) |
+| `COMPLETED` with no saves, no error | Early stop (`tracer.stop()`) is normal; otherwise a client-side `.save()` question |
+| A warning that a `tracer.iter` loop outran the model | Not an error: the iterations reached are kept |
+
+**An eviction mid-flight loses the work done so far**, and a model flapping
+HOT↔WARM makes requests loop without finishing. And **you cannot catch an actor's
+exception by type across the Ray boundary**: it arrives wrapped in a
+`RayTaskError`, and over Ray Client a bare `isinstance` matches nothing — read
+`.cause`.
 
 ## Server exceptions, and whether they are fatal
 
 **A user-caused exception is never fatal to a replica** — the actor catches it,
-formats it, answers `ERROR`, keeps its weights and serves the next request. Only
-two CUDA messages break that rule.
+formats it, answers `ERROR`, keeps its weights and serves the next request.
 
 | Exception | User's view | Whose fault |
 |---|---|---|
-| `RunnerError` | `ERROR` with the block's own traceback | **user** — it is *always* user code; it is the untrusted path's carrier |
-| Any block exception on the trusted path | same | **user** |
-| `OutOfOrderError` | `ERROR`: `'<location>' was requested but the model already ran past it` | **user** — a worker parked on a location the forward pass never reached. An open-ended `tracer.iter` that outran the model **warns** instead of failing |
-| `EarlyStopException` | nothing — the job completes normally | neither; `tracer.stop()`. Seeing it in a stack trace is normal |
-| `PayloadError` / `ArchitectureMismatchError` | a sentence | **user** (environment drift) |
-| timeout | `Your job exceeded the execution timeout` | usually user |
-| `CachedActorError` | **nothing** — silently re-queued at the front | server: the actor was demoted to WARM before or during the run |
-| `ActorDiedError`, actor-lookup `ValueError` | nothing — silently re-queued | server |
-| `asyncio.CancelledError` | `Replica was evicted while processing your request.` | operator/server |
-| `ConnectionError` / `runner process exited before its socket was ready` / `timed out waiting for the runner socket` | `ERROR` with a host-side traceback | server — the runner died, crashed at import, or took >30 s to bind |
-| `torch.cuda.OutOfMemoryError` **at run** | a CUDA OOM traceback | user |
-| `torch.cuda.OutOfMemoryError` / `RuntimeError` **at load** | `Error starting model...` | server — the size estimate was wrong, or the GPU was not actually free |
-| `RuntimeError` from `verify_device_placement` | `Error starting model...` | server — a weight landed on `meta`, `cpu`, or an unassigned GPU |
-| `NDIFConnectivityError` | CLI only: `Cannot connect to Ray at <url>` | server — Ray is uninitialized, the address is not listening, or the `Controller` actor is not resolvable |
+| `RunnerError` | `ERROR` with the block's own traceback | **user** — always user code; the untrusted path's carrier |
+| `CachedActorError` | **nothing** — re-queued at the front | server: demoted to WARM |
+| `ActorDiedError`, actor-lookup `ValueError` | nothing — re-queued | server |
+| `ActorUnavailableError` | `Error submitting request to model deployment.` | server: actor restarting after a fatal CUDA error |
+| `asyncio.CancelledError` | `Replica was evicted while processing your request.` | operator/server: `ndif kill` or a purge |
+| `ConnectionError: connection closed before message complete` / `runner process exited before its socket was ready` / `timed out waiting for the runner socket` | `ERROR` with a host-side traceback | server — the runner died (expected during a timeout), crashed at import, or took >30 s to bind |
+| `torch.cuda.OutOfMemoryError` **at run** | a CUDA OOM traceback | user (or too little padding) |
+| `torch.cuda.OutOfMemoryError` **at load** | `Error starting model.` | server — the estimate was wrong, or the GPU was not actually free; the controller logs `failed during create` |
+| `RuntimeError` from `verify_device_placement` | `Error starting model.` | server — a weight landed on `meta`, `cpu`, or an unassigned GPU |
+| `Cannot copy out of meta tensor` at result upload | `ERROR` | user on the untrusted path: they saved something derived from a weight, which is a meta tensor in the runner |
+| `NDIFConnectivityError` | CLI/dashboard only: `Cannot connect to Ray at <url>` | server — Ray is down, the address is not listening, or the `Controller` actor is not resolvable |
+| `No response from the dispatcher for <event>. Is the API running?` | CLI only | transient for ~5 s after an API restart; persistent means the API is down |
 
 ### The two fatal CUDA errors
 
@@ -107,42 +125,44 @@ _UNRECOVERABLE_CUDA_ERRORS = (
 )
 ```
 
-These poison the process's CUDA context permanently — every subsequent CUDA op
-raises — so the actor kills itself and Ray restarts it, costing every other user
-of that model a load cycle. The triggering request is still a user error and
-still gets its traceback; the collateral damage is what makes this the one
-user-caused failure that is fatal.
+A common innocent trigger for the first: a prompt longer than the model's
+context dies as `device-side assert triggered` inside `masking_utils`, not as an
+index error naming the limit (gpt2: 1024 positions).
 
-### The eviction bucket
+These poison the process's CUDA context permanently, so the actor restarts
+itself and Ray brings it back with a reload, costing every other user of that
+model a load cycle. The triggering request is still a user error and still gets
+its traceback.
 
-<!-- test: skip -->
-```python
-EVICTED_ERRORS = (ValueError, ActorDiedError, CachedActorError)
-```
+## After `COMPLETED`: download failures
 
-On any of these the replica ends its own worker loop and hands the in-flight
-request back to the **front** of the Processor's queue. The user is told nothing
-and sees `QUEUED` a second time.
+`data` is either the result itself (a blocking result at or under the inline cap,
+8 MiB on stock redis:7) or a presigned URL the client fetches — for anything over
+the cap and for **every non-blocking job**.
 
-Two consequences. **An eviction mid-flight loses the work done so far** — there
-is no checkpoint, the request re-runs from the start, and a model flapping
-HOT↔WARM makes requests loop without ever finishing. And **you cannot catch an
-actor's exception by type across the Ray boundary**: it arrives wrapped in a
-`RayTaskError`, and the dual class that would satisfy `isinstance` is only built
-when Ray applies `as_instanceof_cause()`, which it does not over Ray Client. The
-cause has to be read off `.cause`. A bare `isinstance` matches nothing, silently,
-which is how a whole retry path can be dead while every log line looks correct.
+| Text the user sees | Whose fault | Fix |
+|---|---|---|
+| `httpx.ConnectError: [Errno -2] Name or service not known` (or a hang) | Operator | `NDIF_OBJECT_STORE_PUBLIC_URL` must be the address *the client* resolves; empty, it falls back to `NDIF_OBJECT_STORE_URL` |
+| `403 SignatureDoesNotMatch` | Operator | Signed with different credentials than the store accepts, or a proxy rewrote the Host header |
+| A `404` with body `NoSuchBucket` | Operator | A different S3 server answered at the public URL: the URL is wrong, or the client's tunnel lands on another store |
+| `403 Request has expired` | User | Presigned URLs live one hour; a non-blocking job polled later gets a stale URL. Re-run |
+| Download works, `torch.load` fails | Client | A compression mismatch |
 
 ## A websocket that closes mid-run
 
 | Cause | What happened to the job |
 |---|---|
-| The API restarted | **The job is gone.** Restarting the API restarts the dispatcher, and every per-model queue and in-flight request is a plain Python object in that process. The client gets no further status at all — not even an `ERROR` |
+| The API restarted | **The job is gone.** Every queued and in-flight request was a Python object in the dispatcher. The client gets no further status at all |
 | An idle proxy timed out | The job is still running; the client just is not listening. Nothing replays it |
 | The client was interrupted | Same — the server keeps going |
 
-Nothing is stored for a blocking job, so there is no id to poll afterwards.
-Re-submit. For a job that must survive a disconnect, submit non-blocking: each
-non-`LOG` response is written to `responses/{id}.json` and `GET /response/{id}`
-reads the latest back. A 404 there means "no status recorded yet", which the
-client treats as still-running — it does **not** distinguish an unknown id.
+Nothing is stored for a blocking job. For a job that must survive a disconnect,
+submit non-blocking: each non-`LOG` status is written to `responses/{id}.json`
+and `GET /response/{id}` reads the latest. A 404 there means "nothing recorded
+yet", which the client treats as still running.
+
+## CLI output
+
+`ndif evict` and `ndif restart` print `✗ <model_key>: nothing to evict` and
+`✗ <model_key>: no HOT replicas to restart` as failures but **exit 0**. Check the
+output, not the exit code, in a script.
