@@ -234,6 +234,12 @@ with model.generate(prompt, max_new_tokens=3) as tracer:
 print("key length per step:", per_step)
 ```
 
+Inside a generation loop, read a `.source` pattern before its module's `.output`.
+In the wrong order a `.source` op first touched in the loop does not raise: it
+binds to the next step, so the list starts at step 1 and comes up one short (see
+the top-level `SKILL.md`'s [generation.md](generation.md)). The key length is the check:
+step `k` has `prompt_len + k` keys.
+
 ## Other architectures
 
 The recipe is the same; the names are not.
@@ -258,9 +264,10 @@ The recipe is the same; the names are not.
 - **Gemma-2's eager attention is not plain softmax attention.** It softcaps the
   attention logits (`attn_logit_softcapping = 50.0`) between the matmul and the
   softmax, visible as `torch_tanh_0` in the implementation's operation list.
-- `nnterp`'s `StandardizedTransformer(..., enable_attention_probs=True)` gives
-  `model.attention_probabilities[i]` with no per-architecture names at all — see
-  the `nnterp` guide (`nnterp.md`).
+- nnterp's `StandardizedTransformer(..., attn_implementation="eager")` gives
+  `model.layers[i].self_attn.attention_probabilities` with no per-architecture
+  names at all, on every family it knows — see the nnterp plugin's
+  `nnterp:nnterp` skill.
 
 ## Cautions
 

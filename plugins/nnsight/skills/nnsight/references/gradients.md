@@ -208,10 +208,17 @@ assert losses[0] > losses[-1] and direction.norm() > 0     # the vector is learn
 
 The model's own parameters are untouched — only `direction` receives updates.
 
-**Edit at the point you intercept.** Form does not matter: at the module you just
-read, `module.output = new_tensor`, `module.output[:] = new_tensor` and
-`module.output += delta` all differentiate, and the loop above uses the in-place
-form on purpose. Position matters. Reading a *later* module's output advances the
+**Replace, don't write through, when the new value is computed from the old.**
+`module.output = f(module.output)` and `module.output += delta` differentiate.
+`module.output[:] = f(module.output)` raises `RuntimeError: one of the variables
+needed for gradient computation has been modified by an inplace operation`
+whenever `f`'s backward needs the tensor being overwritten, as a LoRA's
+`hidden + lora(hidden)` does. `output[:] = output * 2` happens to pass because
+scaling by a constant saves nothing, so don't rely on it. A replacement built from
+nothing cuts the graph instead
+([below](#replacements-and-the-graph)).
+
+**Edit at the point you intercept.** Reading a *later* module's output advances the
 forward past the earlier one, and an in-place write after that point lands on a
 value the model has already consumed:
 
@@ -245,6 +252,27 @@ with model.trace(prompt):
 ```
 
 Moving `hidden *= 2` above the `h[8]` read fixes both.
+
+### Replacements and the graph
+
+**A replacement has to descend from the value it replaces if you want gradients.**
+`output = torch.zeros_like(output)` hands the model a tensor autograd has never
+seen and cuts the graph there, with two different consequences:
+
+- Replace a whole block's `.output` (every path severed) and a later `.grad` read
+  on anything captured upstream fails with an object id for a location:
+  `OutOfOrderError: '139932764543792.grad.i0' was requested but the model already
+  ran past it`.
+- Replace a bypassed submodule's `.output` (an MLP or attention — the residual
+  stream routes around it) and upstream `.grad` reads **succeed**, silently
+  missing that module's path. Even a detached copy of the very same values leaves
+  the forward bit-identical and the upstream gradient wrong, with no warning.
+
+`output[:] = 0` writes through the existing tensor and keeps the graph; so does any
+replacement built from the old value (`output = output * 0`,
+`output = output + steering`). A long
+number where an error should name a module path means this happened; with no
+error, audit fresh-tensor replacements for a silently partial gradient.
 
 ## Where gradients are unavailable
 

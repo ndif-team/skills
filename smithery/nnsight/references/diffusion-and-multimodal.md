@@ -243,6 +243,7 @@ logging.getLogger("diffusers").setLevel(logging.ERROR)
 
 sd = DiffusionModel("stabilityai/sd-turbo", torch_dtype=torch.float16,
                     safety_checker=None, dispatch=True, device_map="cuda")
+# diffusers places the pipeline with device_map=; device= is ignored here
 sd.pipeline.set_progress_bar_config(disable=True)
 
 PROMPT = "a red apple on a wooden table"

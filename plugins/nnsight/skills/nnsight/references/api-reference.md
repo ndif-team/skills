@@ -60,8 +60,12 @@ batch with `tracer.invoke(...)` blocks.
 | `.device` / `.devices` | device(s) of its parameters |
 | `.path` | its dotted path in the tree |
 
-If a child module is named after one of these, the child moves to `.E_output` /
-`.E_input` on that module and the property keeps the plain name.
+If a child module is named after one of these (BERT's and RWKV-4's attention have
+a child literally called `output`), the child moves to `.E_output` / `.E_input` on
+that module, the property keeps the plain name, and nnsight warns at load.
+`print(model)` labels the child `E_output/output`, so the printed tree is the one to
+type. Its path is unchanged — `named_modules()` still lists `...attention.output` —
+only attribute access moved, which is what `get()` and `rename` go through.
 
 ## Envoy methods
 
@@ -140,6 +144,8 @@ environment.
 | `SourceNotAvailable` | no Python source to instrument (builtin/C), a submodule call, or an assignment op |
 | `WithBlockNotFoundError` | the trace body's source could not be read |
 | `NotImplementedError` (batching) | this model can't batch multiple input invokes |
+| `NameError` / `UnboundLocalError` after the block | the name was never `.save()`d (`UnboundLocalError` when the trace is inside a function) |
+| `NameError` inside the block | a name bound in an invoke, read by trace-body code outside the invokes (which runs first) or by a sibling invoke that has not parked — see [batching.md](batching.md#sharing-values-across-invokes) |
 | `ValueError: save() was called outside a trace` | move the save inside |
 | `ValueError: Cannot access ... outside of interleaving` | `.output` read outside a trace — also what an input-less `trace()` with no `invoke` says |
 

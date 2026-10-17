@@ -1,13 +1,14 @@
 ---
 name: interp-experiment-design
-description: Design an interpretability experiment that supports the claim it is meant to support — choosing a metric, building prompt sets and minimal pairs, the controls and baselines that separate a finding from an artifact, sanity checks that catch wiring bugs before they become results, the correlational-to-causal ladder, statistical hygiene, and compute budgeting. Use before writing intervention code, when interpreting a result that looks too good, or when deciding which technique answers a given question.
+description: A planning checklist and router for interpretability experiments, not a technique. Use to plan a study, when asking "is this result real?", to decide which method answers a question (logit lens, probing, patching, tracing, ablation, attribution, circuits, SAEs, steering, editing), or to choose controls and a metric. Covers logit-difference metrics, wiring checks, nulls, minimal pairs, held-out splits, and the correlational-to-causal ladder.
 ---
 
 # Designing an Interpretability Experiment
 
 Most wrong interpretability results are not bugs in the intervention code. They
 come from a metric that measures the wrong thing, a missing control, or a claim
-one step stronger than the evidence. This skill is the checklist.
+one step stronger than the evidence. This skill is the checklist; the technique
+skills it routes to hold the code.
 
 <!-- test: setup -->
 ```python
@@ -30,24 +31,23 @@ rome = model.tokenizer.encode(" Rome")[0]
 | Where does the answer become readable? | `logit-lens` |
 | Is this information present at all? | `probing` |
 | Which component carries it? | `activation-patching` |
+| Where is a fact stored (restore one state into a noised run)? | `causal-tracing` |
 | Is this component necessary? | `ablation` |
 | Which components, at scale? | `attribution-patching` → verify |
 | Which subgraph implements the task? | `circuit-discovery` |
 | What does this head attend to? | `attention-analysis` |
+| Which interpretable features are active? | `sae-and-dictionary-learning` |
 | Can I control the behavior? | `model-steering` |
 | Can I change what it knows? | `model-editing-and-lora` |
 
-Notice the ladder: lens and probes are **correlational**, patching and ablation
-are **causal**, steering and editing are **manipulative**. Each rung supports a
-stronger claim than the one below, and none of them supports the rung above.
+The ladder: lens and probes are **correlational**, patching and ablation are
+**causal**, steering and editing are **manipulative**. Each rung supports a
+stronger claim than the one below, and none supports the rung above.
 
 ## 2. Build a metric that isolates the effect
 
-A metric must move when the thing you care about moves and stay put otherwise.
-
 **Prefer a logit difference over a probability.** `P(answer)` mixes "the right
-answer got likelier" with "everything got likelier" — an intervention that
-flattens the distribution changes it for uninteresting reasons.
+answer got likelier" with "everything got likelier".
 
 ```python
 with model.trace() as tracer:
@@ -63,15 +63,11 @@ print(f"clean {float(clean_metric):+.3f}  corrupt {float(corrupt_metric):+.3f}  
 ```
 
 Those endpoints turn every later number into a **fraction of the gap recovered**,
-which is comparable across prompts, layers, and models. Raw logits are not.
-
-Avoid metrics that saturate: probabilities near 0 or 1 have vanishing gradients,
-which silently breaks any gradient-based method (see `attribution-patching`).
+comparable across prompts, layers, and models. Avoid saturating metrics:
+probabilities near 0 or 1 have vanishing gradients, which silently breaks
+`attribution-patching`.
 
 ## 3. Sanity-check the wiring before trusting any result
-
-Three checks, each one line of extra code, each catching a class of bug that
-otherwise produces a publishable-looking figure.
 
 **A no-op intervention must do nothing.** Patch a value with itself:
 
@@ -87,8 +83,7 @@ with model.trace(clean):
 print(f"no-op patch: {float(noop):+.3f}  (should equal clean {float(clean_metric):+.3f})")
 ```
 
-If that moves, your indexing, positions, or donor source is wrong — stop and fix
-it before running anything else.
+If that moves, your indexing, positions, or donor source is wrong.
 
 **An extreme intervention must do something.** If zeroing a whole layer leaves the
 metric unchanged, the intervention is not landing:
@@ -102,10 +97,10 @@ with model.trace(clean):
 print(f"layer zeroed: {float(destroyed):+.3f}  (should be far from {float(clean_metric):+.3f})")
 ```
 
-Make the extreme value zero or a real tensor, never a large constant. Every block
-reads the residual stream through a LayerNorm, which subtracts the mean and divides
-by the standard deviation, so a constant added to every channel is removed before
-anything sees it:
+Make the extreme value zero or a real tensor, never a large constant: every block
+reads the residual through a LayerNorm, which subtracts the mean, so a constant
+added to every channel never arrives — and `mlp.output[:] = 1000` looks like no
+intervention at all:
 
 ```python
 with model.trace() as tracer:
@@ -114,91 +109,61 @@ with model.trace() as tracer:
         with tracer.invoke(clean):
             model.transformer.h[6].output[:] += value
             probes.append(model.output.logits[0, -1].log_softmax(-1)[paris].detach())
-    with tracer.invoke(clean):
-        model.transformer.h[6].output[..., 0] += 100
-        probes.append(model.output.logits[0, -1].log_softmax(-1)[paris].detach())
 
-added_zero, added_huge, one_channel = (float(p) for p in probes)
-print(f"+0 -> {added_zero:.5f}   +10000 -> {added_huge:.5f}   "
-      f"+100 on one channel -> {one_channel:.5f}")
-assert abs(added_huge - added_zero) < 1e-2        # the constant never arrives
-assert abs(one_channel - added_zero) > 1.0        # one channel does
+assert abs(float(probes[1]) - float(probes[0])) < 1e-2    # +10000 everywhere: no effect
 ```
 
-```
-+0 -> -2.65971   +10000 -> -2.65883   +100 on one channel -> -8.26438
-```
-
-Adding ten thousand to every channel moves the answer's log-probability by less
-than `1e-3`, and what little movement there is comes from float32 losing precision
-while the normalisation subtracts the constant back off.
-The same trick makes `mlp.output[:] = 1000` indistinguishable from zero-ablating
-it, so a check built on a large constant is blind to an intervention that never
-landed.
-
-**The unmodified baseline must reproduce the known behavior.** Run it in the same
-trace as the intervention, not from memory of a previous session.
+**The unmodified baseline must reproduce the known behavior** — in the same trace
+as the intervention, not from memory of a previous session.
 
 ## 4. Controls
 
-An effect is only evidence if the null does worse. Pick the control that matches
-the claim:
+An effect is only evidence if the null does worse:
 
 | Claim | Control |
 |---|---|
 | this component matters | the same intervention on a random component |
 | this direction encodes X | a random direction of the same norm |
 | this circuit is the mechanism | a random subgraph of the same size, **and the empty circuit** |
-| this probe found a representation | shuffled labels; a probe at layer 0 |
+| this probe found a representation | shuffled labels; a probe at layer 0; held-out *words*, not rows |
 | this steering vector works | the negated vector; a random vector |
 
 ```python
 generator = torch.Generator(device=model.device).manual_seed(0)
-resid_norm = None
 
 with model.trace(clean):
-    resid = model.transformer.h[6].output
-    resid_norm = resid[0, -1].norm().detach().save()
+    resid_norm = model.transformer.h[6].output[0, -1].norm().detach().save()
 
-real = torch.randn(768, generator=generator, device=model.device)
-real = real / real.norm()
+random_dir = torch.randn(768, generator=generator, device=model.device)
+random_dir = random_dir / random_dir.norm()
 
-with model.trace() as tracer:
-    with tracer.invoke(clean):
-        model.transformer.h[6].output[:, -1, :] += 0.5 * float(resid_norm) * real
-        logits = model.output.logits[0, -1]
-        random_effect = (logits[paris] - logits[rome]).detach().save()
+with model.trace(clean):
+    model.transformer.h[6].output[:, -1, :] += 0.5 * float(resid_norm) * random_dir
+    logits = model.output.logits[0, -1]
+    random_effect = (logits[paris] - logits[rome]).detach().save()
 
-print(f"random direction moved the metric by "
-      f"{float(random_effect) - float(clean_metric):+.3f}")
+print(f"random direction moved the metric by {float(random_effect) - float(clean_metric):+.3f}")
 ```
 
 Whatever a random direction achieves is the floor your real direction must clear.
 
-**Find the floor before you normalise to it.** A score of the form
-`(value − baseline) / (clean − baseline)` is only meaningful if the intervention can
-actually reach `baseline`. Ablating attention heads cannot reach a corrupt prompt's
-metric, because the MLPs and the residual stream are untouched, so the empty
-circuit — every candidate component ablated — is the real zero. Measuring it is one
-extra run, and without it a circuit of ten deliberately irrelevant heads can score
-85% (see the `circuit-discovery` skill, which measures exactly that).
+**Find the floor before you normalise to it.** `(value − baseline) / (clean −
+baseline)` means something only if the intervention can reach `baseline`.
+Ablating attention heads cannot reach a corrupt prompt's metric — the MLPs and
+residual stream are untouched — so the empty circuit is the real zero. Without it
+a circuit of ten irrelevant heads can score 85% (the `circuit-discovery` skill
+measures exactly that).
 
 ## 5. Prompts: one is an anecdote
 
-A single prompt gives one sample of a noisy process. Layer indices, head rankings,
-and steering coefficients all shift across paraphrases.
+- Use a **set** of prompts sharing the structure under test, and a held-out set
+  the analysis never saw.
+- Use **minimal pairs**: identical token count and structure, differing only in
+  the variable. Assert the lengths match.
+- Vary surface form (paraphrase, reorder, change names) so the finding is about
+  the task, not the string.
 
-- Use a **set** of prompts sharing the structure under test (8–100 for a
-  qualitative result; more for a quantitative one).
-- Use **minimal pairs**: identical token count, identical structure, differing only
-  in the variable. Assert the lengths match — mismatched pairs silently make every
-  position index meaningless.
-- Hold out prompts the analysis never saw and report the effect there.
-- Vary surface form deliberately (paraphrase, reorder, change names) to check the
-  finding is about the task rather than the string.
-
-The alignment assert is not decoration. Here it is catching a pair that looks fine
-and is not:
+The alignment assert catches a pair that looks fine and is not:
 
 <!-- test: expect-error AssertionError -->
 ```python
@@ -210,94 +175,76 @@ for a, b in pairs:
     assert len(model.tokenizer(a).input_ids) == len(model.tokenizer(b).input_ids), (a, b)
 ```
 
-"The Statue of Liberty…" and "Big Ben…" tokenize to different lengths, so position
-`i` is a different thing in each. Without the assert, every position-indexed result
-from that pair would be meaningless — and nothing would have raised.
-
-Filter the set instead of trusting it:
-
-```python
-candidates = [
-    ("The Eiffel Tower is in the city of", "The Colosseum is in the city of"),
-    ("The Statue of Liberty is in the city of", "Big Ben is in the city of"),
-    ("The Brandenburg Gate is in the city of", "The Sydney Opera is in the city of"),
-]
-pairs = [(a, b) for a, b in candidates
-         if len(model.tokenizer(a).input_ids) == len(model.tokenizer(b).input_ids)]
-
-print(f"{len(pairs)} of {len(candidates)} candidate pairs are aligned")
-```
+Those two tokenize to different lengths, so position `i` is a different thing in
+each, and nothing else would have raised. Filter candidate pairs on the same test
+rather than trusting the set.
 
 ## 6. Statistical hygiene
 
-**Multiple comparisons are everywhere.** Scoring 144 heads and reporting the top
-one means the top one is partly noise. Report the whole distribution, keep a
-held-out set, or correct.
+- **Multiple comparisons.** Scoring 144 heads and reporting the top one means the
+  top one is partly noise. Report the distribution, hold out, or correct.
+- **Seeds** wherever noise is injected or parameters initialized (causal tracing,
+  probes, DAS, SAEs). If the answer changes with the seed, it is not an answer.
+- **Effect sizes over binaries.** "Recovers 60% of the gap", not "patching worked".
+- **State the search space** and any truncation behind a top-K list.
 
-**Seeds matter** wherever noise is injected (causal tracing) or parameters are
-initialized (probes, DAS, SAEs). Average over several; if the answer changes with
-the seed, it is not an answer.
+## 7. Readable here is not used here
 
-**Effect sizes over binaries.** "Recovers 60% of the gap" is information; "patching
-worked" is not.
+**Position migration.** Probe accuracy at a position says nothing about whether
+that position is the causal route. On subject-verb agreement in GPT-2 ("The keys
+near the cabinet" → ` are`), subject number is decodable at the final position
+from layer 2, yet patching that position recovers nothing until layer 7: through
+layer 6 the later layers re-read number from the subject's own position, and only
+then does it migrate to the end. A probe-site claim ("the model represents X
+*here* and uses it") made from the probe alone would be wrong for five layers.
+**Pair every probe-site claim with a patch or a direction interchange at the same
+(layer, position)** — the `probing` skill's interchange measures both on one table.
 
-**Report what you searched.** A top-5 list from a search over 12 layers means
-something different from the same list out of 144 heads × 10 positions. State the
-search space and any truncation.
+## 8. From question to design
 
-## 7. Compute budget
+A compound claim — "GPT-2 represents subject number linearly *and* uses that
+representation for agreement" — decomposes into steps, each owned by a skill:
 
-Design the experiment to fit, using the `nnsight` skill's primitives:
+1. **Stimuli that decorrelate confounds.** Cross the variable with its nearest
+   confound — subject number × attractor number — so neither predicts the other.
+2. **Minimal pairs of equal length**, differing only in the variable, with the
+   token-count assert from section 5 run over the whole set.
+3. **Split by lexical item.** Hold out subject nouns, not rows (`probing`).
+4. **Correlational pass.** Probes by layer and position, with shuffled-label and
+   random-direction floors (`probing`).
+5. **Causal pass.** A layer × position patch map with self-patch and random-donor
+   nulls (`activation-patching`); then interchange and mean-ablation along the
+   probe direction against a magnitude-matched random shift (`probing`).
+6. **Falsifiers, written before running.** E.g. "if the 1-D interchange recovers
+   under half of the full-residual patch, the linear claim fails at that site".
 
-| Situation | Move |
-|---|---|
-| N variants of one intervention | one `tracer.invoke` each → one forward pass |
-| activations from many modules | one trace, loop inside, or `tracer.cache()` |
-| only layers 0..L matter | `tracer.stop()` after L |
-| the donor run is reused | cache it once, outside the sweep |
-| every component, large model | attribution first, verify the top-K |
-| model too large to host | NDIF — see `remote` |
+Sweep in invokes throughout: N variants of one intervention are N `tracer.invoke`s
+in one forward pass (the `nnsight` skill).
 
-The pattern that changes an experiment's feasibility most is the sweep-in-invokes
-one: a 144-condition head scan is 12 batched traces, not 144.
+## 9. Before you claim it
 
-## 8. Before you claim it
-
-- [ ] The metric moves for the reason you think (no-op and extreme checks pass)
-- [ ] A baseline ran in the same trace as the intervention
-- [ ] A control (random component / direction / label) did worse
-- [ ] More than one prompt, and a held-out set
-- [ ] Effect reported as a fraction of a known span, not a raw number
-- [ ] The search space and any pruning are stated
-- [ ] Ablation type / patch direction / corrupt distribution are stated — results
-      are not comparable across those choices
-- [ ] The claim matches the rung: readable ≠ used; sufficient ≠ necessary;
-      correlated ≠ causal
-- [ ] The negative results are reported too — a component that did *not* matter is
-      as informative as one that did
+- No-op and extreme checks pass; the baseline ran in the same trace.
+- A control did worse; the effect is a fraction of a known span.
+- More than one prompt, plus a held-out set; search space stated.
+- Ablation type, patch direction, and corrupt distribution stated.
+- The claim matches the rung: readable ≠ used, sufficient ≠ necessary,
+  correlated ≠ causal, decodable here ≠ routed through here.
+- The falsifier was written down before the run, and checked.
+- Negative results reported too.
 
 ## Common ways experiments go wrong
 
-**Measuring the intervention instead of the model.** Large interventions push the
-network off-distribution; you learn about the perturbation, not the mechanism.
-Keep interventions in-distribution (mean/resample rather than zero) where you can.
-
-**Confirming the hypothesis you started with.** Decide in advance what result
-would falsify the claim, and check for it.
-
-**Reading a heatmap as a mechanism.** A bright cell says an intervention there
-changed the output. It does not say what the component computes.
-
-**Trusting an approximation you never validated.** Attribution patching, probes,
-and SAEs are all models of the model. Validate against ground truth on a subset.
-
-**Generalizing across scale.** GPT-2 small is not a small Llama. Findings about
-where something lives rarely transfer across model families or sizes without
-re-running.
+- **Measuring the intervention instead of the model.** Large interventions push
+  the network off-distribution; prefer mean/resample over zero where you can.
+- **Reading a heatmap as a mechanism.** A bright cell says an intervention there
+  changed the output, not what the component computes.
+- **Trusting an unvalidated approximation.** Attribution patching, probes, and SAEs
+  are models of the model; validate against ground truth on a subset.
 
 ## Related skills
 
 - `nnsight` — the primitives every experiment is built from
-- `activation-patching`, `ablation`, `probing`, `circuit-discovery` — techniques,
-  each with its own controls section
+- `activation-patching`, `causal-tracing`, `ablation`, `probing`,
+  `circuit-discovery`, `sae-and-dictionary-learning` — techniques, each with its
+  own controls
 - `debugging` — when the code, rather than the design, is the problem

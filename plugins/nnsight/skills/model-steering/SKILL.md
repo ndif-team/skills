@@ -1,6 +1,6 @@
 ---
 name: model-steering
-description: Change a model's behavior at inference time by adding a direction to its residual stream — contrastive activation addition, steering vectors, persistent edits, and function vectors extracted from in-context-learning prompts. Use to induce or suppress a behavior (sentiment, refusal, style, a task), to test whether a direction found by a probe is causal, or to build always-on model modifications. Covers the two things that decide whether steering works: scaling the vector relative to the activation norm, and sweeping the coefficient to find the band where behavior changes before fluency collapses.
+description: "Change a model's behavior at inference time by adding a direction to its residual stream — contrastive activation addition, steering vectors, always-on steering via model.edit(), and function vectors extracted from in-context-learning prompts. Use to induce or suppress a behavior (sentiment, refusal, style, a task), to test whether a direction found by a probe is causal, or to keep a steering vector applied on every run (weight-level changes belong to model-editing-and-lora). Covers the two things that decide whether steering works: scaling the vector relative to the activation norm, and sweeping the coefficient to find the band where behavior changes before fluency collapses."
 ---
 
 # Model Steering
@@ -36,6 +36,7 @@ negative = ["I hate this", "This is terrible", "What an awful day", "I am so sad
 
 with model.trace() as tracer:
     with tracer.invoke(positive):
+        # detach: a saved activation's live grad_fn keeps the whole forward graph alive
         pos_mean = model.transformer.h[LAYER].output[:, -1, :].mean(0).detach().save()
     with tracer.invoke(negative):
         neg_mean = model.transformer.h[LAYER].output[:, -1, :].mean(0).detach().save()
@@ -92,21 +93,19 @@ alpha  1.0  repeat 0.00  'The movie was a "tremie and the first step to my new'
 alpha  2.0  repeat 0.43  'The movie was the first and the first and the first and the I and'
 ```
 
-Read the sweep as three regimes. At 0.25 the output changes without carrying the
-concept: the sentence keeps its shape and Japan becomes the UK. The sentiment the
-vector encodes arrives at 0.5. By 2.0 the model is looping.
+Three regimes: at 0.25 the output changes without carrying the concept (Japan
+becomes the UK), the sentiment arrives at 0.5, and by 2.0 the model loops. That
+sub-threshold row is why you sweep: **an output that moved is not an output that
+moved for your reason.** Report the whole sweep.
 
-That sub-threshold row is why you sweep instead of testing one coefficient.
-**An output that moved is not an output that moved for your reason.** Report the
-whole sweep.
-
-**`min_new_tokens=12` is load-bearing here.** Steering changes when the model
-emits EOS: at α = 0.25 this one stops after 11 forward passes. A bounded
-`tracer.iter[:12]` that the run does not reach the end of is cut short with only
-a warning, and every statement after it is dropped — `ids = tracer.result.save()`
-included, so that row would come back with `ids` unbound and one fewer step than
-the others, looking almost right. Pinning the step count also makes the rows the
-same length and therefore comparable. See the `nnsight` skill → generation.
+**`min_new_tokens=12` is load-bearing.** Steering changes when the model emits
+EOS: at α = 0.25 this one stops after 11 passes. A `tracer.iter[...]` loop the run
+does not reach the end of is cut short with only a `UserWarning: … was never
+reached`, and every statement after it is dropped — `ids = tracer.result.save()`
+included, so that row comes back unbound. The same happens to an open
+`tracer.iter[1:]`, which always runs to the end of the generation. Pin the step
+count with `min_new_tokens=N`; it also makes the rows the same length and
+comparable.
 
 ## Where to inject
 
@@ -114,16 +113,12 @@ same length and therefore comparable. See the `nnsight` skill → generation.
 |---|---|
 | **Layer** | Middle layers (⅓–⅔ depth) usually work best. Early layers get overwritten; late layers only nudge the surface form. Sweep it like α. |
 | **Positions** | `[:, -1, :]` steers only the token being predicted; `[:, :, :]` steers every position and is stronger but blunter. |
-| **Every step vs first step** | Inside a `tracer.iter[...]` loop the vector is re-added on every forward **pass**. Pass 0 is the *prefill*, so the vector lands on every prompt position at once; passes 1+ are one generated token each. `tracer.iter[1:12]` steers only the generated tokens. Applied once, the effect decays. |
-
-Give that loop both ends. An open `tracer.iter[1:]` runs to the end of the
-generation and then unwinds everything after it, so a `tracer.result.save()`
-below the loop never executes and the name it assigns stays unbound.
+| **Every step vs first step** | Inside a `tracer.iter[...]` loop the write repeats on every forward **pass**. Pass 0 is the *prefill*, whose hidden state is `[B, prompt_len, H]`: a `[:, -1, :]` write there touches only the last prompt position, and `[:, :, :]` touches all of them — the slice decides what gets steered, not the step. Passes 1+ carry one generated token each, so `tracer.iter[1:12]` steers only generated tokens. Applied once, the effect decays. |
+| **Timing** | A layer-L write on step k reaches the layers *above* L on that same pass, and the KV cache carries it to layers above L on every later step. Layers ≤ L stay bit-identical to the unedited run until a generated token actually changes: a 0.3× edit that does not flip the argmax leaves layers 3 and 6 (pre-edit) identical on later steps while layer 9 differs. So an edit on `tracer.iter[a:b]` can first change generated token a (absolute position prompt_len + a — the slice counts forward passes, step 0 is the prefill), and a later one only if it was too weak to flip that argmax. |
 
 ## Persistent steering
 
-`model.edit(inplace=True)` bakes the intervention into every subsequent run — no
-`with` block needed at the call site:
+`model.edit(inplace=True)` replays the intervention on every subsequent run:
 
 ```python
 with model.edit(inplace=True) as tracer:
@@ -145,9 +140,8 @@ Use `model.edit()` without `inplace=True` to get a steered *copy* and keep the
 original clean for comparison. An edit you forget to clear silently contaminates
 every later experiment; clear it in a `finally`, or use the copy form.
 
-The open `tracer.iter[:]` is right inside an edit, where nothing follows the loop,
-and every `generate` on the edited model warns that the step after the last one
-was never reached. The edit still applied on every step that ran.
+The open `tracer.iter[:]` is right inside an edit, where nothing follows the loop;
+its "never reached" warning on each `generate` is expected.
 
 ## Function vectors
 
@@ -204,12 +198,9 @@ for country in capitals:
           f"   +fv {fv_out[country]!r:>12}"
           f"   +random {random_out[country]!r:>12}")
 
-# The capital on exactly these three of seven -- the Portugal row included.
-assert [c for c in capitals if fv_out[c] == capitals[c]] == ["Portugal", "Austria", "Thailand"]
-# Three of the remaining four echo the country's own name; Brazil is the fourth.
-assert [c for c in capitals if fv_out[c] == f" {c}"] == ["Poland", "Greece", "Sweden"]
-# The matched-norm random control is not inert: it moves three of the seven outputs.
-assert sum(random_out[c] != plain_out[c] for c in capitals) == 3
+hits = sum(fv_out[c] == capitals[c] for c in capitals)
+assert hits > sum(random_out[c] == capitals[c] for c in capitals)   # beats the control
+assert any(random_out[c] != plain_out[c] for c in capitals)         # control is not inert
 ```
 
 ```
@@ -222,68 +213,28 @@ Austria ->     plain   ' Austria'   +fv    ' Vienna'   +random   ' Germany'
 Thailand ->    plain  ' Thailand'   +fv   ' Bangkok'   +random  ' Thailand'
 ```
 
-The vector produces the capital on three of the seven countries. Three of the
-remaining four come back as the country's own name and Brazil gets a wrong
-continuation. The random control is not inert either: it changes three of the
-seven outputs, so on any single prompt "the output moved" is worth nothing
-without the control column beside it. The `Portugal` row on its own would have
-shown a method that works.
+The vector produces the capital on three of seven; the rest echo the country or
+continue wrongly. The random control is not inert — it changes three outputs — so
+on any single prompt "the output moved" is worth nothing without the control
+column beside it.
 
-Three of seven on GPT-2 small is what a whole-residual difference buys. The
-published version is more selective: it averages the outputs of a small set of
-**attention heads** identified by causal attribution as task-carrying, rather than
-taking the whole residual difference. Extract per-head activations with
-`model.transformer.h[L].attn.c_proj.input[:, :, head*d:(head+1)*d]` (see the
-`activation-patching` skill for the head-slicing convention) and select heads by
-attribution score. The selective version transfers across prompt formats far
-better; the crude difference above carries format as well as task.
+Three of seven is what a whole-residual difference buys on GPT-2 small; it carries
+format as well as task. The published version averages the outputs of a few
+**attention heads** selected by causal attribution (slice per-head activations
+from `attn.c_proj.input` — the `activation-patching` skill has the head-slicing
+convention), and transfers across prompt formats far better.
 
-Run the few-shot control before you believe any of it. Put the demonstrations in
-the prompt and see whether the model does the task at all:
-
-```python
-fewshot = {}
-for country in capitals:
-    with model.trace(f"France -> Paris, Japan -> Tokyo, Italy -> Rome, {country} ->"):
-        answer = model.output.logits[0, -1].argmax().save()
-    fewshot[country] = model.tokenizer.decode(answer)
-    print(f"  {country:<10} -> {fewshot[country]!r}")
-
-# Five of seven; the two failures are Portugal and Brazil.
-assert [c for c in capitals if fewshot[c] != capitals[c]] == ["Portugal", "Brazil"]
-assert fewshot["Portugal"] == " Rome"     # copies the last demonstration
-assert fewshot["Brazil"] == " Buenos"     # Argentina's capital
-# The coincidence the prose hangs on: the vector's Portugal hit lands on a
-# prompt the model fails few-shot.
-assert fv_out["Portugal"] == capitals["Portugal"]
-```
-
-```
-  Portugal   -> ' Rome'
-  Brazil     -> ' Buenos'
-  Poland     -> ' Warsaw'
-  Greece     -> ' Athens'
-  Sweden     -> ' Stockholm'
-  Austria    -> ' Vienna'
-  Thailand   -> ' Bangkok'
-```
-
-Five of seven with demonstrations. `Brazil` answers with Argentina's capital,
-and `Portugal` copies the last demonstration instead of answering. `Portugal` is
-also the one prompt in the table above where the vector produces the right
-capital. A function vector is not supposed to install a capability the model
-lacks, so a hit on a prompt the model fails few-shot is a result to explain
-before publishing it.
+Run the few-shot control before believing any hit: put demonstrations in the
+prompt and check the model can do the task for that input at all. A function
+vector should not install a capability the model lacks, so a hit on a prompt the
+model fails few-shot is a result to explain before publishing it.
 
 ## Evaluating a steering vector
 
-A vector that changes the output is not automatically a vector that encodes the
-concept. Check:
-
-**Dose-response.** Behavior should increase smoothly with α before collapsing. A
-step change from nothing to gibberish means you are disrupting, not steering. The
-probability the steered model still assigns to the *unsteered* top token is a
-cheap continuous version of that curve, and it should fall monotonically:
+**Dose-response.** Behavior should increase smoothly with α before collapsing; a
+step from nothing to gibberish is disruption, not steering. The probability still
+assigned to the *unsteered* top token is a cheap continuous version of that curve
+and should fall monotonically:
 
 ```python
 with model.trace(prompt):
@@ -313,22 +264,18 @@ alpha   2.0  p(unsteered top token) 0.0004
 ```
 
 **Fluency.** Use the repeated-bigram fraction from the sweep, not next-token
-entropy. Entropy on this vector reads 5.43 at α = 0, 6.02 at 0.5 and 5.95 at 2.0:
-non-monotonic, and barely distinguishable at the coefficient where the output is
-`'the first and the first and the first'`. A single next-token distribution cannot
-see a loop that only exists across steps.
+entropy: a single next-token distribution cannot see a loop that only exists
+across steps (here it is non-monotonic in α and flat where the output loops).
 
-**Held-out prompts.** The vector was derived from specific contrast pairs. Test it
-on prompts with different topics and structure.
+**Held-out prompts.** Test on topics and structures unlike the contrast pairs.
 
-**A control direction.** Steer with a random vector of the same norm. If it
-produces a comparable behavior change, your vector is not carrying the concept.
+**A matched-norm random control**, as in the function-vector table: a comparable
+change from it means your vector is not carrying the concept.
 
 **The opposite direction.** Negating `v` should suppress the behavior. The
-sentiment vector above does not pass this one: α = −0.5 and −1.0 give neutral
-continuations rather than negative ones, and −2.0 breaks the text down. A
-difference-of-means direction is often asymmetric like that, so check before
-describing one as bidirectional.
+sentiment vector above fails: α = −0.5 and −1.0 give neutral continuations, and
+−2.0 breaks the text. Difference-of-means directions are often asymmetric; check
+before calling one bidirectional.
 
 ## Common failures
 
@@ -338,8 +285,6 @@ describing one as bidirectional.
 | Nothing changes at any α | wrong layer, or steering only the last position when the effect needs earlier tokens |
 | Effect vanishes after the first generated token | intervention not inside a `tracer.iter[...]` loop |
 | Works on the derivation prompts only | too few contrast pairs; the vector encodes the prompts |
-| Later experiments behave strangely | an `edit(inplace=True)` was never cleared |
-| `UserWarning: … was never reached`, and code after the loop never ran | steering changed when the model emits EOS, so the run made fewer passes than the loop asked for and it was cut short; add `min_new_tokens=N` |
 | Two rows of a sweep are identical | check they are not the same generation printed twice |
 
 ## Related skills

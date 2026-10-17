@@ -5,27 +5,15 @@ confusing nnsight behavior follows from it.
 
 ## The body of a trace does not run where you wrote it
 
-<!-- test: skip -->
-```python
-with model.trace("hello"):
-    h = model.transformer.h[5].output
-    print("this does not print here")
-```
-
 `with model.trace(...)` does not execute its body inline. On `__enter__`, nnsight
 parses the block's **source**, compiles it, and raises an internal exception to
 skip past it. On `__exit__` it runs the compiled block *interleaved with the
 model's forward pass*, then copies the saved names back into your frame.
 
-Three consequences you feel immediately:
-
-1. **Values must be `.save()`d to escape.** Ordinary assignment inside the block
-   is invisible afterwards — the block ran in a different frame.
-2. **`.output` reads block.** Reading `model.transformer.h[5].output` parks your
-   code until the model actually reaches layer 5 and produces that tensor.
-3. **The block's source must be available.** Code typed into a bare REPL where
-   `inspect.getsource` fails cannot be traced. Files, IPython, and notebooks are
-   fine.
+So values must be `.save()`d to escape (the block ran in a different frame),
+`.output` reads park until the model produces that tensor, and the block's source
+must be available — a bare REPL where `inspect.getsource` fails cannot trace;
+files, IPython and notebooks are fine.
 
 ## Interleaving: your code and the model take turns
 
@@ -55,9 +43,8 @@ with model.trace("The Eiffel Tower is in the city of"):
 print(round(mean.item(), 4))
 ```
 
-There is no `.value` to unwrap and no proxy type. If a variable inside a trace
-does not behave like a tensor, it is because it genuinely is not one (e.g. a
-module returned a tuple).
+There is no `.value` to unwrap and no proxy type. A variable that does not behave
+like a tensor genuinely is not one (e.g. a module returned a tuple).
 
 ## The ordering rule
 
@@ -98,70 +85,31 @@ before `h[0].mlp` comes before `h[0].output` comes before `h[1]`.
 ## `.save()` semantics
 
 `.save()` marks a value to be pushed back to your frame when the outermost trace
-exits. Two rules cover every mistake:
+exits. The push-back returns the block's *locals*, filtered to the marked ones —
+which is why both rules in SKILL.md hold:
 
-**1. Bind what you save.** The push-back returns the block's *locals*, filtered to
-the marked ones. A bare `model.output.logits.save()` on its own line marks a value
-with no name to return it under, so it silently never arrives.
+- **Bind what you save.** A bare `model.output.logits.save()` on its own line marks
+  a value with no name to return it under, so it silently never arrives.
+- **Save the container, not the elements.** A list is returned only if the list
+  itself is marked. Appending `x.save()` into an unsaved list happens to work
+  locally (you mutated a list in your own frame) and returns nothing remotely.
 
-```python
-with model.trace("hello"):
-    logits = model.output.logits.save()          # right — bound to a name
-```
+`nnsight.save(x)` and `x.save()` are the same; the method form is mounted onto
+every object by a C extension, so prefer `nnsight.save(...)` for plain builtins and
+for code that must not depend on that mount. Either raises `ValueError` outside a
+trace — there is nothing to return the value from.
 
-**2. Save the container, not the elements.** When collecting across layers or
-steps, mark the list itself and append raw values.
+Only the **outermost** context filters on saves. An inner trace (inside a
+`model.session()`) or a `tensor.backward()` block pushes everything up to its
+parent, so `.save()` is needed only at the outer boundary — see
+[control-flow.md](control-flow.md#modelsession--several-traces-one-scope).
 
-```python
-with model.trace("The Eiffel Tower is in the city of"):
-    per_layer = nnsight.save([])                 # the list is what comes back
-    for block in model.transformer.h:
-        per_layer.append(block.output[0, -1].mean())
-
-print(len(per_layer))                            # 12
-```
-
-Appending `x.save()` into an unsaved list happens to work locally (you are
-mutating a list in your own frame) and silently returns nothing remotely. Save the
-container.
-
-Two spellings, same thing: `nnsight.save(x)` and `x.save()`. The method form is
-mounted onto every Python object by a C extension; prefer `nnsight.save(...)` for
-plain builtins (lists, dicts, ints) and for code that must not depend on that
-mount.
-
-**`.save()` outside a trace raises.** There is no trace to return the value from:
-
-<!-- test: expect-error ValueError -->
-```python
-import nnsight
-buffer = nnsight.save([])          # no trace running
-```
-
-## Saving vs. escaping in nested contexts
-
-Only the **outermost** trace filters on saves. Inner traces (a trace inside a
-`model.session()`, or a `tensor.backward()` block inside a trace) push everything
-up to their parent, so you only need `.save()` at the outer boundary.
-
-```python
-with model.session() as session:
-    with model.trace("The Eiffel Tower is in"):
-        a = model.transformer.h[-1].output[0, -1]     # no .save() needed here
-    with model.trace("The Colosseum is in"):
-        b = model.transformer.h[-1].output[0, -1]
-        similarity = torch.nn.functional.cosine_similarity(a, b, dim=0).save()
-
-print(round(similarity.item(), 3))
-```
-
-## What runs where
-
-Inside a trace body you can use ordinary Python — `if`, `for`, function calls,
-list comprehensions — and it runs in the worker greenlet against real values.
-The cost is that anything you touch must be reachable there: for **remote**
-execution the body is serialized and shipped, so locals from your file need
-`nnsight.register(...)`. See the `remote` skill.
+Trace-body code outside any `tracer.invoke` runs **before** the invoke workers, so
+it can never read a name an invoke binds; accumulate into a saved container from
+inside the invokes instead — see
+[batching.md](batching.md#sharing-values-across-invokes). The body is ordinary
+Python against real values; for **remote** execution it is serialized and shipped,
+so locals from your own files need `nnsight.register(...)` (the `remote` skill).
 
 ## Mental checklist when something misbehaves
 
@@ -172,6 +120,7 @@ execution the body is serialized and shipped, so locals from your file need
 | `OutOfOrderError` | modules touched out of forward order |
 | `ValueError: Cannot access ... outside of interleaving` | `.output` read outside a trace body |
 | Everything after a loop vanished | unbounded `tracer.iter[:]` / `tracer.all()` — see [generation.md](generation.md) |
-| `NameError` on a cross-invoke value | needs `tracer.barrier(n)` — see [batching.md](batching.md) |
+| `NameError` on a cross-invoke value | the reader has not parked past the binder — park it, or `tracer.barrier(n)`; see [batching.md](batching.md#sharing-values-across-invokes) |
+| `NameError` in trace-body code outside the invokes | that code runs before every invoke; write into a `nnsight.save({})` from inside the invokes |
 
 Full error catalogue: the `debugging` skill.

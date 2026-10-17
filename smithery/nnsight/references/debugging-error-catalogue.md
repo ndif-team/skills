@@ -64,6 +64,13 @@ error, the writes landing one step late and the trailing code running. Verify a
 loop's writes against a no-write baseline per step rather than trusting a clean
 exit — see `docs/errors/out-of-order-error.md` for the full table.
 
+**A `.source` op shifts even at step 0** when its module's `.source` is first
+touched inside the loop. `attn.output[0]` read before
+`attn.source.attention_interface_1.output` in `for step in tracer.iter[:4]` gives
+the op's steps 1–3 and a `.i3` "never reached" warning, with no error. Touch
+`attn.source` before the trace and the same body raises; read the op first and it
+is correct. Compare the lengths of parallel lists.
+
 ## Context and setup
 
 | Exception | Message | Cause → fix |

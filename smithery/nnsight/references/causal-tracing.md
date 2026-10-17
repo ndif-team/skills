@@ -28,7 +28,7 @@ import torch
 import nnsight
 from nnsight import TransformersModel
 
-model = TransformersModel("Qwen/Qwen3-8B", device_map="cuda",
+model = TransformersModel("Qwen/Qwen3-8B", device="cuda",
                           dtype=torch.bfloat16, dispatch=True)
 
 prompt = "The Eiffel Tower is in the city of"

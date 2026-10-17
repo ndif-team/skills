@@ -1,19 +1,22 @@
 # Sizing, placement, and eviction
 
 The one sentence to hold onto: **NDIF's GPU accounting is a model, not a
-measurement.** Source of record: `docs/runbooks/model-oom-on-deploy.md`,
-`docs/gotchas/gpu-and-memory.md`, `docs/concepts/deployments-and-eviction.md`.
+measurement.** The controller reserves bytes in its own per-GPU ledger from an
+estimate made before anything loads, and never reads the card's free memory. A
+deploy is refused when the ledger says no; it OOMs when the ledger said yes and
+the card disagreed. Source of record: `docs/runbooks/model-oom-on-deploy.md`,
+`docs/concepts/deployments-and-eviction.md`,
+`docs/operating/models-and-deployment.md`.
 
 ## How the estimate is made
 
-`ModelEvaluator`, memoized per model key:
+`ModelEvaluator`, memoized per model key, asks nnsight to describe the
+checkpoint without loading it:
 
-1. Build the architecture on the **meta device** through nnsight — no weights
-   downloaded, just the config and module tree. (The size and parameter count
-   come from the Hub's published parameter count where there is one, falling back
-   to the meta build.)
-2. Sum `nelement() * element_size()` over every parameter **and every buffer** at
-   the target dtype → `base_size_in_bytes`.
+1. For a Hugging Face repo, `base` is the Hub's **published parameter count** ×
+   the dtype's bytes per element. Buffers are not in that count.
+2. A repo that publishes no count is built on the **meta device** (config and
+   module tree, no weights) and counted instead.
 3. Pad:
 
 ```text
@@ -30,9 +33,15 @@ For a 7B model in bf16: base ~14 GB, padded ~14 × 1.15 + 0.5 ≈ 16.6 GB. That 
 the number the ledger reserves, and that padding is the entire budget for
 activations, KV cache, CUDA workspaces and the CUDA context.
 
-The memo is keyed on `(dtype, trust_remote_code)` and recomputes when either
-changes, since element sizes differ and repo code can build a different
-architecture. The controller pins a concrete dtype onto every `DeploymentConfig`
+The actor holds itself to its share twice: accelerate's `max_memory` at load, and
+a per-process allocator cap at run time of `share / card_total` on each assigned
+card — the replica's padded **share** of that card, not size × factor. That is
+why a block can die with `CUDA out of memory ... N MiB allowed` on a nearly empty
+card: it hit its own budget instead of trampling a co-tenant. A sandbox runner
+process is outside this cap.
+
+The memo recomputes when the dtype or `trust_remote_code` changes, since element
+sizes differ and repo code can build a different architecture. The controller pins a concrete dtype onto every `DeploymentConfig`
 before evaluating so the estimate and the load cannot diverge.
 
 ## How placement decides
@@ -41,7 +50,15 @@ before evaluating so the estimate and the load cannot diverge.
 to a degree the model shards into evenly when it will be tensor-parallel. Each
 card the replica lands on is charged `ceil(size / gpus_needed)` — its **share**.
 So a model 1.01× a card takes two cards at about half each and the other half of
-both stays usable by other models. It is a step, not a cliff.
+both stays usable by other models. It is a step, not a cliff. Without tensor
+parallelism a multi-card replica spreads whole layers over its cards with
+accelerate's `device_map="balanced"`.
+
+Worked example, a 27B bf16 model on 80 GB cards that have only 56 GB actually
+free: base = 27.4e9 × 2 B = 54.8 GB, padded = 54.8 × 1.15 + 0.5 = 63.5 GB. The
+ledger sees 80 GB free per card and places it on one; the card cannot hold it.
+`--gpus 2` charges 31.8 GB to each card. An 8B model (16.06 GB base → 18.99 GB
+padded) fits one.
 
 `per_gpu_memory` is `cuda_memory_bytes // total_gpus`, computed once when the
 node first appears. **A node with mixed card sizes is mis-accounted** — every GPU
@@ -129,11 +146,13 @@ reserve capacity for future replicas.
 
 | Message | Means |
 |---|---|
-| `CANT_ACCOMMODATE: placed N of M new replicas before the cluster ran out of room.` | Nodes exist; none can fit the padded size, even after every legal eviction. Placement stops for that model at the first failure. |
+| `CANT_ACCOMMODATE: placed N of M new replicas before the cluster ran out of room.` | Nodes exist; none can fit the padded size, even after every legal eviction. The message carries no arithmetic — get the sized bytes from the controller log below. Placement stops for that model at the first failure. |
+| A node-stated reason, e.g. `asked for N GPUs, but this model shards at most M ways…` | The request cannot be placed as asked. Pick a `gpus` that divides M, or `--max-tp 0` |
 | `No GPU nodes available.` | The controller has zero nodes reporting a `GPU` resource — a different failure entirely. |
-| An evaluator traceback (gated repo, 401, unknown repo id, `trust_remote_code`) | Sizing failed *before* placement. Not a memory problem. |
-| `RuntimeError: '<weight>' is on 'cpu', expected one of CUDA devices [...]` | The budget was too small, so accelerate offloaded the overflow to CPU and the post-load check refused to serve a half-CPU model. Read it as "the estimate was too low". |
-| `torch.cuda.OutOfMemoryError` at load | The estimate was wrong, or a previous actor still holds memory the ledger believes is free. The actor cycles `RUNNING`→`UNHEALTHY` as Ray restarts it. |
+| An evaluator traceback (gated repo, 401, unknown repo id, no network) | Sizing failed *before* placement. Not a memory problem. Set `HF_TOKEN` wherever the deploy runs |
+| An HF "requires you to execute the code" / `trust_remote_code` error | The deployment is untrusted and the repo ships custom modelling code. Redeploy `--trusted` |
+| `RuntimeError: '<weight>' is on 'cpu', expected one of CUDA devices [...]` | A multi-card load's budget was too small, so accelerate offloaded the overflow to CPU and the post-load check refused to serve a half-CPU model. Read it as "the estimate was too low". |
+| `torch.cuda.OutOfMemoryError` at load | The estimate was wrong, or something the ledger cannot see holds the memory. The controller logs `Deployment <model_key> failed during create: <error>`, kills the actor and returns its bytes; users waiting on the model get `Error starting model.` |
 | `CUDA out of memory ... N MiB allowed` **inside a block** | The per-process allocator cap. The weights fit; the activations did not. The replica stays up. Raise padding, or save less. |
 
 The controller is a Ray actor, so its own output does not reach
@@ -184,15 +203,38 @@ model is under-provisioned and will OOM under load, not at deploy.
 | Small models OOMing on fixed overhead | raise `NDIF_DEFAULT_PADDING_BIAS` |
 | A model sits just over a one-GPU boundary | lower padding so it fits one, or accept the second card |
 | Quantized deploy under-estimated | give it a measured `size_bytes` — `nf4` on Llama-3.2-1B estimates 0.62 GB against 1.07 GB really allocated, which 15% padding does not absorb |
-| Nothing fits at all | add capacity |
+| Nothing fits at all | add capacity — `docs/runbooks/add-a-gpu-node.md` |
 
-Both defaults live on the controller and are read at actor construction, so
-changing them means restarting the `ray` service. Verify with:
+The `NDIF_DEFAULT_*` values and `NDIF_MINIMUM_DEPLOYMENT_TIME_SECONDS` are read
+once when the controller imports its module, so changing one means a new
+controller. On compose, set it in the `ray` service's `environment:` and
+**recreate**:
 
 ```bash
-ndif status --verbose | jq '.cluster.evaluator | {padding_factor, padding_bias, dtype}'
+just up ray
 ```
 
+`just restart ray` keeps the old environment; `just ta ray` runs `just down` first
+and tears the whole stack down. Recreating `ray` is an outage: the controller and
+every model actor go, queued and in-flight requests are errored, and only
+`NDIF_DEPLOYMENTS` models (and scheduled ones, on the next reconcile) come back
+on their own. The first request afterwards errors `Error starting model.` — the
+API still holds its old compute connection, and its log shows a
+`ConnectionError` — and the next may 503 until the API reconnects. On a
+from-source install, change the environment `ndif start` runs under, then
+`ndif stop ray` and `ndif start ray`.
+
+Verify the controller picked it up:
+
+```bash
+ndif status --verbose | jq '{default_padding_factor, default_padding_bias, minimum_deployment_time_seconds}'
+```
+
+The `dtype` under `.cluster.evaluator` is torch's process default, not
+`NDIF_DEFAULT_DTYPE`; read each replica's real dtype from
+`ndif status --json-output`.
+
 A per-model `padding_factor` / `padding_bias` / `size_bytes` / `gpus` raises it
-for just the models that need it — via `ndif deploy` flags, a `models.yaml` entry,
-or the dashboard's deploy form.
+for just the models that need it — via `ndif deploy` flags or a `models.yaml`
+entry (the dashboard's deploy form takes `padding_factor` only). `ndif export`
+does not carry the sizing fields, so add them back to an exported file.

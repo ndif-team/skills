@@ -1,63 +1,53 @@
 # The three routes, in full
 
-Each section is self-contained: prerequisites, commands, what you get, and the
-traps specific to that route. The source of record is
-`docs/operating/quickstart.md` (all three) and `docker/README.md` (route 1).
+Each section is self-contained: commands, what you get, and the traps specific
+to that route. The source of record is `docs/operating/quickstart.md` (all
+three), `docker/README.md` (route 1, including the tag table),
+`docs/operating/compose-stack.md` (route 2) and `docs/operating/cli.md`
+(route 3, including what `ndif doctor` checks).
 
 ## Route 1 — `docker run ndif/ndif`
 
-One container runs the whole request path. `NDIF_SERVICE` defaults to `all` in
-the image, and `all` resolves to **redis, minio, ray, api** — the image carries
-its own `redis-server` (apt) and `minio` binary (copied out of
-`quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z`), which is what makes a
-single-container run possible.
+One container runs the whole request path. `NDIF_SERVICE` defaults to `all`,
+which resolves to **redis, rustfs, ray, api** — the image carries its own
+`redis-server` and `rustfs` binaries.
 
 ```bash
 docker run -d --name ndif --gpus all --shm-size 4g \
-    -p 8001:8001 -p 9000:9000 \
+    -p 127.0.0.1:8001:8001 -p 127.0.0.1:9000:9000 \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -e HF_TOKEN \
-    ndif/ndif:0.1.0
+    ndif/ndif
 ```
-
-### Tags
-
-| Tag | Torch wheel | Use when |
-|---|---|---|
-| `latest`, `0.1.0`, `0.1.0-cu126` | CUDA 12.6 | Default. Any CUDA 12.x driver >= 525. |
-| `0.1.0-cu130` | CUDA 13.0 | Drivers at 580 or newer, and Blackwell GPUs (RTX 50xx, B200). No cu128 tag: that torch index stopped at 2.11. |
-
-Pick by the CUDA version in `nvidia-smi`'s header. The versions inside `0.1.0`:
-ndif 0.1.0, nnsight 0.8.0rc1, torch 2.14.0, transformers 5.17.0, ray 2.55.1,
-Python 3.12. The build also records what it resolved to at
-`/etc/ndif/build.json`.
-
-### Other commands from the same image
 
 `ENTRYPOINT` is `ndif` and `CMD` is `start --foreground`, so replacing the
-command runs any other CLI verb:
-
-```bash
-docker run --rm ndif/ndif:0.1.0 version              # no GPU, no volume, no port needed
-docker run --rm --gpus all ndif/ndif:0.1.0 doctor
-docker run --rm -e NDIF_SERVICE=api ndif/ndif:0.1.0  # one service (what compose does)
-```
-
-Against a running container, `docker exec ndif ndif <verb>`.
-
-### Route-1 traps
+command runs any other CLI verb (`docker run --rm ndif/ndif version`,
+`docker run --rm -e NDIF_SERVICE=api ndif/ndif` for one service). Against a
+running container, `docker exec ndif ndif <verb>`.
 
 - **Without a bind mount for `/root/.cache/huggingface`** the image's own
   `VOLUME` gives you an anonymous one: weights survive a restart, not a
   `docker rm`.
-- **`--shm-size 4g` is a floor**, not a recommendation. Ray's plasma store lives
-  in `/dev/shm` and Docker's default is 64 MB.
-- **`--gpus all` hands over every GPU.** `--gpus '"device=0,1"'` restricts it.
-  NDIF sizes placement from each visible GPU's *total* memory and never reads
-  actual free memory, so give it cards nothing else is using.
-- **The dashboard is opt-in:** `-e NDIF_SERVICE="all dashboard"` plus `-p 8081:8081`.
+- **`--shm-size 4g` is a floor.** Ray's plasma store lives in `/dev/shm`.
+- **`--gpus all` hands over every GPU;** `--gpus '"device=0,1"'` restricts it.
+- **The image runs untrusted code in-process even with auth on** — set
+  `NDIF_MODEL_IMPORT_PATH` to the sandbox actor before anyone else submits
+  (`docs/operating/production.md#the-sandboxed-actor-class`). The sandbox is
+  process separation, not a hardened jail (same user, filesystem, network and
+  GPUs); it keeps untrusted requests from reading or editing weights and from
+  training.
+- **Weights land under `<cache>/hub/models--<org>--<name>`** in the mounted
+  cache.
+- **A port already taken: remap only the host side**
+  (`-p 127.0.0.1:<newport>:<port>`). Moving 9000 also needs
+  `-e NDIF_OBJECT_STORE_PUBLIC_URL=http://localhost:<newport>`.
+- **The dashboard is opt-in:** `-e NDIF_SERVICE="all dashboard"` plus
+  `-p 127.0.0.1:8081:8081`.
 
 ## Route 2 — the compose dev stack
+
+Needs `just` (`curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to ~/.local/bin`,
+with `~/.local/bin` on `PATH`).
 
 ```bash
 git clone https://github.com/ndif-team/ndif.git && cd ndif
@@ -65,160 +55,119 @@ just up
 ```
 
 The first `just up` builds one image and runs it three times — as `api`, `ray`
-and `dashboard` — selected per container by `NDIF_SERVICE`. Expect ten minutes or
-more the first time (torch is its own layer, then `requirements.txt`).
+and `dashboard` — selected per container by `NDIF_SERVICE`. Expect ten minutes
+or more, ~8 GB of image and ~8 GB of build cache under Docker's data root.
+`just --list` shows the recipes; each is a one-line
+`docker compose -f docker/docker-compose.yml ...`.
 
-| Recipe | Does |
+| Recipe | Use it for |
 |---|---|
-| `just up [services...]` | `compose up -d`, all or a subset |
-| `just down [-v]` | stop and remove; `-v` also drops the dashboard volume |
-| `just build [services...]` | rebuild the image |
-| `just ta [services...]` | down → build → up — **the full refresh after any `src/` change** |
-| `just restart [services...]` | bounce a container (does *not* pick up code changes) |
-| `just logs [services...]` | follow; Ctrl-C detaches |
-| `just ps` | container status and health |
-| `just nnsight` | print which nnsight the stack will use |
+| `just up [svc...]` | start, **and** apply an `environment:` edit (it recreates the container) |
+| `just ta [svc...]` | after any `src/` change: down → build → up. Always takes the whole stack down first |
+| `just restart [svc...]` | restart processes with their *existing* environment — applies neither code nor config |
+| `just nnsight` | print which nnsight would be bind-mounted |
 
-Every recipe is a thin wrapper over
-`docker compose -f docker/docker-compose.yml ...`; the compose project is named
-`dev`, so the containers are `dev-api-1`, `dev-ray-1`, `dev-dashboard-1` if you
-reach past `just`.
+What a fresh install runs into:
 
-### What compose publishes to the host
-
-| URL | What |
-|---|---|
-| http://localhost:8001 | the API |
-| http://localhost:8081 | admin dashboard (no login — dev mode is on) |
-| http://localhost:8265 | Ray dashboard: actors, nodes, logs |
-| http://localhost:3000 | Grafana (anonymous admin), lands on NDIF — Overview |
-| http://localhost:9000 / :9001 | MinIO S3 API / console (`minioadmin`/`minioadmin`) |
-
-It also publishes Redis 6379, Postgres 5432, Loki 3100, Influx 8086, Prometheus
-9090 and the Ray client port 10001, none of them authenticated. On a laptop that
-is fine; on a routable address it is a full compromise — anyone who can reach
-10001 can run arbitrary code on the cluster.
-
-### The nnsight bind mount
-
-`just up` / `just ta` add `docker/docker-compose.nnsight.yml` when an **editable**
-nnsight is importable from the shell's Python, mounting that checkout over the
-image's copy in `api`, `ray` and `dashboard`. A non-editable nnsight under
-site-packages is deliberately not mounted; no nnsight at all skips the override.
-`just nnsight` prints the decision. This is what lets client-side nnsight changes
-be picked up without a rebuild — and what makes a mismatched client/server
-nnsight or transformers produce `The model architecture on this server doesn't
-match...` or `Your request payload could not be read (AttributeError: Can't get
-attribute ...)`.
-
-### Route-2 traps
-
-- **`just up` after editing `src/` runs the stale image.** Compose only builds
-  when the image is missing. Use `just ta`; `just ta ray` narrows the rebuild but
-  still brings the whole stack down first.
-- **`api` waits on `postgres` and `influxdb` health checks** even though it can
-  run without either. If `api` never starts and has no logs, check those two in
+- **Every port is published on `0.0.0.0`**, unauthenticated: the API, RustFS,
+  the admin dashboard (dev mode, no login), the Ray dashboard, Grafana, and also
+  Redis 6379, Postgres 5432, Loki, Influx, Prometheus and the Ray client port
+  10001 — anyone who reaches Redis or 10001 runs code on the cluster. Edit each
+  `ports:` entry in `docker/docker-compose.yml` to `"127.0.0.1:6379:6379"` form.
+  A `docker-compose.override.yml` is not read: the justfile passes `-f`.
+- **The project name is fixed at `dev`.** An existing `dev` stack on the host is
+  taken over, and existing `dev-*` images are retagged by the next build.
+- **The HF cache path is** `${HOME}/.cache/huggingface`, written as root;
+  weights land under `<cache>/hub/models--<org>--<name>`, and a shared cache
+  makes every model in it appear as COLD. To move it, edit the `ray` service's
+  volume line in `docker/docker-compose.yml`, or symlink the host path.
+- **A host port already taken:** remap only the host side of the `ports:`
+  entry, `"127.0.0.1:<newport>:<port>"`. If 9000 is remapped, set
+  `NDIF_OBJECT_STORE_PUBLIC_URL: http://localhost:<newport>` on **both** `api`
+  and `ray` — each signs presigned URLs.
+- **`api` waits on `postgres` and `influxdb` health checks** even though it runs
+  without either. If `api` never starts and has no logs, check those two in
   `just ps`.
 - **Only `dashboard_data` is a named volume.** Result blobs, metrics, logs and
-  the Postgres database do not survive `just down`. Downloaded weights do — the
-  `ray` service bind-mounts the host HF cache.
+  the Postgres database (with every API key) are lost on `just down`; weights
+  survive in the host HF cache.
+
+**A local nnsight** is mounted by `docker/docker-compose.nnsight.yml`. Set
+`NNSIGHT_PATH=<checkout>/src/nnsight` — the package directory — and carry it on
+every `just` call. Auto-detection without it runs `python -c "import nnsight"`
+and needs an editable nnsight; a host with only `python3` always detects
+nothing, silently. **`just nnsight` is the only reliable pre-check** —
+`just --dry-run up` always shows the overlay file. A fresh checkout lacks the
+compiled `_c` extension, so every remote `.save()` fails with
+`AttributeError: 'Tensor' object has no attribute 'save'` until you build it:
+
+```bash
+docker run --rm --entrypoint python -v <checkout>:/src -w /src dev-ray setup.py build_ext --inplace
+```
+
+It runs as root, so the build artifacts it leaves in the checkout are
+root-owned.
+
+`nnsight.__version__` reports the image's version under the mount; check
+`grep nnsight /proc/self/mountinfo` inside the container instead. A mounted line:
+
+```text
+1517 1490 259:2 /u/me/nnsight/src/nnsight /usr/local/lib/python3.12/site-packages/nnsight rw,relatime - ext4 /dev/nvme0n1p2 rw
+```
+
+The fourth column, the source, is relative to the root of its filesystem, so it
+need not match the host path you exported.
+`docs/developing/nnsight-integration.md#developing-against-a-local-nnsight`.
 
 ## Route 3 — from source with the `ndif` CLI
 
 ```bash
-pip install -r requirements.txt
-pip install torch --index-url https://download.pytorch.org/whl/cu126
+pip install torch --index-url https://download.pytorch.org/whl/cu126   # FIRST
+pip install -r requirements.txt                                         # from a checkout: the image's exact pins
 pip install ".[api,ray,metrics,postgres,dashboard]"
 ```
 
-The extras gate optional subsystems: `api` (fastapi/gunicorn/the dispatcher),
-`ray` (ray, transformers, accelerate, peft, zstandard — model actors),
-`metrics` (influxdb-client, python-logging-loki), `postgres` (asyncpg — API-key
-auth), `dashboard`, `dev` (pytest, ruff, httpx).
+torch goes first: with no wheel present pip takes PyPI's default, the CUDA 13
+build, and torch is deliberately not in `requirements.txt`. Without a checkout,
+`pip install "ndif[api,ray]"` after torch. The extras gate `api`, `ray`,
+`metrics`, `postgres` (API-key auth), `dashboard`, `dev`.
 
 ```bash
 ndif doctor
-ndif start                 # redis, minio, ray, api in dependency order, detached
+ndif start                 # redis, rustfs, ray, api in dependency order, detached
 ndif start dashboard       # opt-in; a bare `ndif start` never pulls it in
 ndif info                  # tracked PIDs + reachability of each endpoint
-ndif logs ray -f
 ndif stop
 ```
 
-State lives under `NDIF_HOME` (`~/.ndif`): `run/<service>.pid`,
-`logs/<service>.log`, and `minio/` when the CLI spawns MinIO. `ndif stop` only
-knows about processes it started — it cannot stop a compose stack.
+State lives under `NDIF_HOME` (`~/.ndif`). `ndif stop` only knows about
+processes it started.
 
-### The two binaries
-
-`ndif doctor` requires `redis-server` and `minio` on `PATH`.
-
-- `redis-server` — your package manager, or conda-forge.
-- `minio` — MinIO publishes no standalone server binaries any more, so doctor's
-  hint has no download behind it. Verified alternative:
+- **`ndif doctor` requires `redis-server` and `rustfs` on `PATH`.**
+  `redis-server`: `conda install --override-channels -c conda-forge redis-server`.
+  `rustfs`: a release from https://github.com/rustfs/rustfs/releases (zip,
+  `.deb` or `.rpm`), or lift it from the image the Dockerfile pins:
 
   ```bash
-  conda install --override-channels -c conda-forge redis-server minio-server
+  cid=$(docker create rustfs/rustfs:1.0.1)
+  docker cp "$cid:/usr/bin/rustfs" /usr/local/bin/rustfs && docker rm "$cid"
   ```
 
-  Or lift it out of the image the Dockerfile uses:
+  With an existing S3-compatible store, point `NDIF_OBJECT_STORE_URL` at it and
+  run `ndif start redis ray api`.
+- **Keep `NDIF_RAY_TEMP_DIR` short.** Ray's unix sockets go under
+  `<dir>/session_<ts>_<pid>/sockets/` and AF_UNIX paths cap at 107 bytes; a long
+  dir makes `ray start` die with `validate_socket_filename failed` in the ray log.
+- **A ✓ from `ndif start` means the process was alive two seconds later.** If
+  `/connected` still says `reconnecting` after two minutes, check `ndif info`
+  and `$NDIF_HOME/logs/ray.log`.
+- **No sandbox by default.** Nothing sets the actor class, so untrusted code runs
+  in-process until you set `NDIF_MODEL_IMPORT_PATH` (and even then the sandbox
+  is process separation, not a hardened jail — it stops weight reads, edits and
+  training, not access to the user, filesystem, network or GPUs).
 
-  ```bash
-  cid=$(docker create quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z)
-  docker cp "$cid:/usr/bin/minio" /usr/local/bin/minio && docker rm "$cid"
-  ```
+## More than one GPU machine
 
-  quay.io, not Docker Hub: `minio/minio` on the Hub no longer resolves. With an
-  existing S3-compatible store you need neither — point
-  `NDIF_OBJECT_STORE_URL` at it and run `ndif start redis ray api`.
-
-### What `ndif doctor` checks
-
-| Section | Checks | Counts as a failure? |
-|---|---|---|
-| Environment | Python >= 3.12; `ndif` and `nnsight` installed; then torch (with its CUDA build), transformers and ray | Python/ndif/nnsight **yes**; the other three are reported only |
-| Binaries | `ray`, `redis-server`, `minio` on `PATH` | yes |
-| Compute | `nvidia-smi` returns >= 1 GPU | yes |
-| Connectivity | redis / minio / api / ray at their `NDIF_*` URLs | **no** — a stopped service is a normal answer |
-
-Two caveats: it checks *this host's* `PATH`, which tells you nothing if you only
-ever run compose; and a missing `nvidia-smi` is a hard failure even though the
-non-GPU half of the stack runs fine without one.
-
-## Adding a second GPU machine
-
-One variable decides a node's role. `NDIF_RAY_HEAD_ADDRESS` unset ⇒ this node
-runs `ray start --head` and launches the NDIF controller. Set to the head's
-`HOST:PORT` ⇒ it waits for that port to accept TCP, then joins as a worker and
-runs nothing else.
-
-```bash
-# on the new GPU machine
-NDIF_RAY_HEAD_ADDRESS=10.0.0.5:6385 ndif start ray
-```
-
-```bash
-docker run -d --name ndif-worker \
-  --gpus all --shm-size 4g --network host \
-  -e NDIF_SERVICE=ray \
-  -e NDIF_RAY_HEAD_ADDRESS=10.0.0.5:6385 \
-  -e HF_TOKEN="$HF_TOKEN" \
-  -v "$HOME/.cache/huggingface:/root/.cache/huggingface" \
-  ndif/ndif:0.1.0
-```
-
-`NDIF_SERVICE=ray` is required in the container — the image default `all` would
-start redis, minio and an API on the worker too.
-
-Ports that must be reachable from the worker to the head: **6385** (Ray GCS —
-the join address, deliberately offset from Redis's 6379) and **8076** (object
-manager), plus Ray's un-pinned raylet/worker range, which connects both
-directions. Put both machines on a trusted private network rather than trying to
-enumerate ports. Note the dev compose publishes only 8265 and 10001 from `ray`,
-so a worker cannot reach a head started by a stock `just up` — give that service
-`network_mode: host` or publish 6385/8076.
-
-Confirm with `ndif status`: `Nodes` and `Total GPUs` should both rise, within one
-`NDIF_CONTROLLER_SYNC_INTERVAL_S` (30 s). If `Nodes` went up and the GPU count
-did not, the new node reported no GPU resource and the controller is ignoring it.
-Procedure and drain steps: `docs/runbooks/add-a-gpu-node.md`.
+A node joins an existing head with `NDIF_RAY_HEAD_ADDRESS=<head>:6385` and
+`ndif start ray` (or `NDIF_SERVICE=ray` in the image). Ports, the compose-head
+caveat, verification and drain: `docs/runbooks/add-a-gpu-node.md`.

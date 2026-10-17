@@ -4,8 +4,8 @@
 want is computed *inside* a `forward` and never returned — attention
 probabilities, a pre-activation, an intermediate projection — use `.source`.
 
-nnsight rewrites the module's forward AST so every call site *and every assignment*
-becomes hookable, with the same `.input` / `.output` / `.skip` interface one level finer.
+nnsight rewrites the module's forward so every call site *and every assignment*
+becomes hookable, with the same `.input` / `.output` / `.skip` interface.
 
 <!-- test: setup -->
 ```python
@@ -48,13 +48,11 @@ target: `hidden_states = self.act(hidden_states)` is `hidden_states_1`, and its
 so where a forward binds a name and then calls it, the binding is `_0` and the call
 `_1` — GPT-2's attention call is `attention_interface_1`.
 
-**Do not guess these names** — print the source and read the label off the line you
-want. Every label in this file was read off `transformers` 5.15, and a version that
-renames an internal variable renames its operation. An assignment's `.output` is
-whatever the right-hand side produced, which need not be a tensor:
-`attention_interface_0` binds the *implementation function*, `hidden_shape_0` a
-shape tuple. Saving one of those succeeds and hands you the object, so check what
-you got rather than assuming a tensor.
+**Do not guess these names** — print the source and read the label off the line.
+Every label here was read off `transformers` 5.15; a version that renames an
+internal variable renames its operation. An assignment's `.output` need not be a
+tensor: `attention_interface_0` binds the *implementation function*,
+`hidden_shape_0` a shape tuple.
 
 ## Reading and replacing an operation
 
@@ -141,19 +139,8 @@ assert not torch.equal(patterns[0], patterns[-1])     # real per-layer patterns
 print(len(patterns), patterns[0].shape)
 ```
 
-A quick induction-ish diagnostic — how much each head attends to the previous
-token:
-
-```python
-with model.trace(prompt):
-    _, weights = model.transformer.h[5].attn.source.attention_interface_1.output
-    prev_token_score = weights.diagonal(offset=-1, dim1=-2, dim2=-1).mean(-1).save()
-
-assert prev_token_score.shape == (1, model.config.n_head)
-assert ((prev_token_score >= 0) & (prev_token_score <= 1)).all()
-for head, score in enumerate(prev_token_score[0].tolist()):
-    print(f"L5H{head:<2} previous-token attention {score:.3f}")
-```
+Per-head metrics on these patterns (previous-token, induction, sink, entropy) are
+in the `attention-analysis` skill.
 
 ## Drilling deeper
 
@@ -200,6 +187,10 @@ assert per_step == sorted(per_step) and per_step[0] < per_step[-1]   # key lengt
 print(per_step)
 ```
 
+Read ops before the module's own `.output` in the loop body — in the wrong order
+the op can silently bind to the next step; see
+[generation.md](generation.md#a-wrong-order-source-read-lands-on-the-next-step).
+
 ## Limits
 
 | Limit | What to do |
@@ -210,22 +201,19 @@ print(per_step)
 | The `forward` is **decorated** | Instrumented: a wrapper that calls the function is peeled and rebuilt; a dispatcher that picks an implementation at run time shows the dispatch — drill into that op for what ran |
 | The op is an **assignment** | No callee — `.source` on it raises `SourceNotAvailable` |
 | Recursive `.source` outside a trace | Raises; open a trace first |
+| Recursive `.source` on NDIF | may raise `SourceNotAvailable` (arrives as `RemoteError`); one level works, so read the outer op's `.output` instead |
 | Ops requested out of execution order | `OutOfOrderError`, same as modules |
-| **First** `.source` on a module, after something else in the block was read | `OutOfOrderError`. Instrumenting rewrites the forward, so it must happen before that forward runs — do `_ = module.source` outside the trace, once per module |
+| **First** `.source` on a module, after something else in the block was read | `OutOfOrderError` (inside a `tracer.iter` loop: a silent next-step bind instead). Instrumenting rewrites the forward, so do `_ = module.source` outside the trace, once per module |
 | `op.source` asked for after `op.output` on the same op | `OutOfOrderError` on `...{op}.fn` — the drill is served one step earlier; ask for it first |
 | The op is on a **branch this config never takes** | `OutOfOrderError`, worded as though you were late. See below |
 
 ## Operations on branches that never run
 
 `print(module.source)` and `.names` list every operation in the `forward`, including
-the ones under an `if` this model's config makes false. Asking for one parks a
-request at a location the model never reaches, and the trace fails with the *ordering*
-error — so the message points at a problem you do not have.
-
-GPT-2's attention lists 50 operations and runs 28. The other 22 are the
-cross-attention and cache-hit paths, and their labels sit right beside the live ones:
-`transpose_0` is the cross-attention key transpose, `transpose_2` the key transpose
-GPT-2 actually performs.
+those under an `if` this config makes false. Asking for one fails with the
+*ordering* error, pointing at a problem you do not have. GPT-2's attention lists 50
+operations and runs 28: `transpose_0` is the dead cross-attention key transpose,
+`transpose_2` the one GPT-2 performs.
 
 <!-- test: expect-error OutOfOrderError -->
 ```python
@@ -244,11 +232,10 @@ assert key.shape == (1, model.config.n_head, len(model.tokenizer(prompt)["input_
 print(key.shape)     # [batch, heads, seq, head_dim]
 ```
 
-When an operation you can see in the listing reports as run past, before suspecting
-your request order, read the listing around it: an operation under a false condition
+When a listed operation reports as run past, read the listing around it before
+suspecting your request order: an operation under a false condition
 (`is_cross_attention`, an `is_updated` cache hit, `use_parallel_residual`) is dead,
-and there is usually a live twin further down with the next occurrence index.
-Requesting one operation per trace tells you which labels answer.
+and its live twin is usually further down with the next occurrence index.
 
 Prefer a real submodule when one exposes the value (`mlp.output` beats
 `source.self_c_proj_0.output`) — it is cheaper and stable across library versions.
@@ -256,5 +243,5 @@ Prefer a real submodule when one exposes the value (`mlp.output` beats
 ## Related
 
 - [access-and-modify.md](access-and-modify.md)
-- [modules-and-architectures.md](modules-and-architectures.md) — per-head slicing without `.source`
+- [modules-and-architectures.md](modules-and-architectures.md#adding-your-own-served-value-eproperty-envoys) — a writable per-head view of `attn.c_proj`'s input, without `.source`
 - [execution-model.md](execution-model.md)

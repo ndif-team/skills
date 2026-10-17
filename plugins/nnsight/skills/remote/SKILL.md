@@ -1,6 +1,6 @@
 ---
 name: remote
-description: Write and optimize nnsight code that runs on NDIF — remote=True, model.session(remote=True), non-blocking jobs, and models too large to run locally (Llama-70B/405B, DeepSeek). Use whenever remote execution is involved even if the user did not ask for optimization: naive remote code is routinely 100x slower and thousands of times larger in transfer than it needs to be, and both causes (too many requests, too much downloaded) have mechanical fixes. Also covers NDIF setup, API keys, model availability, the import whitelist, shipping local helper code, and diagnosing remote-only failures.
+description: Write and optimize nnsight code that runs on NDIF — remote=True, model.session(remote=True), blocking=False jobs, and models too large to run locally (Llama-70B/405B, DeepSeek). Use whenever remote execution is involved even if the user did not ask for optimization — the two costs (too many requests, too much downloaded) have mechanical fixes. Also covers NDIF setup, API keys, COLD/RUNNING model status, nnsight.register for shipping local helper code, RemoteError, and diagnosing remote-only failures.
 ---
 
 # Remote Execution on NDIF
@@ -44,7 +44,6 @@ before blaming your code for a hang.
 
 <!-- test: setup -->
 ```python
-import time
 import torch
 import nnsight
 from nnsight import TransformersModel
@@ -57,7 +56,7 @@ prompt = "The Eiffel Tower is in the city of"
 
 `model.session(remote=True)` wraps any number of traces into a **single** request:
 one queue wait, one connection, one result download. Only the session carries
-`remote=True`; inner traces inherit it.
+`remote=True`; inner traces inherit it, so do not repeat it on them.
 
 <!-- test: remote -->
 ```python
@@ -86,13 +85,10 @@ with model.session(remote=True):
 print(model.tokenizer.decode(patched))
 ```
 
-**Do not put `remote=True` on the inner traces** — the session already provides the
-backend.
-
-Limits worth planning around: a single request, including a whole session, is
-killed after **one hour**, and **one failing trace aborts the entire session**.
-Chunk long or fault-prone experiments into several back-to-back sessions; the
-per-session overhead is small compared to losing an hour of compute.
+Sessions have a server-side time limit, and **one failing trace aborts the entire
+session** — split long or fault-prone sweeps into several back-to-back sessions.
+[references/sessions-and-jobs.md](references/sessions-and-jobs.md) has the chunking
+pattern, server-side dataset loading, and training loops.
 
 ## Principle 2 — download the answer, not the data
 
@@ -121,15 +117,16 @@ away. For tensors you genuinely need, `.detach().cpu()` before saving.
 |---|---|
 | `.save()` is the **only** channel back | A client-side list appended to inside a trace stays empty locally — build accumulators inside and save the container |
 | Bind every save to a name | Results come back keyed by variable name; an unbound `.save()` is simply absent |
-| An import must be present on the server | Stdlib is fine; `torch`, `numpy`, `transformers`, `accelerate`, `diffusers`, `einops`, `peft`, `nnsight` are assumed installed (`_SERVER_MODULES`, what `remote="local"` simulates). Anything else, check with `nnsight.compare()` before relying on it |
+| An import must be present on the server | Stdlib is fine; `torch`, `numpy`, `transformers`, `accelerate`, `diffusers`, `einops`, `peft` and `nnsight` are assumed installed — the same set `remote="local"` simulates. Anything else, check with `nnsight.compare()` before relying on it |
 | Your own helpers must be shipped | `nnsight.register(my_module)` (cloudpickle by value), or inline the helper |
 | `print()` is your debugger | It comes back as log lines — far cheaper than saving a tensor to look at it (needs `CONFIG.APP.REMOTE_LOGGING`, on by default) |
 | Variables from outside the block **are** captured | Every name the block reads is pickled into the payload. They must be picklable, they arrive on CPU, and edits stay server-side unless you save them |
-| Match the server's device and dtype at runtime | You cannot know either client-side — read them off an activation: `vec.to(hidden.device, hidden.dtype)` |
+| Take device and dtype from an activation | You cannot know either client-side: `vec.to(hidden.device, hidden.dtype)`. Not from a module — its metadata may not reflect the serving device |
 | `super()` needs its class named | A shipped class is recompiled outside any class body, so bare `super()` raises `super(): __class__ cell not found`. Write `super(MyClass, self).__init__()` |
 
 An outer variable comes back if you save it *inside* the block — the save pushes
-by name and replaces the client's copy, so it's a fine way to accumulate:
+by name and replaces the client's copy. Without the `nnsight.save(acc)` the
+appends happen to the server's copy and the client's list stays empty:
 
 <!-- test: remote -->
 ```python
@@ -143,49 +140,30 @@ with model.session(remote=True):
 print(acc)                                 # [61.39, 46.88, 54.30]
 ```
 
-Without that `nnsight.save(acc)` the appends happen to the server's copy and the
-client's list stays empty.
+## Numerics on the server
 
-<!-- test: remote -->
-```python
-with model.trace(prompt, remote=True):
-    hidden = model.transformer.h[5].output
-    print(f"server-side shape {tuple(hidden.shape)}, norm {hidden.norm().item():.2f}")
-    summary = hidden[0, -1].mean().cpu().save()
-
-print(round(float(summary), 5))
-```
+The deployment chooses the dtype, not you — a server model may run in bfloat16
+where your local copy is float32, and some ops (norms, softmax, reductions) can
+come back in a different dtype from the layer around them. Take the dtype from an
+activation inside the block rather than assuming one. bf16 has about three
+significant digits, so a next-token argmax whose top two logits nearly tie can flip
+between a batched and a solo run, or between the server and a local float32 model.
+Compare a logit difference or a top-k margin rather than asserting one exact token.
 
 ## Submitting without waiting
 
-`blocking=False` submits and returns immediately; call the backend to poll.
-
-<!-- test: remote -->
-```python
-with model.trace(prompt, remote=True, blocking=False) as tracer:
-    top = model.output.logits[0, -1].argmax().cpu().save()
-
-backend = tracer.backend
-print("job", backend.job_id, backend.status)
-
-while True:
-    result = backend()          # None until COMPLETED, then the saves dict
-    if result is not None:
-        break
-    time.sleep(0.5)
-
-print(result.keys(), model.tokenizer.decode(result["top"]))
-```
-
-The result dict is keyed by your variable names. Sessions accept `blocking=False`
-too. For an event loop, `AsyncRemoteBackend` supports `await backend` for the saves
-dict and `async for update in backend` for streamed status.
+`model.trace(..., remote=True, blocking=False)` (or a session with it) submits and
+returns immediately; `tracer.backend()` returns `None` until the job completes,
+then a dict of saves keyed by variable name — your locals are **not** filled in.
+`AsyncRemoteBackend` does the same on an event loop. Both are in
+[references/sessions-and-jobs.md](references/sessions-and-jobs.md#non-blocking-jobs).
 
 ## Testing without burning a job
 
 `remote="local"` runs the whole serialize → deserialize → execute path in your own
-process. What it checks is that the block survives the round trip — your helpers
-ship, your saves come back. It runs the model locally, so point it at a small
+process, with your local modules hidden the way the server sees them. It checks
+that the block survives the round trip — your helpers ship, your saves come back —
+with no queue and no GPU. It runs the model locally, so point it at a small
 stand-in rather than the model you'll actually use:
 
 ```python
@@ -200,6 +178,19 @@ print(local_model.tokenizer.decode(check))
 Develop against a small model locally, dry-run with `remote="local"`, then switch
 the model id and `remote=True`.
 
+A forgotten `.save()` passes (client-side mutations still come back), and
+`CONFIG.APP.DEBUG` prints no payload bytes. It does catch the round trip — an unpicklable capture fails only here:
+
+<!-- test: expect-error TypeError -->
+```python
+import threading
+lock = threading.Lock()
+with local_model.trace(prompt):                   # plain local: fine
+    busy = nnsight.save(lock.locked())
+with local_model.trace(prompt, remote="local"):   # TypeError: cannot pickle '_thread.lock' object
+    busy = nnsight.save(lock.locked())
+```
+
 ## Reviewing remote code
 
 Walk these in order; the first two are usually worth orders of magnitude.
@@ -210,12 +201,11 @@ Walk these in order; the first two are usually worth orders of magnitude.
 | `.save()` on logits/hidden states followed by a client-side reduction | move the reduction into the trace |
 | Client-scope list appended to inside a trace | build it inside, `nnsight.save()` the container |
 | Optimizer or `nn.Module` built outside a remote session | move both inside the session — a client-side optimizer over a shipped module trains nothing, silently |
-| `.to(model.device)` on an undispatched model | that is `meta`, and `.to("meta")` drops the data with no error — read the device off `module.device` or an activation inside the block |
 | Saved CUDA tensor without `.detach().cpu()` | add it |
 | A helper from the user's own file called inside a trace | `nnsight.register(...)` or inline it |
-| Session that could exceed an hour | split into several sessions |
+| One long session | split into several — sessions have a time limit |
 | N forward passes for N layers/heads/positions | batch with `tracer.invoke` per variant (`nnsight` skill → batching) |
-| Only layers 0..L matter | `tracer.stop()` after L |
+| Only layers 0..L matter | `tracer.stop()` after L — it halts the whole forward, so every invoke must be done by then (it is not per-invoke) |
 
 Say what the fix buys — request count and megabytes — rather than just asserting
 it. If the user is prototyping and wants simple code first, agree, and flag what
@@ -227,20 +217,20 @@ to apply before they scale up.
 |---|---|
 | Hangs in the queue | is the model RUNNING or COLD? `nnsight.status()` |
 | `RemoteError` on submission | API key, host, model id, `nnsight.compare()` version skew |
-| Works locally, fails remotely | non-whitelisted import, or an unregistered local helper — reproduce with `remote="local"` |
+| Works locally, fails remotely | an import the server lacks, or an unregistered local helper — reproduce with `remote="local"` |
 | Result missing a value | the save wasn't bound to a name, or you saved elements instead of a container |
-| Worker-side exception | re-raised at the client as `RuntimeError` carrying the original traceback |
+| Worker-side exception | arrives as `RemoteError`, whose message is the worker's traceback ending in the original type and message. `except IndexError:` never matches — catch `RemoteError` and read the last line |
 
 `CONFIG.APP.DEBUG = True` adds payload/result byte sizes and per-status logging —
 useful for confirming a transfer really did shrink.
 
 ## References
 
-- [references/sessions-and-jobs.md](references/sessions-and-jobs.md) — session
-  semantics, chunking, non-blocking and async job management, concurrency
+- [references/sessions-and-jobs.md](references/sessions-and-jobs.md) — chunking,
+  server-side datasets, training a probe or LoRA in a session, non-blocking and
+  async jobs, choosing between them
 - [references/setup-and-troubleshooting.md](references/setup-and-troubleshooting.md)
-  — keys, hosts, status and availability, the whitelist, `nnsight.register`,
-  version skew
+  — hosts, version skew, `nnsight.register` versus inlining, catching `RemoteError`
 
 ## Related skills
 

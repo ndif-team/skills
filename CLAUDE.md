@@ -6,11 +6,12 @@ Guidance for Claude Code when working in this repository.
 
 Agent skills for the NDIF ecosystem, packaged for Claude Code
 (`.claude-plugin/`) and OpenAI Codex (`.codex/skills/` and `.agents/skills/`
-symlinks). **Two plugins**, with different audiences and different rules:
+symlinks). **Three plugins**, with different audiences and different rules:
 
 | Plugin | For | Skills | Code blocks |
 |---|---|---|---|
-| `nnsight` | writing interpretability code against model internals | 18 | **executed** against real models |
+| `nnsight` | writing interpretability code against model internals | 19 | **executed** against real models |
+| `nnterp` | the same, once, against one module vocabulary that runs on every transformer family | 3 | **executed** against real models; skipped when `nnterp` is not installed |
 | `ndif` | running your *own* NDIF server (the backend behind `remote=True`) | 4 | docs only — every block is `<!-- test: skip -->` |
 
 The split matters when you edit: a claim in an nnsight skill is proved by the
@@ -48,10 +49,11 @@ each skill directory — **both** trees, for every skill in every plugin.
 ## The rule that matters: everything in `plugins/nnsight` is executed
 
 Every fenced ```python block in every `SKILL.md` and `references/*.md` **under
-`plugins/nnsight`** is run by `tests/test_skills.py` against real models. Blocks
-in one file share a namespace and run in document order, so later blocks can
-build on earlier ones. `tests/docblocks.py` scopes this with `SKILLS_ROOT`; keep
-it that way.
+`plugins/nnsight` and `plugins/nnterp`** is run by `tests/test_skills.py` against real
+models. Blocks in one file share a namespace and run in document order, so later
+blocks can build on earlier ones. `tests/docblocks.py` scopes this with
+`EXECUTED_PLUGINS`, which also names the package each plugin's blocks import; a
+plugin whose package is not installed skips with that reason. Keep it that way.
 
 `plugins/ndif` is outside that scope. Its python blocks carry
 `<!-- test: skip -->` anyway, so nothing would run if the harness were ever
@@ -67,6 +69,7 @@ Directives go in an HTML comment immediately above the fence:
 <!-- test: gpu -->                     only with CUDA
 <!-- test: slow -->                    only with --run-slow
 <!-- test: expect-error OutOfOrderError --> must raise this
+<!-- test: requires vllm -->           only when that module is importable
 ```
 
 Use ```python-legacy for old-API code shown deliberately (porting guides) — it is
@@ -90,8 +93,9 @@ make test-skill SKILL=nnsight
 make report            # per-file table of blocks run / skipped
 ```
 
-Use the `ndif2` conda env. A local NDIF for remote tests runs at
-`http://localhost:8001` (no API key needed).
+Tests run in the conda env the Makefile names (`CONDA_ENV`, override as
+needed): it needs nnsight 0.8 and its model deps installed. Remote tests
+expect a local NDIF at the Makefile's `NDIF_HOST` default (no API key needed).
 
 Models used in examples: `openai-community/gpt2` and
 `HuggingFaceTB/SmolLM2-135M-Instruct` for anything executed;
@@ -140,9 +144,12 @@ Same rules, plus two of its own:
 
 ## Source material
 
-- NDIF server source and docs: `/home/localjadenfk/wd/ndif` (`CLAUDE.md` is a
-  router into `docs/`; `docs/concepts/request-lifecycle.md` is the keystone)
-- nnsight source and docs: `/home/localjadenfk/wd/nnsight` (branch `0.8`,
-  `CLAUDE.md` routes to `docs/`)
-- nnterp (0.8 branch): `/home/localjadenfk/wd/nnterp`
-- Tutorials and paper implementations: `/home/localjadenfk/wd/nnsight-website/docs`
+Work from local checkouts of the upstream repos; in each one, `CLAUDE.md`
+routes into its `docs/`.
+
+- NDIF server: `ndif-team/ndif` (`docs/concepts/request-lifecycle.md` is the
+  keystone)
+- nnsight: `ndif-team/nnsight`, branch `dev`
+- nnterp: `ndif-team/nnterp`, branch `0.8-refactor` (every docs snippet ran
+  against the tiny checkpoints in its `tests/families/`)
+- Tutorials and paper implementations: `ndif-team/nnsight-website`, `docs/`

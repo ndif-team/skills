@@ -35,10 +35,11 @@ plain tensor, while the *attention* submodule returns a tuple. Older nnsight
 examples on the internet write `h[i].output[0]` everywhere, which silently indexes
 the batch dimension instead of unpacking a tuple.
 
-This is a `transformers` fact, not an nnsight one, and it moved recently: in
-`transformers` 4.x the same block returned `(hidden_states,)`, so `.output[0]` was
-correct there. Check the version before porting either way — and check the model,
-since the answer differs per architecture.
+This is a `transformers` fact, and it moved: in 4.x the same block returned
+`(hidden_states,)`, so `.output[0]` was correct there. The answer differs per
+version and per architecture
+([modules-and-architectures.md](modules-and-architectures.md#tensor-or-tuple) has
+the table), so check once at the top of an experiment:
 
 ```python
 with model.trace(prompt):
@@ -49,31 +50,11 @@ with model.trace(prompt):
         "attn": type(attn_out).__name__,
     })
 
-print(kinds)     # {'block': 'Tensor', 'attn': 'tuple'}
+assert kinds == {"block": "Tensor", "attn": "tuple"}
 ```
 
-Note the order: a block's `attn` and `mlp` produce their outputs *before* the block
-itself returns, so they must be read first. Reading `h[0].output` and then
-`h[0].attn.output` is an `OutOfOrderError` — see
-[execution-model.md](execution-model.md).
-
-When unsure, check once at the top of an experiment:
-
-```python
-with model.trace(prompt):
-    attn_is_tuple = isinstance(model.transformer.h[0].attn.output, tuple)
-    mlp_shape = tuple(model.transformer.h[0].mlp.output.shape)
-    block_shape = tuple(model.transformer.h[0].output.shape)
-    shape_info = nnsight.save({
-        "attn is tuple": attn_is_tuple,
-        "mlp": mlp_shape,
-        "h[0]": block_shape,
-    })
-
-print(shape_info)
-```
-
-Or use `model.scan(...)`, which gets shapes with no real compute — see
+Note the order: a block's `attn` and `mlp` return *before* the block does, so read
+them first. `model.scan(...)` gets the same answer with no real compute — see
 [caching-and-scan.md](caching-and-scan.md).
 
 ## In-place vs replacement
@@ -98,27 +79,9 @@ Use in-place (`[:] =`, `[..., idx] =`) for surgical edits to part of a tensor; u
 replacement when you are producing a new tensor wholesale. Replacement is also the
 only option when the value is not a tensor (a tuple, a dataclass output).
 
-**A replacement has to descend from the value it replaces if you want gradients.**
-`output = torch.zeros_like(output)` hands the model a tensor autograd has never
-seen and cuts the graph there — with two different consequences. Replace a whole
-block's `.output` (every path severed) and a later `.grad` read on anything
-captured upstream fails with an object id for a location:
-
-```
-OutOfOrderError: '139932764543792.grad.i0' was requested but the model already ran past it
-```
-
-Replace a bypassed submodule's `.output` (an MLP or attention — the residual
-stream routes around it) and upstream `.grad` reads **succeed**, silently
-returning a gradient missing that module's path: on gpt2, replacing
-`h[3].mlp.output` with a detached copy of the very same values leaves the forward
-bit-identical yet shifts the layer-0 gradient by 45% in L2 norm, with no warning.
-
-`output[:] = 0` writes through the existing tensor and keeps the graph; so does
-any replacement built from the old value (`output * 0`, `output + steering`). If a
-location in an error message is a long number rather than a module path, this is
-what happened — and if there is no error but gradients are involved, audit any
-fresh-tensor replacement for a silently partial gradient.
+A replacement built from a fresh tensor (`torch.zeros_like(output)`) cuts the
+autograd graph there; see [gradients.md](gradients.md#replacements-and-the-graph)
+if gradients are involved.
 
 **Mutating a tuple element by assignment fails** — `output[0] = x` is
 `tuple.__setitem__`. Either mutate in place through the element, or rebuild:
@@ -138,25 +101,16 @@ with model.trace(prompt):
 ## Positions and heads
 
 Activations are `(batch, seq, hidden)`. Positions index `seq`; `-1` is the last
-token, which is where next-token prediction is read.
+token, where next-token prediction is read (`output[:, -1, :] += v` steers only it).
+
+Heads live inside the hidden dimension: head `i` is the slice
+`[..., i * head_dim : (i + 1) * head_dim]` of the attention output projection's
+*input*. The attention module's own `.output` is past that projection, so the same
+slice there mixes every head:
 
 ```python
-with model.trace(prompt):
-    # steer only the final position
-    model.transformer.h[6].output[:, -1, :] += 5.0
-    logits = model.output.logits.save()
-
-print(model.tokenizer.decode(logits[0, -1].argmax()))
-```
-
-For attention, heads live inside the hidden dimension: head `i` of a
-`(batch, seq, n_heads * head_dim)` tensor is the slice
-`[..., i * head_dim : (i + 1) * head_dim]`. The clean place to cut is the
-attention output projection's *input*:
-
-```python
-n_heads = model.config.n_head
-head_dim = model.config.n_embd // n_heads
+# read it off the module: equals n_embd // n_head on GPT-2, not on GQA/Gemma-style models
+head_dim = model.transformer.h[5].attn._module.head_dim
 head = 4
 
 with model.trace(prompt):
@@ -166,6 +120,9 @@ with model.trace(prompt):
 
 print(logits.shape)
 ```
+
+For a reusable, writable per-head view, define an `eproperty` — see
+[modules-and-architectures.md](modules-and-architectures.md#adding-your-own-served-value-eproperty-envoys).
 
 ## Clone when you need the "before"
 
@@ -180,13 +137,12 @@ with model.trace(prompt):
 print(before.abs().sum().item() > 0, after.abs().sum().item() == 0)   # True True
 ```
 
-Cloning also matters when a slice you captured is shared across invokes — mutate a
-copy and assign it back rather than writing through a view.
+The same holds for anything you save: a saved tensor aliases the live one, so
+clone it if you also write to that location afterwards.
 
 ## Tensors you create must land on the model's device
 
-Anything you build inside the trace has to match the activation you are combining
-it with:
+Build new tensors on the activation's device and dtype:
 
 ```python
 with model.trace(prompt):
@@ -196,22 +152,14 @@ with model.trace(prompt):
     logits = model.output.logits.save()
 ```
 
-`model.device` gives the model's device outside a trace; deriving `device=` and
-`dtype=` from the activation itself (as above) is more robust under `device_map`
+Deriving them from the activation, not `model.device`, holds under `device_map`
 sharding and mixed precision.
 
 ## Setting inputs
 
-`.input` assignment repacks correctly into the underlying `(args, kwargs)`:
-
-```python
-with model.trace(prompt):
-    model.transformer.h[3].input = model.transformer.h[3].input * 0.5
-    out = model.output.logits.save()
-```
-
-For anything beyond the first argument, go through `.inputs`, which is assignable
-as the whole `(args, kwargs)` pair:
+`.input = value` repacks into the underlying `(args, kwargs)` for you
+(`h[3].input = h[3].input * 0.5`). For anything beyond the first argument, assign
+the whole pair through `.inputs`:
 
 ```python
 with model.trace(prompt):
@@ -223,15 +171,12 @@ with model.trace(prompt):
 print(keys, halved.shape)
 ```
 
-That is what `.input = value` does for you when the value is the first argument.
-
 ## Applying a module to a value
 
-Calling an envoy inside a trace runs the module with this trace stood down: it
-serves no value and spends no occurrence, so it is not bound by the ordering rule
-and it does not consume the module's real place in the forward pass. (The
-module's own PyTorch hooks still fire — `hook=` names whether *nnsight* watches
-the call.) This is how logit lens is written:
+Calling an envoy inside a trace runs the module with nnsight stood down: it serves
+no value and spends no occurrence, so it is not bound by the ordering rule and does
+not consume the module's real place in the forward pass. This is how logit lens is
+written:
 
 ```python
 with model.trace(prompt):
@@ -242,30 +187,24 @@ with model.trace(prompt):
 print(model.tokenizer.decode(top))
 ```
 
-Pass `hook=True` when the module is one you *attached* to the tree (an SAE, an
-adapter) and you want its own internals observable — see
-[modules-and-architectures.md](modules-and-architectures.md).
+Pass `hook=True` when you want the called module's own internals observable (an
+attached SAE or adapter) — see
+[modules-and-architectures.md](modules-and-architectures.md#attaching-your-own-module-sae-probe-adapter).
 
 ## Reading outside a trace
 
-There is nothing to read outside interleaving; `.output` raises there.
+`.output` raises outside interleaving — open a trace for values, or `model.scan(...)`
+for shapes:
 
 <!-- test: expect-error ValueError -->
 ```python
 hidden = model.transformer.h[0].output     # no trace running
 ```
 
-Use `model.scan(...)` when you want shapes without running the model, or open a
-trace when you want values.
-
 ## Name collisions
 
-If a module's own children include a name nnsight uses (BERT's `output`
-submodule), the child moves to `.E_output` and `.output` keeps its usual meaning
-(with a warning at load). `print(model)` labels the child `E_output/output`, so
-the printed tree is the one to type. The child's path is unchanged, so
-`named_modules()` still lists it as `...attention.output`; it is attribute access
-that moved, which is what `get()` and `rename` go through.
+A child module named like an nnsight property (BERT's `output` submodule) moves to
+`.E_output`; see [api-reference.md](api-reference.md#envoy-properties-any-module).
 
 ## Related
 

@@ -6,16 +6,11 @@ something that returns a tensor. This file is how you avoid that.
 
 ## Model classes
 
-| Class | Use for | Import |
-|---|---|---|
-| `TransformersModel` | **anything from HuggingFace** — text, vision, audio, multimodal | `from nnsight import TransformersModel` |
-| `NNsight` | any `torch.nn.Module` you built yourself | `from nnsight import NNsight` |
-| `DiffusionModel` | `diffusers` pipelines | `from nnsight import DiffusionModel` |
-| `VLLM` | high-throughput / tensor-parallel serving | `from nnsight.modeling.vllm import VLLM` |
-
-`LanguageModel` and `VisionLanguageModel` still exist but **warn on
-construction** — they are deprecated aliases for `TransformersModel`. Use
-`TransformersModel(repo_id, task="text-generation")` in new code.
+`TransformersModel` for anything from HuggingFace, `NNsight` for a module you
+built, `DiffusionModel` for `diffusers`, `VLLM` for the vLLM engine — imports and
+constructor in [api-reference.md](api-reference.md#model-classes).
+`LanguageModel` is a deprecated alias that warns; write
+`TransformersModel(repo_id, task="text-generation")`.
 
 <!-- test: setup -->
 ```python
@@ -26,23 +21,35 @@ from nnsight import TransformersModel, NNsight
 model = TransformersModel("openai-community/gpt2", dispatch=True)
 ```
 
-Useful constructor arguments:
+Constructor arguments worth knowing: `dispatch=False` (the default) builds on
+`meta` with no weights until the first run; `attn_implementation="eager"` is
+required to read attention probabilities; `task=` is inferred by asking the Hub,
+so pass it when offline; plus `device=`, `device_map=`, `dtype=`, `revision=`,
+`peft=<adapter repo id>`, `rename=` (below). Anything else HuggingFace accepts is
+forwarded.
+
+**Pick one device with `device=`, not `device_map=`.** The model loads through
+`transformers.pipeline(...)`, which moves a model that sits on a single device to
+its own `device`, defaulting to the first GPU. Measured on transformers 5.17 with
+one GPU:
+
+| Argument | Model ends up on |
+|---|---|
+| none | `cuda:0` (CPU only without an accelerator) |
+| `device="cpu"` | `cpu` |
+| `device="cuda"` / `device=0` | `cuda:0` |
+| `device_map="cpu"` / `device_map={"": "cpu"}` | `cuda:0`, silently |
+| `device_map="cuda"` / `device_map="auto"` | `cuda:0` |
+| `device_map=` dict over two or more devices | as mapped |
+
+`device_map=` is for spreading a model across devices (`"auto"` on several GPUs,
+or a dict). `DiffusionModel` is the exception: diffusers honours
+`device_map="cuda"` and ignores `device=`.
 
 ```python
-# dispatch=False (default) builds on `meta` — no weights until the first run.
-lazy = TransformersModel("openai-community/gpt2")
-print(lazy.dispatched)                       # False
-
-# attn_implementation="eager" is required to read attention probabilities
-eager = TransformersModel("openai-community/gpt2", dispatch=True,
-                          attn_implementation="eager")
-print(eager.config.model_type)
+cpu_model = TransformersModel("openai-community/gpt2", device="cpu", dispatch=True)
+assert next(cpu_model.parameters()).device.type == "cpu"
 ```
-
-Others worth knowing: `task=` (pipeline task, inferred if omitted — inference
-asks the Hub, so pass it when offline), `device_map=`, `dtype=`, `revision=`,
-`peft=<adapter repo id>`, `rename=` (below), and anything else HuggingFace
-accepts — it is forwarded.
 
 `dtype=` also takes a quantization name (`"nf4"`, `"int8"`, ...) for a checkpoint
 too big for the GPU you have; load the `quantization` skill before using one, since
@@ -59,9 +66,9 @@ python scripts/inspect_model.py meta-llama/Llama-3.1-8B --prompt "The capital of
 It builds the model on `meta` (no weights downloaded — a 27B model takes ~8s),
 then prints the layer list path, each block child **in forward-pass order**, and
 whether each `.output` is a tensor or a tuple. `--grep attn` filters paths;
-`--depth 2` prints the tree.
-
-In code, the equivalent moves are:
+`--depth 2` prints the tree; `--task` and `--trust-remote-code` pass through. It
+prints the task and the class it built — the task decides the class, and the class
+decides the tree. In code:
 
 ```python
 print(model)                                  # the torch module tree
@@ -83,29 +90,20 @@ print(model.get("transformer.h.0.mlp").path)  # fetch by dotted path
 | RWKV-4 | `model.rwkv.blocks[i]` | `.attention` (the time mixer) | `.feed_forward` | `rwkv.embeddings` | `rwkv.ln_out` | `head` |
 | Hybrids: Falcon-H1, Jamba, Qwen3-Next, Qwen3.5, Nemotron-H | `model.model.layers[i]` | `.self_attn`, `.mamba`, `.linear_attn` — *per layer* | `.mlp` / `.feed_forward` | `model.embed_tokens` | `model.norm` | `lm_head` |
 
-Verified on transformers 5.15 with `scripts/inspect_model.py`.
+Verified on transformers 5.15 with `scripts/inspect_model.py`. Notes:
 
-Four notes from that table:
-
-- **Multimodal checkpoints nest the LM.** Gemma-3's text stack is under
-  `model.language_model`, not at the root. Always inspect a VLM before writing
-  paths.
-- **BERT blocks have a child module literally named `output`.** nnsight's `.output`
-  wins, so the child moves to `.E_output` on that module (it warns at load). Its
-  path is unchanged, so `named_modules()` still lists it as `...attention.output`.
-  RWKV-4 does the same at `rwkv.blocks[i].attention.output`, and warns once per
-  block on load.
+- **Multimodal checkpoints nest the LM** (Gemma-3: `model.language_model`).
+  Always inspect a VLM before writing paths.
+- **BERT blocks have a child module literally named `output`**, as does RWKV-4's
+  `attention` — it moves to `.E_output`; see
+  [api-reference.md](api-reference.md#envoy-properties-any-module).
 - **A hybrid's block children vary by layer.** Falcon-H1 runs `mamba` *and*
-  `self_attn` in the same block; Jamba, Qwen3-Next and Qwen3.5 alternate mixer
-  types between layers, and Qwen3.5's is `linear_attn`. Never assume the child
-  names you found on layer 0 exist on layer 20 — inspect the layer you are about
-  to touch.
+  `self_attn` in one block; Jamba, Qwen3-Next and Qwen3.5 (`linear_attn`) alternate
+  mixer types between layers. Inspect the layer you are about to touch.
 - **A state-space model's recurrent state is not an activation.** It lives in a
-  cache object threaded through the layers, and the pure-torch fallback kernels
-  update it *in place*, so a read taken before the next module fires and one taken
-  after give different numbers. Clone what you read. The per-token state exists
-  only in those fallbacks: with `mamba_ssm` / `causal_conv1d` / `fla` installed the
-  fast path takes over and the intermediate handles disappear.
+  cache object the pure-torch fallback kernels update *in place*, so clone what you
+  read. With `mamba_ssm` / `causal_conv1d` / `fla` installed the fast path takes
+  over and the per-token intermediate handles disappear.
 
 ### MoE blocks
 
@@ -116,24 +114,17 @@ The sparse `.mlp` is a container; the pieces you intervene on are inside it.
 | Mixtral, Qwen3-MoE, Qwen3-Next, OLMoE, DeepSeek-V3, GLM-4, Ernie-4.5 | `.mlp.gate` | `.mlp.experts` | `.mlp.shared_expert(s)` where present | DeepSeek-V3, GLM-4 and Ernie make the first layers dense |
 | GPT-OSS, Phi-MoE, Jamba, Gemma-4 | `.mlp.router` | `.mlp.experts` | — | Gemma-4 hangs both off the decoder layer itself; GPT-OSS's block output is `(hidden, router_scores)` |
 
-Two things about the router's value, both of which turn a plausible-looking
-intervention into a no-op or a wrong index:
+Two router traps that turn a plausible intervention into a no-op or a wrong index:
 
 - **The router returns `(logits, weights, index)`, and the block uses `[1]` and
   `[2]`.** Masking `gate.output[0]` is a silent no-op on `TransformersModel` —
-  the logits have already been through softmax and top-k by then. Write the
-  routing **weights** (`[1]`) or the expert rows instead. (The `vllm` skill's
-  `mlp.gate.output[0][:, e] = -inf` recipe is correct **for vLLM**, whose router
-  returns `(logits, bias)`; it does nothing here.)
-- **Everything below the router is flat `(B*T, ...)`.** The block reshapes with
-  `hidden_states.view(-1, hidden_dim)` before routing, so `gate.output`,
-  `experts.output` and every `.source` op under them lose the batch axis. There is
-  no `[:, -1]` to take: the last token of the batch's first row is `[T-1]`, and
-  inside an invoke you index the invoke's own `(rows*seq, ...)` block. nnsight
-  scopes those rows — a leading dim that is a whole multiple of the batch size is
-  narrowed `seq` rows per row of batch — so per-invoke reads and writes are correct;
-  see [batching.md](batching.md#which-values-are-scoped-to-your-rows) for the rule
-  and for the warning you get when a layout it cannot read is written to.
+  softmax and top-k already ran. Write the routing **weights** (`[1]`) or the
+  expert rows. (The `vllm` skill's `gate.output[0][:, e] = -inf` recipe is right
+  only for vLLM, whose router returns `(logits, bias)`.)
+- **Everything below the router is flat `(B*T, ...)`** — `gate.output`,
+  `experts.output` and every `.source` op under them lose the batch axis, so the
+  last token of row 0 is `[T-1]`, not `[:, -1]`. nnsight still scopes those rows
+  per invoke; see [batching.md](batching.md#which-values-are-scoped-to-your-rows).
 
 ## Block internals run in a fixed order
 
@@ -148,13 +139,13 @@ gpt-neox   input_layernorm -> attention -> post_attention_dropout ->
            post_attention_layernorm -> mlp -> post_mlp_dropout -> block
 ```
 
-`inspect_model.py --prompt ...` prints this for any model, because it reads it off
-real forward hooks rather than assuming.
+`inspect_model.py --prompt ...` prints this for any model, read off real forward
+hooks.
 
 ## Tensor or tuple?
 
-There is no rule that holds across families — check, per module, on the version
-you are running. Measured on transformers 5.15:
+No rule holds across families — check per module, on your version. Measured on
+transformers 5.15:
 
 - a decoder **block**'s `.output` is a plain `Tensor (batch, seq, hidden)` on
   GPT-2, Llama, GPT-NeoX, Mamba and MoE families; a **1-tuple** on Falcon-H1; a
@@ -167,32 +158,11 @@ you are running. Measured on transformers 5.15:
 - an MoE **router**'s `.output` is a 3-tuple `(logits, weights, index)`
 
 Do not port `.output[0]` from old examples without checking; on a tensor it
-silently selects batch row 0 and nothing raises. `inspect_model.py --prompt ...`
-prints the type of every block child, which is faster than reading modeling code.
+silently selects batch row 0 and nothing raises.
 
 ## Writing architecture-portable code
 
-Read the paths off the config once, then use variables:
-
-```python
-def layer_list(model):
-    """The block ModuleList for common decoder-only families."""
-    for path in ("transformer.h", "model.layers", "gpt_neox.layers",
-                 "model.language_model.layers"):
-        try:
-            return model.get(path)
-        except Exception:
-            continue
-    raise ValueError("unknown architecture — run inspect_model.py")
-
-layers = layer_list(model)
-with model.trace("The Eiffel Tower is in the city of"):
-    mid = layers[len(layers) // 2].output[0, -1].save()
-
-print(len(layers), mid.shape)
-```
-
-Or install aliases at load with `rename=`, so one script works everywhere:
+Install aliases at load with `rename=`, so one script works everywhere:
 
 ```python
 aliased = TransformersModel("openai-community/gpt2", dispatch=True,
@@ -206,9 +176,10 @@ print(torch.equal(resid, same))
 ```
 
 An alias points at the *same* envoy, so cache keys and iteration are unaffected.
-For a maintained version of this idea across many architectures — with
-`layers_output[i]`, `attentions[i]`, `mlps[i]` and model validation — see the
-`nnterp` skill.
+For a maintained version of this idea across many architectures — one set of
+names (`model.layers[i].self_attn`, `.mlp`, `model.norm`) and standard values
+(`layer_output`, `attention_output`, `mlp_output`) on every family — see the
+nnterp plugin's `nnterp:nnterp` skill.
 
 ## Any PyTorch module
 
@@ -236,27 +207,21 @@ that belongs to the wrappers that build a model from a repo id.
 
 ### Wrapping changes the module, and the change sticks
 
-`NNsight(net)` does not copy `net`; `wrapped._module is net`, and the first trace
-installs nnsight's controller into `net`'s own submodules
-(`module.__dict__["forward"]`). Everything else holding a reference to `net` sees
-that, in traces and outside them, for the rest of the process. Three consequences
-worth planning around:
+`NNsight(net)` does not copy `net`; the first trace installs nnsight's controller
+into `net`'s own submodules (`module.__dict__["forward"]`), and everything holding
+a reference to `net` sees that for the rest of the process. So:
 
 - **Finish the module before you wrap it.** `deepcopy`, `pickle` and
-  `torch.compile` all have to deal with the installed controller, and the safe
-  order is to do them first and wrap the result. `NNsight(net)` *then*
-  `torch.compile(net)` works; compiling first and wrapping the `OptimizedModule`
-  does not.
-- **Do not replace a `forward` after wrapping.** Your function takes the same
-  instance slot the controller is in, so nnsight is silently switched off for that
-  module — no warning, and the next read of it fails far away as
-  `OutOfOrderError: 'model.0.output.i0' was requested but the model already ran
-  past it`. Patch `forward` before wrapping, or patch it through a trace.
+  `torch.compile` go first. `NNsight(net)` *then* `torch.compile(net)` works;
+  wrapping a compiled `OptimizedModule` does not.
+- **Do not replace a `forward` after wrapping.** Your function takes the
+  controller's instance slot, so nnsight is silently off for that module and the
+  next read fails far away as `OutOfOrderError: 'model.0.output.i0' was requested
+  but the model already ran past it`. Patch `forward` before wrapping.
 - **Mutate the tree through the envoy, not the module.** The envoy's children are
-  built once. `net.append(nn.Linear(4, 2))` after wrapping leaves the torch module
-  with 2 children and the envoy with 1, and `wrapped[1]` raises `IndexError: list
-  index out of range` rather than saying anything about the tree. Assign through
-  the envoy (`wrapped.layer = new_module`), or wrap again.
+  built once: `net.append(...)` after wrapping leaves the envoy a child short, and
+  `wrapped[1]` raises a bare `IndexError`. Assign through the envoy
+  (`wrapped.layer = new_module`), or wrap again.
 
 ## Attaching your own module (SAE, probe, adapter)
 
@@ -299,62 +264,67 @@ print(inner.shape)
 model.clear_edits()
 ```
 
-Trying to call the module and read its internals in the same trace body raises
-`OutOfOrderError`: your worker is *inside* the call when the submodule fires, so
-it can never be parked waiting for it.
+Calling the module and reading its internals in the same trace body raises
+`OutOfOrderError`: your worker is *inside* the call when the submodule fires.
 
 Both examples **replace** the output rather than writing into it. `output[:] =
-probe(acts)` writes the attachment's result into the tensor that was its own
-input, and a later `.backward()` raises `RuntimeError: one of the variables
-needed for gradient computation has been modified by an inplace operation` —
-which breaks training the attachment, the main reason to insert one.
-
-This is the mechanism behind SAE analysis, LoRA/adapter interpretability, and
-trained-probe insertion.
+probe(acts)` overwrites the attachment's own input, and a later `.backward()`
+raises `RuntimeError: ... modified by an inplace operation` — which breaks
+training the attachment.
 
 ## Adding your own served value (`eproperty`, `envoys=`)
 
-`.input`, `.inputs` and `.output` are not special-cased in the tracer — they are
-`eproperty` descriptors on `Envoy`, and you can define more. An `eproperty` is a
-**preprocess** (what a read of that location hands your block) and, optionally, a
-**transform** (how an edit to that view is mapped back into the model's layout,
-spliced in once the block is done with the read). That is the supported way to
-give a module a reshaped, writable view — per head, per expert, per channel —
-instead of reshaping by hand at every call site and hoping the write lands.
+`.input`, `.inputs` and `.output` are `eproperty` descriptors on `Envoy`, and you
+can define more: a **preprocess** (what a read hands your block) and optionally a
+**transform** (how an edit to that view maps back into the model's layout). That
+is the supported way to give a module a reshaped, writable view — per head, per
+expert, per channel. The `envoys=` constructor argument maps a module type or a
+dotted path suffix to your `Envoy` subclass; everything not named stays the base
+`Envoy`.
 
-A custom `Envoy` subclass reaches a **chosen** module through the `envoys=`
-constructor argument, which maps a module type or a dotted path suffix to the
-subclass. Everything not named stays the base `Envoy`:
+Per-head work has to happen where the heads are still separate: the **input** of
+the attention's output projection (`attn.c_proj` on GPT-2, `o_proj` on Llama).
+`attn.output` is already past that projection, so zeroing a 64-wide slice of it
+mixes every head and ablates none.
 
 ```python
 from nnsight.intervention.envoy import Envoy
 from nnsight.intervention.eproperty import eproperty
-from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
 
 class Heads(Envoy):
-    @eproperty(key="output", description="attention output split per head")
+    n_heads, head_dim = 12, 64                     # a Conv1D carries neither, so set them here
+
+    @eproperty(key="input", description="c_proj input split per head")
     def heads(self, value):                        # read: (B, S, H) -> (B, nh, S, hd)
-        hidden = value[0]                          # GPT-2 attention returns a tuple
-        b, s, _ = hidden.shape
-        return hidden.view(b, s, self.num_heads, self.head_dim).transpose(1, 2)
+        (x,), _ = value                            # key="input" serves (args, kwargs)
+        b, s, _ = x.shape
+        return x.view(b, s, self.n_heads, self.head_dim).transpose(1, 2)
 
     @heads.transform
-    def heads(self, value):                        # write: back to the model's layout
+    def heads(self, value, raw):                   # write: back to (args, kwargs)
         b, nh, s, hd = value.shape
-        return (value.transpose(1, 2).reshape(b, s, nh * hd), None)
+        return ((value.transpose(1, 2).reshape(b, s, nh * hd),), {})
 
 headed = TransformersModel("openai-community/gpt2", dispatch=True,
-                           envoys={GPT2Attention: Heads})   # or {"attn": Heads} by suffix
+                           envoys={"attn.c_proj": Heads})   # not mlp.c_proj
+prompt = "The Eiffel Tower is in the city of"
+proj = headed.transformer.h[5].attn.c_proj
 
-with headed.trace("The Eiffel Tower is in the city of"):
-    per_head = headed.transformer.h[5].attn.heads.clone().save()
-    headed.transformer.h[5].attn.heads[:, 7] = 0             # zero head 7
-    after = headed.transformer.h[5].attn.output[0].save()
+with headed.trace(prompt):
+    per_head = proj.heads.clone().save()
+    proj.heads[:, 7] = 0                                     # ablate head 7
+    ablated = headed.output.logits.save()
 
-print(per_head.shape, type(headed.transformer.h[5].attn).__name__,
-      type(headed.transformer.h[5].mlp).__name__)
-assert after.view(1, -1, 12, 64)[:, :, 7].abs().max() == 0   # the transform landed
-assert after.view(1, -1, 12, 64)[:, :, 6].abs().max() > 0
+with headed.trace(prompt):                                   # the same ablation by hand
+    proj.input[..., 7 * 64:8 * 64] = 0
+    by_hand = headed.output.logits.save()
+
+with headed.trace(prompt):
+    clean = headed.output.logits.save()
+
+print(per_head.shape, type(proj).__name__, type(headed.transformer.h[5].mlp.c_proj).__name__)
+assert torch.equal(ablated, by_hand)                         # the transform landed
+assert not torch.equal(ablated, clean)                       # and it changed something
 ```
 
 ```
@@ -363,18 +333,21 @@ torch.Size([1, 12, 10, 64]) Heads Envoy
 
 Four things that bite:
 
-- **`self.<name>` inside a preprocess falls through to the module**, which is how
-  `self.num_heads` and `self.head_dim` resolve above. Nothing checks they exist —
-  GPT-NeoX spells the second one `head_size`.
-- **The transform must return a value shaped like the *location*.** The read
-  above indexes `value[0]`, so the write has to hand back the whole tuple.
+- **`self.<name>` inside a preprocess falls through to the module** when the
+  class does not define it — `self.num_heads` works on an attention module. Nothing
+  checks it exists: GPT-NeoX spells `head_dim` as `head_size`, and a projection like
+  `c_proj` has neither, hence the class attributes above.
+- **The transform must return a value shaped like the *location*.** It is
+  called with the edited view and `raw`, the value as served before the
+  preprocess. For `key="output"` on a tuple-returning module, index `value[0]` in
+  the preprocess and rebuild the whole tuple from `raw` in the transform.
 - **A preprocess that raises `AttributeError` is swallowed**, because an
   `eproperty` is a `property` and a raising getter falls through to
   `__getattr__`. You get `'Heads' object (nor its module) has attribute 'heads'`
   — which blames the name you asked for, not the line that failed. If a custom
   eproperty reports itself missing, the bug is inside its preprocess.
 - **`key="input"` serves the raw `(args, kwargs)` pair**, not a bare tensor.
-  Destructure it (`(x,), _ = value`) and repack it in the transform.
+  Destructure it (`(x,), _ = value`) and repack it in the transform, as above.
 
 Without `envoys=`, a custom `eproperty` has to live on a class that is already an
 envoy — your `NNsight` subclass, or the tracer. That is how the `VLLM` wrapper
