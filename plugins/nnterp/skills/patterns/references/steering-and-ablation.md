@@ -255,10 +255,36 @@ with model.trace() as tracer:
 assert torch.allclose(via_outputs, via_pattern, atol=1e-5)
 ```
 
-Both need `attn_implementation="eager"`. Do not slice the projected
-`attention_output` into `head_dim`-wide column blocks: after the output projection
-the hidden axis no longer decomposes per head, and that edit removes something that
-is not the head.
+Both need `attn_implementation="eager"`; a third way, `attention_premix[..., HEAD, :] = 0`
+(the heads at the output projection `o_proj`), does not, and gives the same logits on a
+plain attention. Do not slice the projected `attention_output` into `head_dim`-wide
+column blocks: after the output projection the hidden axis no longer decomposes per
+head, and that edit removes something that is not the head.
+
+### MLP neurons
+
+`mlp.mlp_neurons` is what the down projection `down_proj` sums, `[batch, seq,
+intermediate_size]`: `act(gate) * up` on a gated MLP, the activation itself on a plain
+one, so zeroing neuron `n` there removes exactly its column of `down_proj`'s weight from
+the block's output, on every family with a dense MLP. `mlp.mlp_activation` is the
+activation's output, the same tensor on a plain MLP and the gate's side on a gated one.
+A routed mixture has neither (use the expert values).
+
+```python
+with model.trace(prompt):
+    neurons = model.layers[LAYER].mlp.mlp_neurons[0, -1].save()           # [intermediate_size]
+top = neurons.abs().topk(8).indices
+
+with model.trace() as tracer:
+    with tracer.invoke(prompt):
+        clean_probs = model.next_token_probs.save()
+    with tracer.invoke(prompt):
+        model.layers[LAYER].mlp.mlp_neurons[:, -1, top] = 0                 # the 8 largest at the last position
+        knocked = model.next_token_probs.save()
+
+assert neurons.shape == (model.intermediate_size,)
+assert not torch.allclose(clean_probs, knocked)
+```
 
 ### Every head of a block in one forward
 

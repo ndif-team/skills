@@ -41,9 +41,12 @@ assert support["layer_output"] is None and support["self_attn.attention_output"]
 assert support["self_attn.attention_probabilities"] == {i: EAGER for i in range(12)}
 assert set(support) == {
     "logits", "token_embeddings", "next_token_probs", "input_ids", "attention_mask", "input_size",
-    "layer_output", "self_attn.attention_output", "self_attn.attention_probabilities",
+    "final_norm_output", "lm_head_output",
+    "layer_input", "attention_norm_output", "layer_mid", "mlp_norm_output", "mlp_input", "layer_output",
+    "self_attn.attention_output", "self_attn.attention_probabilities",
     "self_attn.attention_queries", "self_attn.attention_keys", "self_attn.attention_values",
-    "self_attn.attention_scores", "self_attn.attention_head_outputs", "mlp.mlp_output",
+    "self_attn.attention_scores", "self_attn.attention_head_outputs", "self_attn.attention_premix",
+    "mlp.mlp_activation", "mlp.mlp_neurons", "mlp.mlp_output",
 }
 assert plain.support(layer=0)["self_attn.attention_probabilities"] == EAGER          # one block, flat
 assert plain.layers[0].self_attn.support()["attention_probabilities"] == EAGER       # one envoy
@@ -52,8 +55,10 @@ assert plain.layers[0].self_attn.support()["attention_output"] is None
 
 Loaded with `attn_implementation="eager"`, every `self_attn.*` entry is `None`
 on GPT-2 and Llama. The root values (`logits`, `token_embeddings`,
-`next_token_probs`, `input_ids`, `attention_mask`, `input_size`) and the three
-boundary values never depend on the implementation.
+`final_norm_output`, `lm_head_output`, `next_token_probs`, `input_ids`,
+`attention_mask`, `input_size`), the block's boundary values and the sublayers'
+interiors at module boundaries (`attention_premix`, `mlp_activation`, `mlp_neurons`)
+never depend on the implementation.
 
 A hybrid (`Qwen/Qwen3.5-9B` with `attn_implementation="eager"`) reads as a dict
 per value, because each block has `self_attn` or `linear_attn` and the per-token
@@ -144,6 +149,11 @@ assert eager.support(layer=0)["self_attn.attention_probabilities"] is None      
 | `this checkpoint sets reorder_and_upcast_attn, which takes GPT-2's own upcast attention path` | the GPT-2 interior | `config.reorder_and_upcast_attn` is set |
 | `The attention does its own arithmetic rather than transformers' shared attention interface; not mapped for this family yet` | an interior value a family has not mapped | a family off the shared interface that marks it `unavailable(NOT_ON_INTERFACE)`; no shipped family does |
 | `no self_attn module on this block` / `no linear_attn module on this block` | every value of that module | another block has the module and this one does not (a hybrid's blocks). A module no block has (OPT's `mlp`) has no key in `support()` at all |
+| `no <module> module on this block` (`input_layernorm`, `post_attention_layernorm`, `mlp`) | `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input` | the block has no module the value is keyed on (OPT's `mlp_input`) |
+| `a parallel block: the attention and the MLP read the same input, so there is no stream between them` (`nnterp.components.PARALLEL`) | `layer_mid` | GPT-J, CodeGen, Cohere, Phi, Falcon; GPT-NeoX and StableLM with `use_parallel_residual` |
+| `a post-norm block: the attention reads the residual stream itself, layer_input` / `... the MLP reads the residual stream itself, layer_mid` (`POST_NORM_ATTENTION`, `POST_NORM_MLP`) | `attention_norm_output` / `mlp_norm_output` | OLMo-2/3, EXAONE-4, FlexOlmo, OLMo-Hybrid's attention blocks |
+| `no o_proj module on this attention` / `no act_fn module on this mlp` / `no down_proj module on this mlp` | `attention_premix` / `mlp_activation` / `mlp_neurons` | the family aliases no module to the standard child name (DeepSeek-V4 and JetMoE say why in their own words) |
+| `routed experts; read per-expert via the Moe component` | `mlp.mlp_activation`, `mlp.mlp_neurons` | a routed mixture of experts (dense blocks beside it serve them) |
 | `the state after each token is materialized only by the token-by-token kernel; the chunked kernel a prompt runs through carries it between chunks. Call nnterp.route_kernels(model.family, 'torch') before tracing this layer ...` | a DeltaNet's `linear_attn.state`, `.states` | the family is not routed |
 | `read inside transformers' pure-torch <kernel>, but this process dispatches it to an optimized kernel (<package>) with no Python source; uninstall it, or call nnterp.route_kernels(model.family, 'torch'), to read these` | every recurrent `linear_attn` value but `attention_output` | `mamba_ssm` / `flash-linear-attention` installed and the family not routed |
 | `the chunk scan materializes the state only at chunk boundaries, every <n> tokens (chunk_size=<n>); call nnterp.chunk_per_token(model) ...` | a Mamba-2 `linear_attn.states` | `chunk_per_token` not set |
@@ -163,6 +173,17 @@ assert eager.support(layer=0)["self_attn.attention_probabilities"] is None      
 
 BLOOM and MPT do their attention arithmetic themselves, so their pattern and
 interior need no eager load and are `None` under any implementation.
+
+A block-structure reason is the same string on every family that has it, so compare
+against the constant (a meta load, on Pythia's parallel block):
+
+```python
+from nnterp.components import PARALLEL
+
+pythia = StandardizedTransformer("EleutherAI/pythia-70m-deduped")     # meta: only the config is read
+assert pythia.support(layer=0)["layer_mid"] == PARALLEL               # use_parallel_residual
+assert pythia.support(layer=0)["mlp_norm_output"] is None              # the MLP's own norm, over the block input
+```
 
 The reasons are evaluated on the instance, so a change after the load changes the
 answer: `route_kernels(model.family, "torch")` turns a DeltaNet's `state` and

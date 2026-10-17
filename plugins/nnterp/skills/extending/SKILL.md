@@ -11,8 +11,9 @@ nnterp gives every transformer family one vocabulary (`model.layers[i].self_attn
 per family under `nnterp/families/`, named after `config.model_type`
 (`len(nnterp.families.known())` is 98). This skill is for when that is not enough: a
 `model_type` nnterp does not ship, a forward that puts a value where the base classes do
-not look, or a value nnterp does not have. Verified on nnsight 0.8.0 / transformers
-5.17.0 against `openai-community/gpt2` and `HuggingFaceTB/SmolLM2-135M-Instruct`. The
+not look, or a value nnterp does not have. Verified on nnterp `0.8-refactor` at `f9d186c`,
+nnsight `dev` at `d565f5f8` (the dotted aliases below need it), transformers 5.17.0 and
+5.19.0, against `openai-community/gpt2` and `HuggingFaceTB/SmolLM2-135M-Instruct`. The
 nnterp repo's pages: `docs/extending/` (`adding-a-family.md`, `overriding-values.md`,
 `custom-values.md`, `finding-source-ops.md`, `registering.md`),
 `docs/developing/eproperty-internals.md`, `docs/developing/recurrent-mixer-internals.md`
@@ -84,6 +85,8 @@ RENAME = {
     "model.norm": "norm",
     # "attn": "self_attn",                        # single-component: every envoy with that child
     # <X>Mamba2Mixer: "linear_attn",              # class key: every envoy with exactly one child of that class
+    # "dense": "o_proj", "act": "act_fn", "fc2": "down_proj",   # the sublayers' interiors, where spelled otherwise
+    # "attn.c_proj": "attn.o_proj",               # dotted: one envoy's child, where two children share a name
 }
 
 class Layer(Layer):
@@ -102,7 +105,18 @@ ENVOYS = {<X>DecoderLayer: Layer, <X>Attention: Attention, <X>MLP: Mlp}
 - **`RENAME`**: a key that resolves nowhere is skipped; an alias that would shadow an
   existing name raises at construction; a class key is for one native name with several
   meanings (Nemotron-H's `mixer` is `linear_attn`, `self_attn` or `mlp` by class), and a
-  class two children of one envoy share raises `ValueError` there.
+  class two children of one envoy share raises `ValueError` there. Alias the output
+  projection `o_proj`, the activation `act_fn` and the down projection `down_proj` where
+  the modules spell them otherwise: `attention_premix`, `mlp_activation` and
+  `mlp_neurons` are keyed on those three names, as `attention_norm_output`, `layer_mid`
+  and `mlp_norm_output` are on `input_layernorm` / `post_attention_layernorm`. GPT-2
+  spells both projections `c_proj`, so it uses dotted keys (`"attn.c_proj": "attn.o_proj"`,
+  `"mlp.c_proj": "mlp.down_proj"`).
+- **A block that is not the pre-norm one** points the boundary values at its own modules
+  on the family's `Layer` (Gemma-2's `layer_mid` at `pre_feedforward_layernorm.input`) or
+  marks one unavailable with a shared reason: `layer_mid = unavailable(PARALLEL)` on a
+  parallel block, `POST_NORM_ATTENTION` / `POST_NORM_MLP` on a post-norm one (all three in
+  `nnterp.components`).
 - **`Layer`, `Attention`, `Mlp`** exist even when nothing changes (the suite asserts the
   block envoys are exactly the family's classes). Override `off_interface()` for a config
   flag that routes the attention off transformers' interface (GPT-2); redefine values for
@@ -236,14 +250,14 @@ with custom.trace(prompt):
     entropy = attn.attention_entropy.save()
 
 assert tuple(soft.shape) == tuple(entropy.shape) + (soft.shape[-1],) and (entropy >= 0).all()
-assert "(attention_softmax) -> Pattern [batch heads query key]: The softmax output before the dropout" in repr(attn)
+assert "(attention_softmax) -> Pattern [batch num_heads query key]: The softmax output before the dropout" in repr(attn)
 assert custom.support()["self_attn.attention_entropy"] is None                      # listed off the tree
 assert "self_attn.attention_entropy" not in model.support()                         # the plain load has no envoy carrying it
 assert MyAttention.attention_softmax.layout is Pattern is MyAttention.attention_probabilities.layout
 ```
 
 Annotate with the named layout the shape already has (`Residual`, `Pattern`, `Keys`,
-`RouterLogits`, ... : `nnterp.components` exports 28, `nnterp.standardized` adds `Logits`,
+`RouterLogits`, `Neurons`, ... from `nnterp.components`; `nnterp.standardized` has `Logits`,
 `NextTokenProbs`, `Tokens`); `layout` and `dims` are read off the annotation and the
 repr line is `(name) -> Layout [axes]: description`. A shape no standard value has gets
 an inline `jaxtyping` type. A value that must run on NDIF lives in an installed module,
@@ -266,7 +280,8 @@ parts too. What it adds, quoted from `llama.py` and `gemma3_text.py`:
 - **The tower's inner names, keyed relative to the tower**: multi-component keys no text
   model has (`"encoder.layers": "layers"`, `"embeddings.patch_embedding": "patch_embed"`)
   and single names no text block has (`"post_layernorm": "norm"`,
-  `"layer_norm1": "input_layernorm"`, `"layer_norm2": "post_attention_layernorm"`). A bare
+  `"layer_norm1": "input_layernorm"`, `"layer_norm2": "post_attention_layernorm"`,
+  `"out_proj": "o_proj"`, `"activation_fn": "act_fn"`, `"fc2": "down_proj"`). A bare
   name a text block also has is never a tower key.
 - **`Vision`, `VisionLayer`, `VisionAttention`, `VisionMlp`** from `nnterp.components`, keyed
   in `ENVOYS` on the tower's module types:
