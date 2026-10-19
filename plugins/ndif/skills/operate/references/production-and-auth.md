@@ -8,9 +8,9 @@ Source of record: `docs/runbooks/enable-auth.md`, `docs/operating/production.md`
 Where a request's code runs is decided by **two** things, and both must be set
 before anyone else can reach the API:
 
-1. **Auth decides whether the request is trusted.** `NDIF_POSTGRES_URL` on the
-   `api` service turns API keys on; a key is trusted iff it carries the `trusted`
-   user_tag.
+1. **Auth decides which tags the request carries.** `NDIF_POSTGRES_URL` on the
+   `api` service turns API keys on; the request's `tags` are then the key's
+   user_tags, and it is trusted iff they include `trusted`.
 2. **The actor class decides whether "untrusted" changes anything.** Only a
    sandbox actor class forks an untrusted request into a runner process. The
    base `ModelActor` runs every request in-process, next to the weights,
@@ -43,29 +43,27 @@ dashboard's deploy modal) overrides this; never point one at the base
 
 <!-- test: skip -->
 ```python
-client_set_trusted = "trusted" in request.model_fields_set
-...
 identity = await verify_api_key(request.api_key)
 if identity is not None:
     request.email = identity.email
-    request.trusted = identity.trusted
-    request.priority = identity.priority
-elif not client_set_trusted:
-    # Auth is off: a trusted-network / dev mode. Default to trusted.
-    request.trusted = True
+    request.tags = set(identity.user_tags)
+elif "tags" not in request.model_fields_set:
+    request.tags = {"trusted"}
 ```
 
-With no Postgres, `verify_api_key` returns `None`, so a request that did not tag
-itself defaults to `trusted=True`:
+`request.trusted`, `request.trust_remote_code` (that tag or `trusted`) and
+`request.priority` are properties over the set. With no Postgres,
+`verify_api_key` returns `None`, so a request that did not send `tags` itself
+gets `{"trusted"}`:
 
 1. **User code runs in-process, in the model actor** — whatever the actor class.
-2. **A model it auto-deploys loads with `trust_remote_code=True`**, executing
+2. **It may deploy a model whose key carries `trust_remote_code`**, executing
    whatever Python its Hugging Face repo ships.
 
-An explicit `trusted` in the envelope is honored when auth is off, so a client
-can send `trusted: false` to exercise the runner path (on a sandbox actor class)
-with no Postgres at all — see the `develop` skill. With auth on, a
-client-supplied value is overwritten from the key.
+Client-supplied `tags` are honored when auth is off, so a client can send
+`tags: []` to exercise the runner path (on a sandbox actor class) with no
+Postgres at all — see the `develop` skill. With auth on, a client-supplied value
+is overwritten from the key.
 
 ## Turning it on
 
@@ -104,11 +102,12 @@ client-supplied value is overwritten from the key.
    job, a separate repo. The API key *is* the `key_id` UUID. The `LEFT JOIN`s mean
    a key with no tags still returns one row.
 
-4. **Create the two tags the server acts on.** Every other tag name is inert.
+4. **Create the three tags the server acts on.** Every other tag name is inert.
 
    | Tag | Effect |
    |---|---|
-   | `trusted` | the request runs in-process instead of in a runner, and any model it triggers a deploy for loads with `trust_remote_code` |
+   | `trusted` | the request runs in-process instead of in a runner, and has the `trust_remote_code` permission |
+   | `trust_remote_code` | the request may deploy a model whose key carries `trust_remote_code`, and nothing more — its blocks still run in the sandbox |
    | `priority` | the request sorts ahead of all normal traffic for that model, FIFO against other priority requests |
 
    `priority` has **no aging**: sustained priority load starves normal traffic,
@@ -117,6 +116,7 @@ client-supplied value is overwritten from the key.
    ```sql
    INSERT INTO user_tags (name, description)
    VALUES ('trusted',  'code runs in the model process'),
+          ('trust_remote_code', 'may deploy checkpoints that run their own code'),
           ('priority', 'served ahead of untagged traffic');
    ```
 
@@ -175,6 +175,12 @@ calls, caches and generation all work. These do not:
   and changes nothing.
 
 Tell users before you flip it; anyone who needs those needs a `trusted` key.
+An untagged key also cannot be the first to deploy a model whose key carries
+`trust_remote_code` — the request gets `Could not deploy this model. This model
+runs code from its own repository (trust_remote_code=True)...` and the model's
+queue is purged until an admin deploys it (`ndif deploy --trust-remote-code`,
+or the dashboard) or grants the key the `trust_remote_code` tag, the narrower
+grant.
 
 ## Verifying which path a request took
 
@@ -199,17 +205,18 @@ untouched. On a base `ModelActor` there are no runners at all.
 
 - **Auth is checked at ingress only.** Anyone who can reach Redis, the Ray client
   port (10001) or the Ray dashboard (8265) bypasses it completely.
-- **Models deployed while auth was off keep their `trusted` deployment.** The flag
-  is fixed on the `Deployment` at creation. Evict and redeploy after turning auth
-  on if a model should stop loading with `trust_remote_code`.
+- **Turning auth on does not touch running models.** How a model loads is fixed
+  by its key, not by the request, and a running model is open to every caller —
+  a model running with a `trust_remote_code` key stays open; evict it if
+  untagged keys should not use it.
 - **The dashboard's auth is entirely separate.** Remove `NDIF_DASHBOARD_DEV_MODE`,
   then set `NDIF_DASHBOARD_USERNAME`, a bcrypt `NDIF_DASHBOARD_PASSWORD_HASH`
   (`python -m ndif.services.dashboard.backend.auth hash '<password>'`, each `$`
   written `$$` in compose YAML) and a random `NDIF_DASHBOARD_SESSION_SECRET` — the
   default is the public string `change-me-please-this-is-not-secure`. With dev mode
   off and no hash, **nobody can log in**. Recreate with `just up dashboard`. Its
-  deploy endpoint defaults to `trusted: true`, so an open dashboard is remote code
-  execution.
+  deploy endpoint takes `trust_remote_code` (default `false`) with no tag check,
+  so an open dashboard can load any checkpoint's code onto the cluster.
 - **Enabling auth is also what makes per-user attribution work** — `email` rides
   with the request into every log record and metric.
 

@@ -244,8 +244,8 @@ The same names configure a deployment (`ndif deploy <model> --dtype nf4`), so a
 server can hold a model 4-bit with nothing client-side changing — a trace written
 against an unquantized replica works against a quantized one.
 
-A **client cannot request it**. A remote model key is the repo id and revision and
-says nothing about how the weights are held, so `dtype=` on a `remote=True` model
+A **client cannot request it**. A remote model key is the repo id, revision, task and
+`trust_remote_code`, and says nothing about how the weights are held, so `dtype=` on a `remote=True` model
 shapes only your own meta build. The deployment decides.
 
 Placement uses the nominal bytes/weight from the table above, which undercounts by

@@ -88,7 +88,7 @@ only attribute access moved, which is what `get()` and `rename` go through.
 | `nnsight.save` | `save(obj) -> obj` | mark a value to survive the outermost trace. **Raises outside a trace.** |
 | `nnsight.register` | `register(module｜"name")` | ship a local module's source with remote requests |
 | `nnsight.status` | `status(raw=False)` | query NDIF; `print()` shows deployed models |
-| `nnsight.is_model_running` | `is_model_running(repo_id, revision="main")` | is it RUNNING on NDIF |
+| `nnsight.is_model_running` | `is_model_running(repo_id, revision="main", task=None, trust_remote_code=None)` | is it RUNNING on NDIF; `task` and `trust_remote_code` are in the model key |
 | `nnsight.compare` | `compare()` | local vs NDIF package/python diff |
 | `nnsight.CONFIG` | — | the config singleton |
 

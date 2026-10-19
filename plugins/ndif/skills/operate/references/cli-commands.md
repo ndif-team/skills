@@ -31,18 +31,20 @@ manages containers, the other local processes.
 
 ## The model key, and `--task`
 
-Every model command resolves a checkpoint to a model key — repo id, revision and
-task: `--task` when given, else the task inferred from the checkpoint exactly as
-an nnsight client with no `task=` infers it. A deployment made with a
-non-default task needs the same `--task` on every later `scale`, `evict` and
-`restart`. For a key no flag combination reproduces, use the exact-key recipes
+Every model command resolves a checkpoint to a model key — repo id, revision,
+task and `trust_remote_code`: `--task` when given, else the task inferred from
+the checkpoint exactly as an nnsight client with no `task=` infers it;
+`trust_remote_code` only with `--trust-remote-code`. A deployment made with a
+non-default task or with `--trust-remote-code` needs the same flag on every
+later `scale`, `evict` and `restart` — without it they mint the key of a
+different model. For a key no flag combination reproduces, use the exact-key recipes
 at the end of this page.
 
 ## `ndif deploy`
 
 ```text
 ndif deploy [CHECKPOINTS...] [-f FILE] [--sync] [--revision REV] [--task TASK]
-            [--pinned] [--replicas N] [--actor-class PATH] [--trusted]
+            [--trust-remote-code] [--pinned] [--replicas N] [--actor-class PATH]
             [--dtype DTYPE] [--gpus N] [--size-bytes N] [--padding-factor F]
             [--padding-bias N] [--max-tp N] [--ray-address ADDR] [--redis-url URL]
 ```
@@ -54,10 +56,10 @@ ndif deploy [CHECKPOINTS...] [-f FILE] [--sync] [--revision REV] [--task TASK]
 | `--sync` | off | reconcile the cluster to the file exactly; requires `-f` |
 | `--revision` | unset | HF branch/revision — part of the model key |
 | `--task` | inferred | pipeline task (`text-generation`, `fill-mask`, ...) — part of the model key, so each task is its own deployment |
+| `--trust-remote-code` | off | let the checkpoint's own modelling code run at load — part of the model key |
 | `--pinned` | off | exempt from automatic eviction |
 | `--replicas` | `1` | how many **new** replicas to add |
 | `--actor-class` | the controller's (`NDIF_MODEL_IMPORT_PATH`, then `NDIF_DEFAULT_MODEL_ACTOR_CLASS`) | the Ray actor class serving the deployment |
-| `--trusted` | off | load with `trust_remote_code=True` |
 | `--dtype` | `NDIF_DEFAULT_DTYPE` (`bfloat16`) | a torch dtype or a quantization name (`nf4`/`int4`/`4bit`, `fp4`, `int8`/`8bit`, `fp8`); loads **and** sizes |
 | `--gpus` | derived | place on exactly this many cards |
 | `--size-bytes` | estimated | the model's weights, measured — skips the Hub estimate |
@@ -82,25 +84,27 @@ Each model gets one status line, e.g. `✓ <model_key> [b7f60]: ready` (the
 bracket is the replica id), or a `✗` line with the error; evictions the
 controller performed to make room are listed at the end.
 
-### `trusted` on a deploy
+### `trust_remote_code`
 
-It is not a label. It becomes `trust_remote_code=` for both the size evaluator
-and the actor's load, so **an untrusted deploy of a model whose HF repo ships
-custom modelling code fails** — in the evaluator, before any GPU is touched, with
-`✗ <model_key>: <traceback>` and nothing placed. Architectures built into
-transformers (GPT-2, Llama, Qwen) load fine untrusted; anything with `"auto_map"`
-in its `config.json` does not.
+A field of the model key, written as `"trust_remote_code": true` in the key's
+JSON and omitted otherwise. nnsight's `from_model_key` reads it for both the
+size evaluator and the actor's load, so **a deploy without it of a model whose
+HF repo ships custom modelling code fails** — in the evaluator, before any GPU is
+touched, with `✗ <model_key>: <traceback>` and nothing placed. Architectures
+built into transformers (GPT-2, Llama, Qwen) load without it; anything with
+`"auto_map"` in its `config.json` does not. A client that built the model with
+`trust_remote_code=True` sends a key carrying the field, and whether that
+client may deploy it is the API's decision (`docs/concepts/auth-and-limits.md`).
 
-The same field on a *request* decides where user code runs (on a sandbox actor
-class). A deployment inherits `trusted` from whoever created it, and a later
-trusted request against that model does **not** reload it.
+The per-request `trusted` flag is unrelated: it decides where user code runs
+(on a sandbox actor class), not how the model loads.
 
 ## `ndif scale`
 
 ```text
 ndif scale CHECKPOINT [-n N] [--revision REV] [--task TASK] [--actor-class PATH]
-           [--dtype DTYPE] [--gpus N] [--execution-timeout SECONDS] [--trusted]
-           [--pinned] [--ray-address ADDR]
+           [--dtype DTYPE] [--gpus N] [--execution-timeout SECONDS]
+           [--trust-remote-code] [--pinned] [--ray-address ADDR]
 ```
 
 Adds replicas that look like the ones already serving that model. Anything you
@@ -127,8 +131,8 @@ ndif evict <checkpoint> --replica <old_id>   # drop the unpinned one
 ## `ndif evict`
 
 ```text
-ndif evict [CHECKPOINTS...] [--revision REV] [--task TASK] [--replica ID] [--all]
-           [--ray-address ADDR] [--redis-url URL]
+ndif evict [CHECKPOINTS...] [--revision REV] [--task TASK] [--trust-remote-code]
+           [--replica ID] [--all] [--ray-address ADDR] [--redis-url URL]
 ```
 
 Without `--replica` the controller removes **every HOT and WARM replica** of the
@@ -151,7 +155,8 @@ A key that matches nothing prints `✗ <model_key>: nothing to evict` and **exit
 ## `ndif restart`
 
 ```text
-ndif restart CHECKPOINT [--revision REV] [--task TASK] [--replica ID] [--ray-address ADDR]
+ndif restart CHECKPOINT [--revision REV] [--task TASK] [--trust-remote-code]
+             [--replica ID] [--ray-address ADDR]
 ```
 
 Kills each replica's actor with `no_restart=False` and waits for Ray to respawn
@@ -171,7 +176,8 @@ ndif status [--json-output] [--verbose] [--show-cold] [--watch] [--ray-address A
 The plain form prints cluster totals (`GPU Memory: X / Y GB free` — the ledger,
 not `nvidia-smi`) and the deployments by level. `--json-output` prints the
 controller payload; each entry carries `model_key`, `replica_id`,
-`deployment_level`, `application_state`, `task`, `pinned`, `trusted`, `dtype`,
+`deployment_level`, `application_state`, `task`, `pinned`, `trust_remote_code`
+(read off the key), `dtype`,
 `execution_timeout_seconds`, `actor_class`, `gpus`, `n_params`, `size_bytes`,
 and — for non-pinned deployments — `schedule.end_time`, the moment age protection
 lapses. `--verbose` fetches `get_state()` instead: per-node GPU inventory,
@@ -195,8 +201,8 @@ Collapses the current HOT per-replica list into one entry per model key and
 writes a `models.yaml` you can feed back to `ndif deploy -f`. Each entry carries
 the full `model_key` (task and envoy class included, used verbatim on redeploy)
 plus `dtype` and `actor_class`, **always written**, and `revision`, `pinned`,
-`replicas`, `trusted`, `execution_timeout_seconds` and `gpus` (when more than
-one) **only where they differ from the defaults**.
+`replicas`, `trust_remote_code`, `execution_timeout_seconds` and `gpus` (when
+more than one) **only where they differ from the defaults**.
 
 What it loses:
 
@@ -288,14 +294,15 @@ curl -s -b jar -H 'content-type: application/json' $D/api/deployments/evict \
 curl -s -b jar -H 'content-type: application/json' $D/api/deployments/restart \
   -d '{"model_key":"<model_key>","replica":"<replica_id>"}'
 curl -s -b jar -H 'content-type: application/json' $D/api/deployments/deploy \
-  -d '{"checkpoint":"<repo_id>","model_key":"<model_key>","trusted":false}'
+  -d '{"checkpoint":"<repo_id>","model_key":"<model_key>"}'
 ```
 
 `replica` is optional on evict and restart. An unknown replica still returns
 HTTP 200: the `✗` line is inside the response body's `logs[]`, so check the
-body, not the status code. A dashboard deploy defaults to
-`trusted: true`; send `false` unless you mean `trust_remote_code`. Endpoint
-bodies: `docs/operating/dashboard.md`.
+body, not the status code. A `model_key` is used verbatim; without one the
+dashboard mints the key from `checkpoint` and the optional `trust_remote_code`
+(default `false`), with no check on who asks. Endpoint bodies:
+`docs/operating/dashboard.md`.
 
 ## `ndif env`, `ndif version`, `ndif doctor`, `ndif info`
 

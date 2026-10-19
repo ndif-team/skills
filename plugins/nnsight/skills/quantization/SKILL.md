@@ -204,7 +204,8 @@ quantized only when actually loaded.
 ## On NDIF
 
 A **client cannot request a quantization**; the deployment decides. A remote model
-key is the repo id, revision and task — nothing about how the weights are held —
+key is the repo id, revision, task and `trust_remote_code` — nothing about how the
+weights are held —
 so `dtype=` on a `remote=True` model shapes only your own meta build. Because the
 module tree is unchanged, a trace written against an unquantized model runs
 against a quantized deployment as is.
