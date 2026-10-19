@@ -21,10 +21,12 @@ Run these anywhere that can reach `NDIF_RAY_ADDRESS`: under compose,
 ## The model key is the identity
 
 A model key is `"<nnsight wrapper class path>:<JSON>"`, the JSON carrying the
-canonical repo id, the revision and the pipeline task:
+canonical repo id, the revision, the pipeline task and, when set,
+`trust_remote_code`:
 
 ```text
 nnsight.modeling.transformers.TransformersModel:{"repo_id": "openai-community/gpt2", "revision": null, "task": "text-generation"}
+nnsight.modeling.transformers.TransformersModel:{"repo_id": "x/custom", "revision": null, "task": "text-generation", "trust_remote_code": true}
 ```
 
 Every part is identity:
@@ -32,11 +34,12 @@ Every part is identity:
 - The repo id is **canonicalized through the Hub** (`gpt2` →
   `openai-community/gpt2`), so deploying needs Hub access, plus `HF_TOKEN` for a
   gated repo.
-- The **revision** and the **task** change the key: two revisions, or two tasks
-  over one checkpoint, are independent deployments. Left unset, the CLI infers the
-  task exactly as an nnsight client with no `task=` does, so the two agree. A
-  model deployed with a non-default `--task` needs the same `--task` on every
-  later `scale`, `evict` and `restart`.
+- The **revision**, the **task** and **`trust_remote_code`** change the key: two
+  revisions, two tasks, or the same checkpoint with and without its own code are
+  independent deployments. Left unset, the CLI infers the task exactly as an
+  nnsight client with no `task=` does, so the two agree. A model deployed with a
+  non-default `--task` or with `--trust-remote-code` needs the same flags on
+  every later `scale`, `evict` and `restart`.
 - The client sends the key it computed and the server never guesses. "Model not
   deployed" is almost always a key mismatch — compare
   `ndif status --json-output` against what nnsight computed locally.
@@ -215,8 +218,8 @@ Requests sent to a replica during its restart are re-queued or errored.
 `No response from the dispatcher` means the API is down — or restarted under
 five seconds ago.
 
-**By exact key.** `evict`, `restart` and `scale` resolve a checkpoint to the
-inferred task's key. For any other key, pass the `model_key` from
+**By exact key.** `evict`, `restart` and `scale` resolve a checkpoint to the key
+their flags mint (`--task`, `--trust-remote-code`). For any other key, pass the `model_key` from
 `ndif status --json-output` to `ndif.cli.lib.restart.restart` /
 `ndif.cli.lib.evict.evict`, or POST the dashboard's `/api/deployments/{evict,
 restart}` (`{model_key, replica}`) or `/api/deployments/deploy`

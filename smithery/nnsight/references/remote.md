@@ -217,6 +217,8 @@ to apply before they scale up.
 | Works locally, fails remotely | non-whitelisted import, or an unregistered local helper — reproduce with `remote="local"` |
 | Result missing a value | the save wasn't bound to a name, or you saved elements instead of a container |
 | Worker-side exception | re-raised at the client as `RuntimeError` carrying the original traceback |
+| `Could not deploy this model. This model runs code from its own repository (trust_remote_code=True)…` | the model is not deployed and your API key lacks the `trust_remote_code` (or `trusted`) tag — ask an NDIF admin to deploy it or grant the tag |
+| RUNNING in `nnsight.status()`, yet your request deploys a new copy or waits | your `task=` / `trust_remote_code=` differ from the deployment's; both are in the model key, so match what `status()` shows |
 
 `CONFIG.APP.DEBUG = True` adds payload/result byte sizes and per-status logging —
 useful for confirming a transfer really did shrink.
