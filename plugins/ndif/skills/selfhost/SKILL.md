@@ -22,8 +22,8 @@ both are open.
 **No `NDIF_POSTGRES_URL` means no authentication, and every request is
 trusted.** All three routes default to that. A trusted request runs the caller's
 traced block **in-process inside the model actor**, next to the weights, and
-loads models with **`trust_remote_code=True`**, so a request naming any Hugging
-Face repo can execute that repo's code on your GPU node.
+may deploy a model whose key carries **`trust_remote_code`**, so a request
+naming any Hugging Face repo can execute that repo's code on your GPU node.
 
 **Auth alone does not sandbox anything.** Auth decides *whether* a request is
 trusted; the **model actor class** decides whether that makes a difference. Only

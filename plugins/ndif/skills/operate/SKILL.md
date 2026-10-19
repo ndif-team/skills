@@ -76,14 +76,21 @@ answers differently under the same key.
 
 ## Getting models deployed
 
-| Surface | `pinned` | `trusted` |
+| Surface | `pinned` | `trust_remote_code` |
 |---|---|---|
-| `ndif deploy <checkpoint>` | `False`; `--pinned` sets it | `False`; `--trusted` sets it |
-| `ndif deploy -f models.yaml` (`--sync`) | per entry | per entry, default `False` |
-| `NDIF_DEPLOYMENTS` at controller boot | **`True`**, hard-coded | `False` |
-| Dashboard Deploy / Add Replica | per request | **`True` by default** — a request field an API caller can override |
-| Dashboard schedule reconcile cron | **`True`**, hard-coded | **`True`**, hard-coded |
-| Implicit, on the first request for an undeployed model | `False` | **the requesting client's `trusted` flag** |
+| `ndif deploy <checkpoint>` | `False`; `--pinned` sets it | `False`; `--trust-remote-code` puts it in the minted key |
+| `ndif deploy -f models.yaml` (`--sync`) | per entry | per entry, default `False`; goes into the key |
+| `NDIF_DEPLOYMENTS` at controller boot | **`True`**, hard-coded | whatever each key says (entries are raw keys) |
+| Dashboard Deploy / Add Replica | per request | per request, default `False` — a checkbox in the Deploy modal |
+| Dashboard schedule reconcile cron | **`True`**, hard-coded | per event, default `False`; written into the event's key |
+| The queue's autoscaler | `False` | whatever the key says |
+| Implicit, on the first request for an undeployed model | `False` | whatever the key says; **gated by the API key's tag** |
+
+`trust_remote_code` is a field of the model key, not of the deployment: a
+client's own `trust_remote_code=True` mints it too, keys that differ in it are
+two deployments, and the implicit path deploys a key carrying it only when a
+queued request's API key has the `trust_remote_code` or `trusted` tag
+(`docs/concepts/auth-and-limits.md`). A running model serves every caller.
 
 `NDIF_DEPLOYMENTS` is a pipe-separated list of **model keys**, used verbatim.
 Each entry must be the exact current key, task included: a bare repo id fails to
@@ -109,8 +116,9 @@ models:
     # on a cluster that takes untrusted traffic
 ```
 
-Other fields: `revision`, `trusted`, `padding_factor`, `padding_bias`, `max_tp`,
-`envoy_class`, `model_key`; unknown keys are silently dropped. `--sync` evicts
+Other fields: `revision`, `trust_remote_code` (default `false`; part of the
+key), `padding_factor`, `padding_bias`, `max_tp`, `envoy_class`, `model_key`;
+unknown keys are silently dropped. `--sync` evicts
 every HOT key not in the file, trims surplus replicas, and deploys the shortfall.
 
 **`ndif export` is not a full snapshot.** It always writes `dtype` and
@@ -212,7 +220,7 @@ inferred task's key. For any other key, pass the `model_key` from
 `ndif status --json-output` to `ndif.cli.lib.restart.restart` /
 `ndif.cli.lib.evict.evict`, or POST the dashboard's `/api/deployments/{evict,
 restart}` (`{model_key, replica}`) or `/api/deployments/deploy`
-(`{checkpoint, model_key?, trusted}`) — recipes in
+(`{checkpoint, model_key?, trust_remote_code}`) — recipes in
 [references/cli-commands.md](references/cli-commands.md). An unknown replica
 still returns HTTP 200, with the `✗` line inside the response's `logs[]`: check
 the body, not the status code.
@@ -224,9 +232,10 @@ deploy/evict/restart buttons, and a calendar that keeps a set of models pinned
 over a time window. Every action goes through the same `cli/lib` functions the
 CLI uses.
 
-- **A dashboard deploy defaults to `trusted: true`** (`trust_remote_code`), and
-  **dev mode is no auth** — `NDIF_DASHBOARD_DEV_MODE=true`, the compose default,
-  exposes deploy and evict to anyone who can reach 8081.
+- **A dashboard deploy can mint a `trust_remote_code` key** (a checkbox in the
+  Deploy and Schedule modals, default off; the dashboard does not check who
+  asks), and **dev mode is no auth** — `NDIF_DASHBOARD_DEV_MODE=true`, the
+  compose default, exposes deploy and evict to anyone who can reach 8081.
 - Crons in the container: **monitor** every 10 min (a real remote trace per HOT
   model every 2 h, needing `NDIF_API_KEY`), **reconcile** every 2 min (does
   nothing if the controller is unreachable), **report** daily. The data dir must
@@ -252,14 +261,17 @@ GPU. `docs/runbooks/add-a-gpu-node.md`.
 
 ## Before anyone else can reach it
 
-Auth (`NDIF_POSTGRES_URL`) decides whether a request is trusted; **the actor class
+Auth (`NDIF_POSTGRES_URL`) decides which tags a request carries — with it unset,
+every request that does not say otherwise is `trusted`; **the actor class
 decides whether that changes anything.** An untrusted request is isolated in a
 runner process only on `SandboxModelActor` — set by `NDIF_MODEL_IMPORT_PATH`
 (legacy fallback `NDIF_DEFAULT_MODEL_ACTOR_CLASS`), plus `SandboxedTPModelActor`
 if TP is on. Only the compose file sets it; the published image and a source
 install run untrusted code in-process even with auth on. Once it is set, untagged
-keys lose weight reads, weight edits, gradients and training. Grant the `trusted`
-tag only to keys you would hand your own shell to.
+keys lose weight reads, weight edits, gradients and training, and cannot be the
+first to deploy a model whose key carries `trust_remote_code`. Grant the `trusted`
+tag only to keys you would hand your own shell to; `trust_remote_code` is the
+narrower grant — deploy such a model, nothing more.
 
 Keys live in Postgres's anonymous volume: they survive a container recreate and
 are **lost on `just down` / `just ta`** (existing keys then 403 until

@@ -24,8 +24,9 @@ way, by process.
 3. **Execution forks on two things: `request.trusted` and the actor class.** A
    sandbox actor runs an untrusted request's block in a separate runner process
    driven over a Unix socket; the base `ModelActor` runs every request in-process
-   whatever `trusted` says. With auth off a client-supplied `trusted` is honored
-   and an unspecified one defaults to trusted.
+   whatever `trusted` says. `request.trusted` reads the request's `tags`; with
+   auth off client-supplied `tags` are honored and unspecified ones default to
+   `{"trusted"}`.
 4. **Redis is the only durable handoff.** Once a request leaves the Redis list it
    is a Python object in the dispatcher's memory until it reaches a terminal
    response. Nothing in between survives a restart.
@@ -208,11 +209,11 @@ non-blocking tests need `NDIF_OBJECT_STORE_PUBLIC_URL` reachable from pytest.
 **A normal `just up` never runs a single line of sandbox code.** Two things must
 hold:
 
-1. **The request must be untrusted.** Auth-off defaults an *unspecified*
-   `trusted` to `True`, but `validate_request` honors an explicit one, so
-   **sending `trusted: false` forces the sandbox path with no Postgres**.
-   nnsight's request envelope has no `trusted` field;
-   `tests/conftest_untrusted.py` injects it:
+1. **The request must be untrusted.** Auth-off defaults *unspecified* `tags`
+   to `{"trusted"}`, but `validate_request` honors explicit ones, so
+   **sending `tags: []` forces the sandbox path with no Postgres**.
+   nnsight's request envelope has no `tags` field;
+   `tests/conftest_untrusted.py` injects `"tags": []`:
 
    ```bash
    PYTHONPATH=tests pytest tests/test_nnsight_remote.py -p conftest_untrusted
@@ -274,7 +275,7 @@ green `publish_docker.yml` means the image built, not that the server works.
 `docs/developing/contributing.md`.
 
 Before a PR: bring a stack up and run `pytest tests/`; if you touched execution,
-run it again with `trusted=False` forced; `ruff check src/`; and if you added an
+run it again with `tags: []` forced; `ruff check src/`; and if you added an
 env var, add its row to `docs/reference/env-vars.md` — the most common drift in
 the repo. House style lives in `docs/developing/contributing.md`.
 

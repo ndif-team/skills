@@ -40,8 +40,9 @@ why a block can die with `CUDA out of memory ... N MiB allowed` on a nearly empt
 card: it hit its own budget instead of trampling a co-tenant. A sandbox runner
 process is outside this cap.
 
-The memo recomputes when the dtype or `trust_remote_code` changes, since element
-sizes differ and repo code can build a different architecture. The controller pins a concrete dtype onto every `DeploymentConfig`
+The memo recomputes when the dtype changes, since element sizes differ;
+`trust_remote_code` is read off the key, so keys differing in it are different
+entries. The controller pins a concrete dtype onto every `DeploymentConfig`
 before evaluating so the estimate and the load cannot diverge.
 
 ## How placement decides
@@ -150,7 +151,7 @@ reserve capacity for future replicas.
 | A node-stated reason, e.g. `asked for N GPUs, but this model shards at most M ways…` | The request cannot be placed as asked. Pick a `gpus` that divides M, or `--max-tp 0` |
 | `No GPU nodes available.` | The controller has zero nodes reporting a `GPU` resource — a different failure entirely. |
 | An evaluator traceback (gated repo, 401, unknown repo id, no network) | Sizing failed *before* placement. Not a memory problem. Set `HF_TOKEN` wherever the deploy runs |
-| An HF "requires you to execute the code" / `trust_remote_code` error | The deployment is untrusted and the repo ships custom modelling code. Redeploy `--trusted` |
+| An HF "requires you to execute the code" / `trust_remote_code` error | The repo ships custom modelling code and the model key lacks `trust_remote_code`. Deploy with `--trust-remote-code`; the client must load with `trust_remote_code=True` to compute the same key |
 | `RuntimeError: '<weight>' is on 'cpu', expected one of CUDA devices [...]` | A multi-card load's budget was too small, so accelerate offloaded the overflow to CPU and the post-load check refused to serve a half-CPU model. Read it as "the estimate was too low". |
 | `torch.cuda.OutOfMemoryError` at load | The estimate was wrong, or something the ledger cannot see holds the memory. The controller logs `Deployment <model_key> failed during create: <error>`, kills the actor and returns its bytes; users waiting on the model get `Error starting model.` |
 | `CUDA out of memory ... N MiB allowed` **inside a block** | The per-process allocator cap. The weights fit; the activations did not. The replica stays up. Raise padding, or save less. |
