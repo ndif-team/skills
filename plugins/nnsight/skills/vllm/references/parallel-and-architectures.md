@@ -32,8 +32,8 @@ assert shapes["o_proj.input"][-1] == 896 and shapes["o_proj.weight (this rank)"]
 ```
 
 nnsight gathers a column-parallel output or a row-parallel input into the whole
-tensor before your code reads it and re-splits what you write, so every rank runs
-identical code against the complete tensor: `qkv_proj.output`,
+tensor before your code reads it and re-splits what you write (LoRA-wrapped layers
+included), so every rank runs identical code against the complete tensor: `qkv_proj.output`,
 `gate_up_proj.output`, `o_proj.input`, `down_proj.input` read at full width;
 layer outputs and `norm.output` are whole on every rank already. **Parameters are
 not gathered** — `weight` is this rank's slice, which is how you tell what is
@@ -44,8 +44,11 @@ sharded (the block above sees an 896-wide `o_proj` input against a 448-wide weig
   `torch.randn` agrees across ranks (vLLM seeds every worker alike).
 - The client-side `print(model)` shows `tp_size=1` whatever you asked for; check
   `._module.weight.shape` inside the block.
-- A fused projection (`qkv_proj`, `gate_up_proj`) gathers in rank order —
-  `[q₀ k₀ v₀ | q₁ k₁ v₁]` — so slice it by head, not by `[:q_size]`.
+- A fused projection (`qkv_proj`, `gate_up_proj`) reads in the one-GPU layout,
+  `[q | k | v]` and `[gate | up]`, so `[:q_size]` and `chunk(2, -1)` mean what they
+  do at `tensor_parallel_size=1` (nnsight 0.8.1 gathers them in rank order,
+  `[q₀ k₀ v₀ | q₁ k₁ v₁]`). A vLLM subclass that packs more, such as MiniMax-M3's
+  `qkv_proj`, still reads in rank order.
 - **The logit lens** goes through the model's logits path, which gathers the vocab
   shards: `model.logits_processor(model.lm_head, model.model.norm(h))`.
   `model.lm_head(h)` raises `LMHead's weights should be used in the sampler`.

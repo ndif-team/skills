@@ -157,6 +157,9 @@ except RuntimeError as error:
 | ``'<location>' is not a tap on this engine, so a replayed CUDA graph never reaches it`` | reading a module location on a `taps=` engine that was not declared → add it to `taps`, or build the engine without `taps` (eager, every location served) |
 | ``... prompt was split across steps by chunked prefill`` | `enable_chunked_prefill=True` was passed and this prompt exceeded the step's token budget → drop the flag (off by default), or raise `max_num_batched_tokens` |
 | ``enforce_eager=... contradicts taps=...`` | not a `RuntimeError`: a plain `ValueError` in your process when the engine is built, since the engine mode follows from `taps` → drop `enforce_eager` |
+| ``data_parallel_size > 1 is not supported on an nnsight engine`` | not a `RuntimeError`: a `NotImplementedError` in your process when the model is built → use `tensor_parallel_size`, or one `VLLM` per GPU |
+| ``nnsight does not support vLLM's compiled-graph Ray executor`` | `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0`, refused as the engine starts → unset it; vLLM's default Ray executor works |
+| a pickling error, such as ``cannot pickle 'generator' object`` | a saved value that plain `pickle` cannot carry home (a lambda, a generator, a locally defined class) → save a tensor, number or plain container instead |
 
 ## Remote
 

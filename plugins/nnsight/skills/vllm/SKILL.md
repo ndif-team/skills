@@ -10,9 +10,9 @@ serialized onto each request, run against the real modules, and the saved values
 shipped back. You get PagedAttention, continuous batching, tensor parallelism and
 CUDA-graph replay (with `taps=`), and the same trace syntax.
 
-nnsight targets **vLLM 0.27.1 and its V1 engine**. `pip install nnsight[vllm]`
-does not cap the version, so a newer vLLM can be installed and then fail at
-`import` with `ModuleNotFoundError` — pin `vllm==0.27.1`. nnsight sets
+nnsight targets **vLLM 0.27.1 and its V1 engine**; from nnsight 0.8.2 the `vllm`
+extra pins `vllm>=0.27.1,<0.28`. On 0.8.1, pin `vllm==0.27.1` yourself: vLLM 0.32
+installs and imports, then taps stop firing after the prefill, with no error. nnsight sets
 `VLLM_USE_V2_MODEL_RUNNER=0` itself and refuses an engine started with it set to
 `1` (`NotImplementedError`: that runner is not instrumented).
 
@@ -123,6 +123,11 @@ assert steps[3][1] is True
   loop never run, and the only notice is a warning you never see (see "Errors and
   warnings"). Check the `len()` of what you collected, and hold the run to the
   count with `ignore_eos=True` or `min_tokens=N`.
+- **A block can see one step past a stop.** vLLM schedules a request's next step
+  before the last token is known, so a request ending on a stop token or `stop`
+  string runs one more forward than its output holds (`max_tokens` is exact).
+  Count against `len(result.outputs[0].token_ids)`, or build with
+  `VLLM(..., async_scheduling=False)` to make stop tokens exact.
 - **`tracer.result` must be the last read** — it is served after every module,
   `logits` and `samples` visit; a read after it raises `OutOfOrderError`.
 - Assigning `model.samples` forces the token the engine continues from;
@@ -212,7 +217,9 @@ assert len(caps) == 3 and len(caps[1]) == 4 and len(result.outputs) == 3
 `model.edit()` sends the block once and it runs for every request the engine
 serves afterwards — plain `model.generate(...)` calls and other clients of a served
 engine included — with each request's values on that request's `.saves`. No
-`tracer.invoke` inside an edit; `tracer.all()` makes it follow every step.
+`tracer.invoke` inside an edit; `tracer.all()` makes it follow every step. Each
+request starts from its own copy of the block's scope, a list or dict bound outside
+it included, so an edit cannot accumulate across requests: collect from `.saves`.
 
 <!-- test: gpu requires vllm -->
 ```python
@@ -311,11 +318,17 @@ To ablate a layer without that risk, write its output instead.
   `tensor_parallel_size`. A `pipeline_parallel_size=2` engine builds and then fails
   every trace with `RuntimeError: UnknownPersistentIdError:
   Module:model.model.layers.12.self_attn`, naming a layer on the other stage.
+- **Data parallelism and Ray's compiled-graph executor** — `data_parallel_size > 1`
+  raises `NotImplementedError` when the model is built (use `tensor_parallel_size`,
+  or one `VLLM` per GPU); `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0` is refused as the
+  engine starts (vLLM's default Ray executor works).
 
 ## Errors and warnings
 
 Errors raised inside the worker come back as `RuntimeError` carrying the original
 type and an "Intervention traceback" — match on the message, not the class.
+Saved values travel home through plain `pickle`, so saving a lambda, a generator or
+a locally defined class is that request's `RuntimeError`.
 **Warnings do not come back**: they are emitted in vLLM's EngineCore subprocess,
 so `warnings.catch_warnings()` records nothing. A failure while the engine builds
 (a bad `taps=` entry included) arrives as `RuntimeError: Engine core initialization
