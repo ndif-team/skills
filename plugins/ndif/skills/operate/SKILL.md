@@ -159,8 +159,8 @@ transformers >= 5.15, and **a TP replica can never be cached** (HOT→WARM is
 impossible, so the controller evicts it outright). Pin one you want to keep.
 
 **PEFT adapters are per request** (`TransformersModel(repo, peft="<hub id>")`):
-one deployment serves every LoRA over its base; a local adapter directory is
-invisible to the server.
+one deployment serves every LoRA over its base, though not a tensor-parallel
+replica; a local adapter directory is invisible to the server.
 
 ## Levels, pinning, and eviction
 
