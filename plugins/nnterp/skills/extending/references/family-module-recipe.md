@@ -1404,7 +1404,7 @@ not have (`ln2=None` on a parallel block, `mlp=None` on OPT). `LLAMA_ROWS` is
 | `FAMILY` | The family module the checkpoint must resolve to (`model.family is FAMILY`). |
 | `NATIVE` | Standard path to native path; each pair must be the same envoy, and every `layers.0.*` name must exist on every block. |
 | `EXPECTED_UNAVAILABLE` | `support()` key to a substring of the reason, for values some block lacks (a hybrid: `"self_attn.attention_output": "no self_attn module"` for its linear blocks); every other value must report `None`. `NO_ROTARY` (`suite.py`) is the entry of a family without a rotary embedding (GPT-2, OPT, BLOOM, ...) or with NoPE blocks (Cohere 2, SmolLM3, ...); `"self_attn.interface": OWN_ARITHMETIC` (`nnterp.components`) that of a family whose queries, keys and values are not one call's arguments (BLOOM, MPT, Falcon, XGLM, DeepSeek-V4). A module no block has (OPT's `mlp`) is not in `support()` and needs no entry. Default `{}`. |
-| `REFUSES_IN_PLACE_QKV` | torch refuses in-place edits on q/k/v that are views out of a `split`/`chunk` (GPT-2, MPT); the suite expects a `RuntimeError` matching `view` and skips the in-place query edit. |
+| `REFUSES_IN_PLACE_QKV` | torch refuses in-place edits on queries that are views out of a `split`/`chunk` (GPT-2, GPT-BigCode, MPT); the suite expects a `RuntimeError` matching `view` on the in-place query edit and skips it. |
 | `ATTENTION_SINK` | The pattern's rows sum to less than one (GPT-OSS). |
 | `KV_HEADS_EXPANDED` | Keys and values are read already expanded to `num_heads` (latent attention; Falcon's 40B layout). |
 | `MLP_WIDTH_KEY` | A config key naming the first block's MLP width when it is not `intermediate_size` (an all-MoE family's `moe_intermediate_size`). |

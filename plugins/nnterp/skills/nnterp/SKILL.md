@@ -192,10 +192,11 @@ reads the edited pattern.
 after masking, so `scores[:] = 0` attends to the future. Add to them
 (`scores[..., k] += c`, or `-inf` to block a key) instead.
 
-**9. GPT-2, GPT-BigCode and MPT queries/keys/values are split views**; so are
-Mamba-1's, and before the rotary CodeGen's, DBRX's and GPT-NeoX's queries and keys,
-JetMoE's keys and latent attention's shared rope key. torch refuses an in-place edit
-with grad on; assign instead:
+**9. GPT-2's and GPT-BigCode's queries, and MPT's queries, keys and values, are split
+views torch will not edit in place**; so are Mamba-1's, and before the rotary CodeGen's,
+DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent attention's shared rope
+key. torch refuses an in-place edit with grad on; assign instead (or edit under
+`torch.no_grad()`):
 
 <!-- test: expect-error RuntimeError -->
 ```python
@@ -210,6 +211,8 @@ with model.trace(prompt):
 
 assert not torch.allclose(edited, logits)
 ```
+
+GPT-2's and GPT-BigCode's keys and values take an in-place edit, and it lands.
 
 **10. Recurrent mixers route kernels before the first trace.** On Mamba,
 Falcon-Mamba and Jamba with `mamba_ssm` installed, a CPU run crashes with

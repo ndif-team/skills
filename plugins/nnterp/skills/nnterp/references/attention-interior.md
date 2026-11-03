@@ -480,8 +480,10 @@ with model.trace(prompt):
     # RuntimeError: Output 0 of Select is a view and is being modified inplace ...
 ```
 
-Assign instead (`attn.attention_queries = attn.attention_queries * 0`). The
-scores, the pattern and the head outputs accept in-place edits on both (GPT-2's
+Assign instead (`attn.attention_queries = attn.attention_queries * 0`), or edit
+under `torch.no_grad()`. On GPT-2 and GPT-BigCode only the queries refuse: their keys
+and values take an in-place edit, and it lands. On MPT the queries, keys and values all
+refuse. The scores, the pattern and the head outputs accept in-place edits on both (GPT-2's
 head outputs are a transposed view, which torch allows). A GPT-2 checkpoint
 with `reorder_and_upcast_attn` set takes GPT-2's own upcast path, where the
 interface never runs; all six then report
@@ -703,7 +705,9 @@ See [generation-and-helpers.md](generation-and-helpers.md).
   cache on most families; an assignment lasts one forward. To patch what chosen heads
   read without either, use `interface` on copies.
 - Never overwrite `attention_scores` wholesale (it holds the mask).
-- GPT-2 and MPT q/k/v: assign, do not edit in place. The same before the rotary
+- GPT-2's and GPT-BigCode's queries, MPT's queries, keys and values: assign, do not
+  edit in place (or edit under `torch.no_grad()`); GPT-2's and GPT-BigCode's keys and
+  values take an in-place edit. The same before the rotary
   for CodeGen's, DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent
   attention's shared rope key.
 - A query or key moved to another position or prompt is written to
