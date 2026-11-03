@@ -81,7 +81,10 @@ families.lookup("zamba2", engine="vllm")
 ## Two complete modules as they ship
 
 `llama.py`, the family the vocabulary is taken from, its text side. Mistral, Qwen2/3,
-Gemma 1, OLMo 1, Phi-3, SmolLM3 and StableLM are this file with the class names swapped.
+Gemma 1, OLMo 1 and Phi-3 are this file with the class names swapped; SmolLM3 adds a
+`no_rotary()` for its NoPE blocks, and StableLM serves its partial rotary's values before the
+rotary at its own bindings, with an `apply_rotary` that rotates the leading `rotary_ndims`
+channels.
 The shipped file also names the vision towers of the Llama-based wrappers; those lines
 are quoted in [A vision tower in a family](#a-vision-tower-in-a-family) and elided
 (`...`) here:
@@ -142,8 +145,8 @@ ENVOYS = {
 
 `gpt2.py` shows the rest of the template in use: block-level single-component aliases,
 container keys anchored at the root, dotted aliases for the two projections both spelled
-`c_proj`, a config flag that takes the attention off the shared interface, and a size the
-config spells its own way:
+`c_proj`, the reason it has no rotary embedding, a config flag that takes the attention off
+the shared interface, and a size the config spells its own way:
 
 <!-- test: skip -->
 ```python
@@ -193,6 +196,9 @@ class Attention(Attention):
     A checkpoint with ``reorder_and_upcast_attn`` takes GPT-2's own upcast
     path instead, where nothing on the interface is reachable.
     """
+
+    def no_rotary(self) -> str | None:
+        return "no rotary embedding: GPT-2 adds learned absolute position embeddings (wpe) to the stream"
 
     def off_interface(self):
         if self._module.config.reorder_and_upcast_attn:
@@ -331,7 +337,8 @@ is in the nnterp repo's `docs/reference/families.md`, "Logits, scales and sizes"
 GPT-2, GPT-J, GPT-Neo, CodeGen, OPT, XGLM, GPT-NeoX-Japanese, MPT, BLOOM, Mamba-2,
 Gemma-4, GraniteMoE-Hybrid, ZAYA, Falcon, and DBRX and Llama 4's `intermediate_size`,
 which that table omits). A module re-exports another's with an import
-(`from .deepseek_v2 import head_dim, qk_head_dim` in `deepseek_v3.py`).
+(`from .deepseek_v2 import Attention, head_dim, qk_head_dim` in `deepseek_v3.py`, whose
+`Attention` then subclasses V2's latent attention).
 
 `project_on_vocab` is a `StandardizedCapability`: the root's is `lm_head(norm(hidden))`
 plus `final_logit_softcapping` when the config sets it, and a family whose model does
@@ -486,6 +493,9 @@ class Layer(Layer):
 
 class Attention(Attention):
     """BLOOM's attention adds the residual inside: the contribution is what enters ``dropout_add``."""
+
+    def no_rotary(self) -> str | None:
+        return "no rotary embedding: BLOOM biases its scores with ALiBi"
 
     # ``_reshape`` splits the fused projection into ``(query, key, value)``,
     # heads first (the keys are transposed for the score matmul only later);
@@ -673,6 +683,11 @@ class Attention(Attention):
     # outputs are the ``scores @ values`` product: heads first without alibi,
     # flattened over batch and heads with it; both are served ``[batch, seq,
     # heads, head_dim]`` as a view, so in-place edits land.
+
+    def no_rotary(self) -> str | None:
+        if alibi(self):
+            return "no rotary embedding: this checkpoint sets alibi, which biases the scores instead"
+        return None
 
     @EProperty(by_alibi("apply_rotary_pos_emb_0", "query_layer_0"), description=Attention.attention_queries.description, unavailable=needs_eager)
     def attention_queries(self, value) -> Queries:
@@ -1116,7 +1131,8 @@ vlm = StandardizedTransformer("trl-internal-testing/tiny-LlavaForConditionalGene
                               device="cpu", dispatch=True, attn_implementation="eager")
 support = vlm.vision.support()
 print(list(support)[:4])
-assert all(reason is None for reason in support.values())
+assert {name for name, reason in support.items() if reason} == {
+    "self_attn.attention_queries_prerope", "self_attn.attention_keys_prerope"}   # served on the text blocks only
 assert {f"vision.{name}" for name in support} <= set(vlm.support())        # the same rows under the vision host
 
 name, host = scatter_host(vlm)
@@ -1205,7 +1221,9 @@ What every subclass asserts:
 - on every tower block, `input + attention_output + mlp_output == layer_output`, and under
   eager the pattern's rows sum to one;
 - `vision.support()` lists the tower's four values and the block values, available except
-  `EXPECTED_VISION_UNAVAILABLE`, and `model.support()` carries them as `vision.*` rows;
+  the queries and keys before the rotary (every tower reports them, `TOWER_NO_ROTARY` in
+  `suite.py`, without the family saying so) and `EXPECTED_VISION_UNAVAILABLE`, and
+  `model.support()` carries them as `vision.*` rows;
 - `image_token_mask == (input_ids == image_token_id)`, its count is `image_features.shape[0]`,
   and `layers[0].input[image_token_mask] == image_features` exactly, with one image and with
   two images of different shapes in one invoke;
@@ -1248,7 +1266,7 @@ class TestLlama(FamilySuite):
 ```python
 """GPT-2, end to end."""
 
-from suite import FamilySuite, rows
+from suite import NO_ROTARY, FamilySuite, rows
 
 from nnterp.families import gpt2
 
@@ -1258,6 +1276,7 @@ class TestGPT2(FamilySuite):
     FAMILY = gpt2
     NATIVE = rows("transformer", "h", "wte", "ln_f", attn="attn", ln1="ln_1", ln2="ln_2")
     REFUSES_IN_PLACE_QKV = True  # q/k/v are split views of one c_attn tensor
+    EXPECTED_UNAVAILABLE = NO_ROTARY
 
     def test_reorder_and_upcast_makes_the_interface_unavailable(self, model):
         config = model.layers[0].self_attn._module.config
@@ -1279,7 +1298,7 @@ import os
 import tempfile
 
 import torch
-from suite import FamilySuite, rows, PROMPT
+from suite import NO_ROTARY, FamilySuite, rows, PROMPT
 
 from nnterp.families import falcon
 
@@ -1337,6 +1356,7 @@ class TestFalconAlibi(FamilySuite):
     FAMILY = falcon
     NATIVE = rows("transformer", "h", "word_embeddings", "ln_f", attn="self_attention", ln2=None)
     MLP_NORM = "input_layernorm"
+    EXPECTED_UNAVAILABLE = {**NO_ROTARY, "layer_mid": "a parallel block"}
 
     def test_alibi_branch(self, model):
         assert model.layers[0].self_attn._module.config.alibi
@@ -1376,7 +1396,7 @@ not have (`ln2=None` on a parallel block, `mlp=None` on OPT). `LLAMA_ROWS` is
 | `REPO` | The pinned tiny checkpoint, offline-cached. |
 | `FAMILY` | The family module the checkpoint must resolve to (`model.family is FAMILY`). |
 | `NATIVE` | Standard path to native path; each pair must be the same envoy, and every `layers.0.*` name must exist on every block. |
-| `EXPECTED_UNAVAILABLE` | `support()` key to a substring of the reason, for values some block lacks (a hybrid: `"self_attn.attention_output": "no self_attn module"` for its linear blocks); every other value must report `None`. A module no block has (OPT's `mlp`) is not in `support()` and needs no entry. Default `{}`. |
+| `EXPECTED_UNAVAILABLE` | `support()` key to a substring of the reason, for values some block lacks (a hybrid: `"self_attn.attention_output": "no self_attn module"` for its linear blocks); every other value must report `None`. `NO_ROTARY` (`suite.py`) is the entry of a family without a rotary embedding (GPT-2, OPT, BLOOM, ...) or with NoPE blocks (Cohere 2, SmolLM3, ...). A module no block has (OPT's `mlp`) is not in `support()` and needs no entry. Default `{}`. |
 | `REFUSES_IN_PLACE_QKV` | torch refuses in-place edits on q/k/v that are views out of a `split`/`chunk` (GPT-2, MPT); the suite expects a `RuntimeError` matching `view` and skips the in-place query edit. |
 | `ATTENTION_SINK` | The pattern's rows sum to less than one (GPT-OSS). |
 | `KV_HEADS_EXPANDED` | Keys and values are read already expanded to `num_heads` (latent attention; Falcon's 40B layout). |
@@ -1392,8 +1412,11 @@ not have (`ln2=None` on a parallel block, `mlp=None` on OPT). `LLAMA_ROWS` is
 | `PREMIX_IS_HEAD_OUTPUTS` | `attention_premix` equals `attention_head_outputs`; `False` where a gate or a norm sits between the heads and the output projection (AFMoE, Laguna, BitNet). Default `True`. |
 | `NEURONS_FROM_ACTIVATION` | `mlp_neurons` is `mlp_activation * up_proj.output` on a gated MLP and `mlp_activation` on a plain one; `False` where something sits between (Arcee's relu², BitNet's sub-norm). Default `True`. |
 
-`pattern_from_scores(self, model, scores)` is the one method a subclass may override:
-what the softmax makes of `attention_scores`; a sink family appends its column.
+Two methods a subclass overrides the way it sets an attribute:
+`pattern_from_scores(self, model, scores)`, what the softmax makes of `attention_scores` (a
+sink family appends its column), and `rotated_as_served(self, attn, name, rotated)`, what the
+attention receives given `rotate` of a value before the rotary (the identity on the base;
+HunYuan's and Llama 4's post-rotary norms, JetMoE's tiling of the keys).
 
 ### What the suite asserts
 
@@ -1406,6 +1429,7 @@ what the softmax makes of `attention_scores`; a sink family appends its column.
 | Sublayer interiors (`test_sublayer_interiors`) | `attention_premix` is `[..., num_heads, head_dim]` and equals `attention_head_outputs` unless `PREMIX_IS_HEAD_OUTPUTS` is off; `mlp_activation` and `mlp_neurons` are `intermediate_size` wide, the neurons `act * up_proj.output` on a gated MLP and the activation on a plain one unless `NEURONS_FROM_ACTIVATION` is off; zeroing each moves the logits. |
 | The pattern | shape `[batch, num_heads, seq, seq]`, `lm_head.weight`'s dtype, rows sum to one (or lie in `(0, 1)` with `ATTENTION_SINK`), lower-triangular; first and last blocks differ and two traces agree; a random pattern and a zeroed head both move the logits (a read can be causally inert); every available value on `FAMILY.Attention` whose key reads inside the forward (`inside_forward()`) reads a tensor on every attention block, one trace per value. |
 | The interior | q `[b, heads, s, qk_head_dim]`, k/v `[b, kv_heads, s, ·]`, scores and pattern `[b, heads, s, s]`, head outputs `[b, s, heads, ·]`, `pattern_from_scores(scores) == pattern`; zeroing each of the five interior values moves the logits and zeroed head outputs give a position-independent contribution; in-place zeroing of scores and head outputs moves the logits, queries too unless `REFUSES_IN_PLACE_QKV`. |
+| The rotary embedding | on the first block with a rotary, `self_attn.rotate(prerope, arange(seq))` equals `attention_queries` / `attention_keys` bit for bit, in their dtype (through `rotated_as_served`); assigning position 0's value before the rotary at the last position leaves every other position's rotated value bit-identical and makes the last one `rotate(vector, [last])`; on every block whose `no_rotary()` gives a reason, `support()` gives the same one and `rotate` raises `Unavailable` with it; `model.order(i)` and `model.rank` put both values before the rotated ones. |
 | Methods | `skip_layers(1, last)` hands block 0's output straight through and the logits equal `project_on_vocab` of it; `skip_with=zeros` zeroes block 0's output and block 1's input; `steer` moves the last position by `2 * vector` and nothing else; `project_on_vocab` on the last block equals `logits`, `get_topk_closest_tokens(k=3)` returns one dict of three entries summing to at most one. |
 | Layouts | every value with a `layout` on the root, a block, its attention, its MLP and one mixer is an instance of its named layout (`Residual`, `Pattern`, ...: a `jaxtyping` type) with each named axis matching the model's sizes; one value per trace; at least 11 checked. |
 | The input | `input_ids`, `input_size`, `attention_mask` are `[1, n]`, the mask all ones, `token_embeddings` `n` long, the three names in the repr; assigning another prompt's ids and mask reproduces its logits; assigning `input_size` raises `AttributeError`. |
@@ -1419,7 +1443,7 @@ not have; [finding-source-ops.md](finding-source-ops.md) is how to find the one 
 
 The template above, written as a standalone module for `gpt2` and passed to
 `nnterp.families.register(module, "gpt2")` at the top of a test file that subclasses `FamilySuite`
-with GPT-2's `NATIVE` and `REFUSES_IN_PLACE_QKV`, passes the whole suite on
+with GPT-2's `NATIVE`, `REFUSES_IN_PLACE_QKV` and `EXPECTED_UNAVAILABLE`, passes the whole suite on
 `hf-internal-testing/tiny-random-gpt2` with `model.family` being the standalone module.
 
 ## Gotchas

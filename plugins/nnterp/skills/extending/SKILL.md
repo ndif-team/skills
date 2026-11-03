@@ -12,7 +12,7 @@ per family under `nnterp/families/`, named after `config.model_type`
 (`len(nnterp.families.known())` is 99: 98 families, plus `kimi_k25`, Kimi K2's family
 under its wrapper's name). This skill is for when that is not enough: a `model_type`
 nnterp does not ship, a forward that puts a value where the base classes do not look, or
-a value nnterp does not have. Verified on nnterp `v2.0.0` at `feeb24c` with nnsight
+a value nnterp does not have. Verified on nnterp `v2.0.0` at `1a310b7` with nnsight
 0.8.2 (0.8 or later binds the dotted aliases below) and transformers 5.20.2, against
 `openai-community/gpt2` and `HuggingFaceTB/SmolLM2-135M-Instruct`. The nnterp repo's
 pages: `docs/extending/` (`adding-a-family.md`, `overriding-values.md`,
@@ -124,7 +124,10 @@ ENVOYS = {<X>DecoderLayer: Layer, <X>Attention: Attention, <X>MLP: Mlp}
   `nnterp.components`).
 - **`Layer`, `Attention`, `Mlp`** exist even when nothing changes (the suite asserts the
   block envoys are exactly the family's classes). Override `off_interface()` for a config
-  flag that routes the attention off transformers' interface (GPT-2); redefine values for
+  flag that routes the attention off transformers' interface (GPT-2), and `no_rotary()` for
+  a block that applies no rotary embedding (absolute positions, ALiBi, a NoPE block: GPT-2,
+  BLOOM, SmolLM3's `no_rope_layers`), the one place the queries and keys before the rotary
+  and `Attention.rotate` ask; redefine values for
   own arithmetic (GPT-J, BLOOM, MPT, Falcon), a residual added inside (BLOOM, MPT), a
   post-norm (Gemma-2/3/4, OLMo-2/3) or a scaled add (Granite's `residual_multiplier`).
 - **A mixture of experts** is an `nnterp.components.Moe` keyed on the MoE module class:
@@ -176,6 +179,8 @@ Keep the name, the layout annotation and the description; change only the locati
 | its own attention arithmetic | `EProperty("source.<op>.inputs", select=n)` / `("source.<op>.output", select=i)`; pattern at the dropout after its softmax | bloom.py, falcon.py, gptj.py |
 | has no such value | `attention_scores = unavailable(NOT_ON_INTERFACE)` | DBRX `expert_outputs` (`unavailable(...)`) |
 | routes off the interface on a config flag | `def off_interface(self): return "<reason>" if flag else super().off_interface()` | gpt2.py |
+| applies no rotary embedding, on every block or on some | `def no_rotary(self): return "no rotary embedding: <why>"` (`"... on this block: ..."` where the module decides, `None` otherwise) | gpt2.py, bloom.py, smollm3.py |
+| rotates another way (cos and sin from elsewhere, another apply function, a slice outside it) | override `rotary_embedding(x, position_ids)` or `apply_rotary(x, embedding)` on the `Attention`, so `rotate` keeps giving the served rotated values | gptj.py, granite_swa.py, phi.py, llama4_text.py |
 | picks its operation by a config flag | a key function of the envoy returning the path: `EProperty(by_alibi("F_softmax_0", "F_softmax_1", "input"))` | falcon.py |
 | the value is a binding in the *block's* forward, read after the block starts | `@EProperty("../source.<op>.output")` on the child, `sourced = True` on the block's class | llama4_text.py |
 | keeps heads first | `return seq_first(value)` in the preprocess and in `@value.postprocess` | mpt.py, falcon.py |

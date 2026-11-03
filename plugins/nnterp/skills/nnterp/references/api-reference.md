@@ -93,6 +93,7 @@ raised before any weights load only when the default cannot standardize it. Neit
 | `support(layer=None)` | outside; nothing runs | every root and block value, `None` or `{layer: reason}`; with `layer`, that block flat |
 | `order(layer=None)` | outside; one probe `scan` on first use, then kept | the available values in forward order, `{name: rank}`; equal ranks are one location ([availability-and-support.md](availability-and-support.md#forward-order-order-and-rank)) |
 | `rank(name, layer=None)` | outside; as `order` | a sortable `(side, r)`: sort `(value, block)` sites by it to put reads and edits in forward order; `Unavailable` / `KeyError` for a value the checkpoint lacks / no value of that name |
+| `layers[i].self_attn.rotate(x, positions)` | outside or inside a trace; inside only on `StandardizedVLLM` | `x` (`[..., seq, qk_head_dim]`, laid out like the values before the rotary) rotated by that block's own rotary embedding at absolute `positions` (`[seq]`, or `[batch, seq]`): `rotate(attention_queries_prerope, positions)` is `attention_queries` bit for bit; `Unavailable` with `no_rotary()`'s reason on a block without one ([attention-interior.md](attention-interior.md#before-the-rotary-embedding-attention_queries_prerope-attention_keys_prerope-rotate)) |
 
 ### Sizes
 
@@ -123,7 +124,7 @@ Details: [values.md](values.md#sizes).
 | host | values | page |
 |---|---|---|
 | `Layer` | `layer_input`, `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input` (`Residual`; `FlatResidual` for OPT's `layer_mid` / `mlp_norm_output`); `layer_output` (`Residual`; `Streams` on DeepSeek-V4); `per_layer_output` (Gemma-4); `attention_post` / `attention_comb` / `mlp_post` / `mlp_comb` (DeepSeek-V4); `skip_with(hidden)`; `returns_tuple` | [values.md](values.md) |
-| `Attention` | `attention_output`; `attention_premix` (`HeadOutputs`, `o_proj.input`, any implementation); `attention_queries` / `_keys` / `_values` / `_scores` / `_probabilities` / `_head_outputs` (eager); `SINK`; `off_interface()` | [attention-interior.md](attention-interior.md) |
+| `Attention` | `attention_output`; `attention_premix` (`HeadOutputs`, `o_proj.input`, any implementation); `attention_queries_prerope` / `attention_keys_prerope` (`Queries` / `Keys`, `SharedRopeKeys` under latent attention; before the rotary, any implementation); `attention_queries` / `_keys` / `_values` / `_scores` / `_probabilities` / `_head_outputs` (eager); `rotate(x, positions)`; `SINK`; `off_interface()`, `no_rotary()` | [attention-interior.md](attention-interior.md) |
 | `Mlp` | `mlp_output`; `mlp_activation`, `mlp_neurons` (`Neurons`: `act_fn.output`, `down_proj.input`) | [values.md](values.md#inside-the-sublayers) |
 | `Moe(Mlp)` | `router_logits`, `expert_weights`, `expert_indices`, `expert_outputs`, `routed_output`, `shared_expert_output` (each a `TokenEProperty`); `num_experts`, `top_k`, `SCORING`, `no_mixture()`; `mlp_activation` / `mlp_neurons` unavailable (routed experts) | [mixture-of-experts.md](mixture-of-experts.md) |
 | `RecurrentMixer` | `attention_output`, `state`, `states`, `state_after(t)`, `set_state_after(t, v)`; subclasses add `attention_queries` / `_keys` / `_values`, `decays`, `betas`, `state_input`, `attention_head_outputs`, `state_output` | [recurrent-mixers.md](recurrent-mixers.md) |
@@ -175,7 +176,7 @@ Every value's descriptor exposes `.layout` (the named alias), `.dims`,
 | `nnsight...SourceNotAvailable` | a source-located value's operation is not in this run's forward (another transformers release, an unexpected branch); also `hasattr` on a nested-source value outside a trace |
 | `nnsight...OutOfOrderError` | a value read after the model ran past it; the message names an internal location, not the value |
 | `AttributeError` | assigning a read-only value (`next_token_probs`, `input_size`, `states`, any `DerivedEProperty`); a mixture's `num_experts` / `top_k` / `SCORING` on a dense block |
-| `RuntimeError` (torch view error) | an in-place edit of a split view with grad on: GPT-2 / GPT-BigCode / MPT q/k/v, Mamba-1 / Mamba-2 kernel arguments |
+| `RuntimeError` (torch view error) | an in-place edit of a split view with grad on: GPT-2 / GPT-BigCode / MPT q/k/v, Mamba-1 / Mamba-2 kernel arguments; before the rotary, CodeGen / DBRX / GPT-NeoX queries and keys, JetMoE keys, latent attention's shared rope key |
 | `RuntimeError: Expected u.is_cuda()` | an unrouted Mamba-1 model on CPU with `mamba_ssm` installed |
 
 ## The 98 families, by what a recipe must survive
@@ -199,7 +200,9 @@ Llama-shaped: the standard names and the base values hold as they are (`llama`,
 | not a plain sum | `gemma4_text`, `gemma4_unified_text` (`layer_scalar`), `doge`, `zaya` (stream gates), `deepseek_v4` (`Streams`) | weight each term before attributing ([values.md](values.md#blocks-that-are-not-a-plain-sum)) |
 | own attention arithmetic | `gptj`, `gpt_neo`, `codegen`, `gpt_neox_japanese`, `xglm`, `bloom`, `mpt`, `falcon` | same six interior names on the family's ops; different scale placement; `out_proj` / `dense` |
 | attention sink | `gpt_oss`, `deepseek_v4`, `mimo_v2_flash` (sliding blocks) in the pattern (`SINK`); `granite_swa`, `granitemoe_swa` scaling the head outputs | pattern rows sum below one, or the pattern does not control the output |
-| latent attention | `deepseek_v2`, `deepseek_v3`, `kimi_k2`, `deepseek_v32`, `glm_moe_dsa`, `glm4_moe_lite`, `youtu`, `kimi_linear` (attention blocks) | `qk_head_dim` != `head_dim`; keys arrive `num_heads` wide |
+| latent attention | `deepseek_v2`, `deepseek_v3`, `kimi_k2`, `deepseek_v32`, `glm_moe_dsa`, `glm4_moe_lite`, `youtu`, `kimi_linear` (attention blocks) | `qk_head_dim` != `head_dim`; keys arrive `num_heads` wide; `attention_keys_prerope` is the shared rope key (`SharedRopeKeys`, `[batch, 1, seq, qk_rope_head_dim]`) on all but `kimi_linear` |
+| no rotary embedding | `gpt2`, `gpt_bigcode`, `gpt_neo`, `opt`, `xglm` (absolute positions), `bloom`, `mpt`, `falcon` with `alibi` (ALiBi), the attention blocks of `jamba`, `nemotron_h`, `kimi_linear`; NoPE blocks of `cohere2`, `afmoe`, a hybrid `exaone4`, `smollm3`, `llama4_text`, `granite_swa` / `granitemoe_swa` (`layer_rope_theta` 0); every block of a `granitemoehybrid` or `olmo_hybrid` checkpoint whose config gives no rotary | `attention_queries_prerope`, `attention_keys_prerope` and `rotate` are `Unavailable` (on those blocks) |
+| a step after the rotary | `hunyuan_v1_dense`, `hunyuan_v1_moe`, `llama4_text` (norms), `jetmoe` (keys tiled), `ministral3` (queries scaled past `original_max_position_embeddings`) | `rotate` is the rotary alone: `attention_queries` is that step applied to its result |
 | sparse attention | `deepseek_v32`, `glm_moe_dsa` | the pattern is zero outside the indexer's selection (dense under 2048 tokens) |
 | borrowed keys / values | `gemma4_text`, `gemma4_unified_text` | in-place k/v edits spread to later blocks; skipping a source block fails |
 | gated query | `qwen3_next`, `qwen3_5_text`, `qwen3_5_moe_text` | `q_proj` is twice as wide; `attention_queries` is not |
@@ -208,7 +211,7 @@ Llama-shaped: the standard names and the base values hold as they are (`llama`,
 | Mamba-2 | `mamba2`, `nemotron_h`, `bamba`, `falcon_h1`, `granitemoehybrid` | `linear_attn` is a `StateSpace`; Nemotron-H names its one sublayer by class |
 | mixture of experts (39) | `mixtral`, `qwen2_moe`, `qwen3_moe`, `qwen3_next`, `qwen3_5_moe_text`, `qwen3_vl_moe_text`, `olmoe`, `flex_olmo`, `gpt_oss`, `deepseek_v2`/`v3`/`v32`/`v4`, `kimi_k2`, `kimi_linear`, `glm4_moe`, `glm4_moe_lite`, `glm_moe_dsa`, `dots1`, `solar_open`, `mimo_v2_flash`, `ernie4_5_moe`, `minimax_m2`, `phimoe`, `hunyuan_v1_moe`, `jetmoe`, `dbrx`, `jamba`, `laguna`, `afmoe`, `llama4_text`, `gemma4_text`, `nemotron_h`, `granitemoe`, `granitemoe_swa`, `granitemoeshared`, `granitemoehybrid`, `zaya`, `doge` | `mlp` is a `Moe` (on some blocks); [mixture-of-experts.md](mixture-of-experts.md) |
 | no MLP module | `opt`, `xglm`, `mamba`, `falcon_mamba`, `mamba2` | no `mlp.*` key in `support()`; OPT/XGLM's `fc2.output` is what the block adds |
-| split-view q/k/v | `gpt2`, `gpt_bigcode`, `mpt` | assign, do not edit in place |
+| split-view q/k/v | `gpt2`, `gpt_bigcode`, `mpt`; before the rotary `codegen`, `dbrx`, `gpt_neox` (queries, keys), `jetmoe` (keys), latent attention (the shared rope key) | assign, do not edit in place |
 | logits scaled after the head | softcap: `gemma2`, `gemma3_text` (when set), `gemma4_text`, `gemma4_unified_text`, `vaultgemma`; `cohere`, `cohere2`, `granite` line, `hyperclovax`, `falcon_h1`, `mamba2` / `nemotron_h` (float32), `deepseek_v4` (`hc_head`) | `logits` != `lm_head.output`; `project_on_vocab` applies the step |
 | per-block sizes | `gemma4_text`, `mimo_v2_flash`, `laguna` | read `layers[i].self_attn.*` / `.mlp.intermediate_size` |
 | multimodal rotary (M-RoPE) | `qwen2_vl_text`, `qwen2_5_vl_text`, `qwen3_vl_text`, `qwen3_vl_moe_text` | folded into one `cos`/`sin` before the blocks: `attention_queries` / `_keys` are the rotated ones, as on any rotary family |

@@ -227,6 +227,15 @@ softmax, so its family reads `attention_scores` at
   Falcon's `apply_rotary_pos_emb_0` returns without alibi and its `query_layer_0` /
   `key_layer_0` bindings with it (that branch has no rotary). Take them after the rotary embedding where
   there is one, before `repeat_kv` so the head axis is `num_kv_heads` wide.
+- **Queries and keys before the rotary** are what the rotary step receives: the shared
+  `apply_rotary_pos_emb_0` call's first two arguments (`nnterp.components.ROTARY`), else the
+  binding the forward slices or splits them from (Phi's `query_states_1` after its
+  layernorm, GPT-J's `query_1`, latent attention's `torch_split_0` input), so a value stays
+  the whole head; a call that takes one tensor (Gemma-4's two `apply_rotary_pos_emb` calls)
+  is read at each call's `input`. A family whose block rotates nothing returns its reason
+  from `no_rotary()`, and one whose rotation is spelled another way overrides
+  `rotary_embedding` (where cos and sin come from) or `apply_rotary` (the arithmetic), so
+  `rotate` keeps giving the served rotated values.
 - **Head outputs** are the last matmul: the interface call's output element 0,
   `torch_bmm_0` on BLOOM, `torch_matmul_1` on MPT.
 - **Prefer a real submodule** when one exposes the value: `mlp.output` beats

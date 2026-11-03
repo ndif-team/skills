@@ -196,8 +196,13 @@ Patching `layer_output` at block `i` replaces everything up to and including `i`
 that position; a contribution replaces one sublayer's addition. On a family whose
 block returns a tuple (GPT-J, BLOOM, MPT, Falcon) `layer_output` is still the
 tensor and an assignment puts it back in the tuple. One head is
-`attention_head_outputs[..., HEAD, :]` patched the same way, under eager. Noising
-swaps the roles; the code is symmetric.
+`attention_head_outputs[..., HEAD, :]` patched the same way, under eager. A query or
+key is patched before the rotary, at `self_attn.attention_queries_prerope` /
+`attention_keys_prerope` (any attention implementation): the block rotates what you
+write for the position it lands at, so a query from another prompt or position is one
+assignment, where a rotated `attention_queries` written there keeps the position it ran
+at. GPT-2 has no rotary; the `nnterp` skill's "Before the rotary embedding" runs it on
+SmolLM2. Noising swaps the roles; the code is symmetric.
 
 ### Interpretation
 
@@ -331,9 +336,10 @@ the future.
   after the pattern (rows sum to one): forcing the pattern does not control the
   output there.
 - **Order.** Read the pattern before `model.logits`; read `attention_keys` /
-  `attention_queries` / `attention_values` before the pattern and
-  `attention_head_outputs` after it. On Falcon read the values before the queries
-  (without alibi; queries, keys, values in that order with it).
+  `attention_queries` / `attention_values` before the pattern (and the queries and
+  keys before the rotary before them) and `attention_head_outputs` after it. On
+  Falcon read the values before the queries (without alibi; queries, keys, values in
+  that order with it).
 - **Batches are left-padded**: a padded row's pattern has zero columns at its pad
   positions, its real tokens start later, and its pad *query* rows attend uniformly
   over all keys; mask query rows with `attention_mask` before a per-row metric.

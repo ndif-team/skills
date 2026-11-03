@@ -13,7 +13,7 @@ layer_output`), the pattern is `attention_probabilities`, the per-head view is
 `attention_head_outputs` (or `attention_premix` at the output projection, under any
 attention implementation), an MLP's neurons are `mlp_neurons`, and `project_on_vocab`
 is the model's own head. Nothing here indexes `.output[0]` or names `ln_f` versus
-`norm`. Verified on nnterp `v2.0.0` at `feeb24c` with nnsight 0.8.2 and transformers
+`norm`. Verified on nnterp `v2.0.0` at `1a310b7` with nnsight 0.8.2 and transformers
 5.20.2; the executed blocks run on
 `openai-community/gpt2`, `HuggingFaceTB/SmolLM2-135M-Instruct` (30 layers, 576
 hidden, 9 heads, 3 kv heads, bf16) and `trl-internal-testing/tiny-LlavaForConditionalGeneration`.
@@ -208,6 +208,14 @@ the map is textbook: the clean fact restores P(Paris) to 0.9 when patched at the
 subject's second token through layer 22, and at the last position from layer 23
 on. Sweep, map, barrier and session forms, and the Gemma-4 / Granite write
 caveats: `references/patching-and-attention.md`.
+
+To patch a query or key from another prompt or position, write it before the rotary:
+`self_attn.attention_queries_prerope` / `attention_keys_prerope` are the queries and keys
+the block's rotary embedding receives, under any attention implementation, and the block
+rotates what you write for the position it lands at, so the transplant is one assignment
+(the `nnterp` skill, "Before the rotary embedding", runs it on SmolLM2; GPT-2 has no
+rotary). `attention_queries` / `attention_keys` are already rotated for the position they
+ran at.
 
 ## Steering
 
@@ -437,6 +445,10 @@ exact checks.
   several sites in one invoke, sort them by `model.rank(name, layer)` first (the `nnterp`
   skill, trap 6).
 - **Overwriting `attention_scores` lifts the causal mask**; add to them instead.
+- **A query or key patched to another position goes in before the rotary**
+  (`attention_queries_prerope` / `attention_keys_prerope`): a rotated
+  `attention_queries` written elsewhere is attended with the position it came from.
+  A direction found on unrotated queries or keys is added there too.
 - **Equal prompt lengths for a layer×position map**: assert
   `len(tokenizer(clean).input_ids) == len(tokenizer(corrupt).input_ids)`.
 - **Pick layers as depths** (`model.num_layers // 2`), never as constants, and

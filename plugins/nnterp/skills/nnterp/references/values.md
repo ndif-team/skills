@@ -505,7 +505,10 @@ envoy that serves it and re-exported by `nnterp.components` (the root's
 `Logits`, `NextTokenProbs`, `Tokens` from `nnterp.standardized`). `value.layout` is
 that alias itself, `value.dims` its axes, and the envoy repr prints each value as
 `(name) -> Layout [axes]: description`. Layouts differ between values, not
-between families; the one exception is `layer_output` on DeepSeek-V4 (`Streams`).
+between families, with four exceptions: `layer_output` on DeepSeek-V4 (`Streams`),
+`linear_attn.decays` on Kimi-Linear (`ChannelGates`), OPT's `layer_mid` and
+`mlp_norm_output` (`FlatResidual`), and `attention_keys_prerope` under latent attention
+(`SharedRopeKeys`).
 
 | layout | axes | values |
 |---|---|---|
@@ -513,7 +516,8 @@ between families; the one exception is `layer_output` on DeepSeek-V4 (`Streams`)
 | `FlatResidual` | `tokens hidden_size` | OPT's `layer_mid` and `mlp_norm_output` (the stream flattened, as its block holds it) |
 | `Streams`, `StreamWeights`, `StreamMixing` | `batch seq streams hidden_size`, `batch seq streams`, `batch seq streams streams` | DeepSeek-V4's stream and hyper-connection weights |
 | `Logits`, `NextTokenProbs`, `Tokens` | `batch seq vocab_size`, `batch vocab_size`, `batch seq` (`Int`) | `logits` and `lm_head_output`; `next_token_probs`; `input_ids`, `attention_mask` |
-| `Queries`, `Keys`, `Values` | `batch num_heads seq qk_head_dim`, `batch num_kv_heads seq qk_head_dim`, `batch num_kv_heads seq head_dim` | softmax attention |
+| `Queries`, `Keys`, `Values` | `batch num_heads seq qk_head_dim`, `batch num_kv_heads seq qk_head_dim`, `batch num_kv_heads seq head_dim` | softmax attention; the queries and keys also before the rotary (`attention_queries_prerope`, `attention_keys_prerope`) |
+| `SharedRopeKeys` | `batch 1 seq qk_rope_head_dim` | `attention_keys_prerope` under latent attention: the one rope key per position every head shares |
 | `Pattern`, `HeadOutputs` | `batch num_heads query key`, `batch seq num_heads head_dim` | scores and pattern; `attention_head_outputs` and `attention_premix` |
 | `Neurons` | `batch seq intermediate_size` | `mlp_activation`, `mlp_neurons` |
 | `RouterLogits`, `ExpertWeights`, `ExpertIndices`, `ExpertOutputs` | `batch seq num_experts`, `batch seq top_k` (x2, indices `Int`), `batch seq top_k hidden_size` | a `Moe` |
