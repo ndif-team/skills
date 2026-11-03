@@ -75,7 +75,7 @@ raised before any weights load only when the default cannot standardize it. Neit
 |---|---|---|---|
 | `model.logits` | `Logits` | yes: replaces `output.logits` | the model's final logits (softcapped, scaled per family); `lm_head_output` is the raw projection |
 | `model.final_norm_output` | `Residual` | yes | `norm.output`: the stream the head projects |
-| `model.lm_head_output` | `Logits` | yes | `lm_head.output`: the head's logits before the family's softcap or scale |
+| `model.lm_head_output` | `Logits` | yes | `lm_head.output`: the head's logits before the family's softcap or scale; on `StandardizedVLLM` the logits themselves where the logits processor applies no softcap or scale, unavailable naming which where it does |
 | `model.token_embeddings` | `Residual` | yes | `embed_tokens.output`: whatever the embedding module returns |
 | `model.next_token_probs` | `NextTokenProbs` | no (`AttributeError`: assign `logits`) | `logits[:, -1].softmax(-1)` in the model dtype |
 | `model.input_ids`, `model.attention_mask` | `Tokens` | yes: the model runs on what you set | the call's ids and mask; read before any block |

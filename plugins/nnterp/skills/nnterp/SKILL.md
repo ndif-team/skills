@@ -758,10 +758,15 @@ the `extending` skill adds a family, registers one, or passes one to a single lo
 and layouts on nnsight's `VLLM` engine (60 families). Pick it for throughput: many
 concurrent prompts, long generations, a served engine. Stay on `StandardizedTransformer`
 for gradients, an edit of the attention pattern or a decode step's pattern,
-`self_attn.interface`, `model.order()` / `rank()`, and the values the engine does not have (`lm_head_output`, a
-gated MLP's `mlp_activation`, and `attention_mask`, since a request is one unpadded
-sequence). Both are `nnterp.Standardized`, so a helper written against the standard
-names takes either. What differs, from the repo's `docs/usage/vllm.md`:
+`self_attn.interface`, and the values the engine does not have (a gated MLP's
+`mlp_activation`; `attention_mask`, since a request is one unpadded sequence; and
+`lm_head_output` where vLLM's logits processor softcaps or scales, Gemma-2, Cohere and
+Granite, where it is unavailable naming which; elsewhere it is the logits, read and
+written as `logits`). `model.order()` / `model.rank()` work on it: the transformers
+model's ranks, measured on a weightless `StandardizedTransformer` of the checkpoint, for
+the values the engine serves; `model.generation_config` is the checkpoint's. Both are
+`nnterp.Standardized`, so a helper written against the standard names takes either.
+What differs, from the repo's `docs/usage/vllm.md`:
 
 <!-- test: skip -->
 ```python
