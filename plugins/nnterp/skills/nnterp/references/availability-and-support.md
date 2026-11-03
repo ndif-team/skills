@@ -317,7 +317,9 @@ arguments of the rotary call, ranked before them, and `self_attn.interface` is r
 between the values and the scores. A hybrid ranks each block shape separately. An
 unavailable value is not ranked, and `rank` raises `Unavailable` with `support()`'s
 reason; a name that is no value raises `KeyError`. The vision tower's values are not
-ranked, and `StandardizedVLLM` raises `NotImplementedError`.
+ranked. On `StandardizedVLLM` the ranks are measured on a weightless transformers model
+of the checkpoint, for the values the engine serves; a value the engine lacks raises
+`Unavailable` with the engine's reason.
 
 <!-- test: expect-error Unavailable -->
 ```python
