@@ -10,7 +10,7 @@ Three levels of permanence, in increasing order of commitment:
 | Level | What changes | Reversible | Use it to |
 |---|---|---|---|
 | `model.edit()` | activations, replayed on every run | `model.clear_edits()` | test an intervention across many runs |
-| adapter / LoRA | added parameters routed into the forward | detach the module | change behavior across many inputs; study an existing fine-tune (`peft=`) |
+| adapter / LoRA | added parameters routed into the forward | `disable_adapters()` / `load_adapter(None)` | change behavior across many inputs; study an existing fine-tune (`peft=`) |
 | weight edit | the model's own parameters | only if you saved a copy | overwrite one association at a layer a causal trace implicated; ship the change baked in |
 
 <!-- test: setup -->
@@ -298,8 +298,10 @@ adapted = TransformersModel("openai-community/gpt2", peft=adapter_dir, dispatch=
 with adapted.trace(prompt):
     lora_out = adapted.transformer.h[0].attn.c_attn.lora_B.default.output.save()
     adapted_logits = adapted.output.logits[0, -1].detach().save()
-with model.trace(prompt):
-    base_logits = model.output.logits[0, -1].save()
+adapted.disable_adapters()                   # the base model, on the same tree
+with adapted.trace(prompt):
+    base_logits = adapted.output.logits[0, -1].detach().save()
+adapted.enable_adapters()
 
 print(type(adapted._module).__name__, tuple(lora_out.shape))
 print([p for p, _ in adapted.named_modules() if "lora_B" in p][:2])
@@ -402,7 +404,10 @@ yourself is not recorded otherwise.
 
 ### Train and export a real PEFT adapter
 
-An adapter loaded with `peft=` trains through the same backward, with two traps.
+An adapter loaded with `peft=` trains through the same backward. Freeze the base
+after dispatch, before switching the adapter on: nnsight leaves the base
+trainable, so without `adapted.requires_grad_(False)` the backward fills `.grad`
+on every base weight. Then two traps.
 **It loads frozen**: PEFT sets `inference_mode`, so its `lora_` parameters arrive
 with `requires_grad=False` and must be switched on. **`save_pretrained` on the
 wrapped module writes a full model**: `adapted._module.save_pretrained(dir)` is
@@ -416,6 +421,7 @@ from safetensors.torch import save_file
 
 lora_params = [p for name, p in adapted._module.named_parameters() if "lora_" in name]
 assert not any(p.requires_grad for p in lora_params)          # loaded for inference
+adapted.requires_grad_(False)                                 # the base, after dispatch
 for p in lora_params:
     p.requires_grad_(True)
 optimizer = torch.optim.Adam(lora_params, lr=1e-3)
