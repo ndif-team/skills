@@ -109,10 +109,9 @@ with model.trace(prompt):                       # force the router: logits decid
     forced = moe.expert_indices.save()
 ```
 
-The sweep fits one trace with one invoke per expert; under several invokes edit
-the routing **in place** (`moe.expert_weights[:] = moe.expert_weights.masked_fill(...)`),
-which every nnsight serves per invoke (an assignment there needs nnsight's PR
-#738). In float32 the batched sweep equals the per-trace one exactly.
+The sweep fits one trace with one invoke per expert: an in-place edit
+(`moe.expert_weights[:] = moe.expert_weights.masked_fill(...)`) and an assignment both
+reach that invoke only. In float32 the batched sweep equals the per-trace one exactly.
 
 **bf16 sweeps are noise.** On a bf16 GraniteMoE the one-invoke-per-expert sweep
 correlated 0.32 with per-trace ablation and named a different "most important"
@@ -141,6 +140,9 @@ Hunyuan, ERNIE, Laguna and Gemma-4, between router and experts on AFMoE, after t
 routing and before `routed_output` on Llama 4, and after `routed_output` on
 DeepSeek, GLM, Qwen, Nemotron-H and the GraniteMoE line. Out of order raises
 `OutOfOrderError` naming an internal op (`...router.source.F_linear_0.output.i0`).
+`model.order(i)` is this order measured on the loaded checkpoint, the shared expert's
+place included, and `model.rank(name, i)` sorts a list of reads by it
+([availability-and-support.md](availability-and-support.md#forward-order-order-and-rank)).
 
 ## Per-family gaps
 

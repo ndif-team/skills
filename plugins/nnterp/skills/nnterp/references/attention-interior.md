@@ -54,7 +54,9 @@ The six reads are in forward order, so they fit in one trace; a write follows
 the same rule (write the head outputs after reading the scores, not before). A
 read out of that order raises `OutOfOrderError` naming the attention call
 (`'...attn.source.attention_interface_1.fn.i0' was requested but the model already
-ran past it`), not the value.
+ran past it`), not the value. `model.order(i)` gives block `i`'s order on any family,
+Falcon's different one included, and `model.rank(name, i)` sorts a list of reads and
+writes by it ([availability-and-support.md](availability-and-support.md#forward-order-order-and-rank)).
 
 | value | what it is | layout (`nnterp.components`) |
 |---|---|---|
@@ -163,12 +165,12 @@ assert leaked.triu(diagonal=1).sum() > 0                   # every query now att
 GPT-Neo's masked scores are `-inf` rather than the dtype's minimum, so
 `scores * 0` is NaN there.
 
-**Patterns in two invokes of one trace raise.** Touching `attention_probabilities`
-or `attention_scores` (any value read inside the attention call's own source) in
-two invokes of one trace fails with `TypeError: 'NoneType' object is not
-subscriptable`, an nnsight bug. Put the prompts in one invoke (a batch), or use a
-trace per prompt; the "every head in one forward" sweep goes through
-`attention_head_outputs` instead.
+**Two invokes of one trace can both read and edit `attention_probabilities` and
+`attention_scores`.** At one location the invoke written first is served first: an
+empty `tracer.invoke()` after an invoke that edits the scores reads the edited pattern.
+On BLOOM and XGLM the interior is served off `[batch * num_heads, ...]` tensors, so an
+edit in one invoke reaches every invoke's rows (and on XGLM a read returns the whole
+batch); run one trace per prompt or per head there.
 
 **Padded rows.** In a left-padded batch a pad *query* row attends uniformly over
 all keys, which pollutes per-row head metrics (entropy, previous-token mass);
@@ -388,8 +390,7 @@ See [generation-and-helpers.md](generation-and-helpers.md).
   keys, with alibi queries, keys, values. Out of order raises `OutOfOrderError`
   naming the attention call. Under `generate` + `tracer.iter` it does not raise:
   the read binds the *next* step's value.
-- Never overwrite `attention_scores` wholesale (it holds the mask); never read the
-  pattern in two invokes of one trace.
+- Never overwrite `attention_scores` wholesale (it holds the mask).
 - GPT-2 and MPT q/k/v: assign, do not edit in place.
 - `hasattr(attn, "attention_probabilities")` raises `Unavailable` when
   unavailable and `ValueError` outside a trace when available. Use

@@ -124,8 +124,9 @@ with model.trace(prompt):
 
 `states`, `state_after` and `set_state_after` count from the current call's own
 first token (on a decode step, the one token). `states` reads every position, so
-it goes before any write or in a trace of its own; `state` takes assignment, not
-an in-place edit. Two things the state is not:
+it goes before any write or in a trace of its own; `state` takes assignment and
+in-place edits alike (`mix.state[:] = 0` is `mix.state = mix.state * 0`). Two things
+the state is not:
 
 - **All a block remembers.** A width-4 causal conv runs before the scan and
   carries the last few tokens' inputs, so zeroing the state at `t` is not a

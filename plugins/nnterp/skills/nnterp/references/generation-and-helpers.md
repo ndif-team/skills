@@ -71,7 +71,9 @@ raise: it binds the same location on the *next* step, so a per-step list comes
 back shifted by one (the pattern read after `attention_output` is step `k+1`'s),
 and the only symptom is a final warning blaming the loop bound. Check each
 step's shapes (`[batch, 1, ...]` on a decode step, the cache length on the key
-axis) when a per-step result looks off.
+axis) when a per-step result looks off. Every step repeats one forward's order, so
+`model.rank(name, layer)` sorts a step's reads as it does a trace's
+([availability-and-support.md](availability-and-support.md#forward-order-order-and-rank)).
 
 **`tracer.result` after an open loop is never bound.** `tracer.iter[:]` and
 `tracer.all()` end by outrunning the run, and the statements after the loop do

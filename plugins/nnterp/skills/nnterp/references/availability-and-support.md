@@ -1,4 +1,4 @@
-# Availability: `support()`, `Unavailable`, `SourceNotAvailable`
+# Availability and forward order: `support()`, `Unavailable`, `SourceNotAvailable`, `order()`, `rank()`
 
 Not every checkpoint has every standard value. OPT has no MLP module; a model
 loaded with `sdpa` never builds the attention pattern; GPT-2 with
@@ -9,6 +9,10 @@ when it is not there and why, and `support()` collects those reasons from the
 config alone, so a script decides what to read before anything runs.
 
 `None` means available. Anything else is the reason, a string.
+
+A script that reads or edits several values has a second question: which order to put
+them in. `model.order()` and `model.rank()` answer it for the values `support()` lists as
+available ([below](#forward-order-order-and-rank)).
 
 <!-- test: setup -->
 ```python
@@ -271,6 +275,45 @@ assert patterns == {} and mlp.shape == (1, 10, 768)      # sdpa here: no pattern
 For one block, `model.support(layer=i)["self_attn.attention_probabilities"]` is
 the flat form of the same check. `scripts/inspect_family.py <repo_id>` prints
 `support()` for a checkpoint without loading weights.
+
+## Forward order: `order` and `rank`
+
+Within one invoke, values are read and edited in the order the forward reaches them.
+`model.order(i)` lists block `i`'s available values in that order by `support(layer=i)`'s
+dotted names (`model.order()` the root's), and `model.rank(name, layer)` gives one sortable
+`(side, r)` per value: `side` is `-1` for a root value before the blocks, the layer for a
+block value, `num_layers` for a root value after them. Like `support()`, both are asked
+outside a trace; the first call measures the order with one probe `scan` and keeps it on the
+model, so route kernels (`route_kernels`, `chunk_per_token`) before it.
+
+Use them when one trace reads or edits values at several sites in an order the code
+decides: a helper that takes a list of `(value, block)` sites, a sweep that patches several
+values per block, a port of code that hooked modules in its own order. Sort the sites by
+`rank` instead of keeping a hand-written table of what comes first, which differs per
+family. When a plain trace raises `OutOfOrderError`, or a list read under `tracer.iter`
+comes back shifted by one step, compare the ranks of the reads involved.
+
+```python
+order = plain.order(0)                                   # GPT-2 under sdpa: the interior is unavailable, so not ranked
+assert "self_attn.attention_probabilities" not in order
+assert order["layer_input"] < order["self_attn.attention_output"] < order["mlp.mlp_output"] < order["layer_output"]
+assert plain.rank("input_ids") == (-1, 0) and plain.rank("logits")[0] == plain.num_layers
+
+reads = [("logits", None), ("layer_output", 1), ("mlp.mlp_output", 0), ("token_embeddings", None)]
+reads.sort(key=lambda read: plain.rank(*read))
+assert reads == [("token_embeddings", None), ("mlp.mlp_output", 0), ("layer_output", 1), ("logits", None)]
+```
+
+Equal ranks are one location (the queries, keys and values are one attention call's
+arguments), so either is read first. A hybrid ranks each block shape separately. An
+unavailable value is not ranked, and `rank` raises `Unavailable` with `support()`'s
+reason; a name that is no value raises `KeyError`. The vision tower's values are not
+ranked, and `StandardizedVLLM` raises `NotImplementedError`.
+
+<!-- test: expect-error Unavailable -->
+```python
+plain.rank("self_attn.attention_probabilities", 0)      # sdpa: the reason is support()'s
+```
 
 ## Gotchas
 

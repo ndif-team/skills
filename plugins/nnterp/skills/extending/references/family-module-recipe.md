@@ -24,7 +24,7 @@ print(len(families.known()), families.known()[:4])
 ```
 gpt2
 llama
-98 ['afmoe', 'apertus', 'arcee', 'bamba']
+99 ['afmoe', 'apertus', 'arcee', 'bamba']
 ```
 
 `families.known()` is the sorted list of shipped modules, read off the package directory
@@ -33,13 +33,28 @@ all of them with their quirks. A multimodal config nests the text model's type u
 `text_config`; that nested type is what `StandardizedTransformer` resolves. A type with
 no module and nothing registered (Zamba and Zamba2 are deliberately unshipped: their
 hybrid blocks add a shared transformer's output to the mixer's input, not to the
-residual stream, so the standard contributions mean nothing there):
+residual stream, so the standard contributions mean nothing there) resolves to the
+best-effort `default` family with a warning, and a load raises `UnsupportedFamily` only
+when that guess cannot standardize the checkpoint:
+
+```python
+import warnings
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    assert families.lookup("zamba2") is families.default
+assert "nnterp has no family for model_type 'zamba2'" in str(caught[0].message)
+assert not families.covers("zamba2")
+```
+
+`default` is written against transformers' modules, so another engine's lookup has no
+fallback:
 
 <!-- test: expect-error UnsupportedFamily -->
 ```python
-families.lookup("zamba2")
-# UnsupportedFamily: no standardization for model_type 'zamba2'; known: ['afmoe', 'apertus', ...].
-# Add nnterp/families/zamba2.py with RENAME and ENVOYS, or pass a family to nnterp.families.register(family, 'zamba2').
+families.lookup("zamba2", engine="vllm")
+# UnsupportedFamily: no standardization for model_type 'zamba2' on vllm; known: ['afmoe', 'apertus', ...].
+# Add nnterp/families/vllm/zamba2.py with RENAME and ENVOYS, or pass a family to nnterp.families.register(family, 'zamba2', engine='vllm').
 ```
 
 ## The recipe
@@ -224,7 +239,7 @@ nnsight resolves every key relative to every envoy in the tree (the `nnsight` sk
   the alias binds on the named child only. GPT-2 spells the attention's output projection
   and the MLP's down projection both `c_proj`, so a bare `"c_proj"` key cannot tell them
   apart; `"attn.c_proj": "attn.o_proj"` and `"mlp.c_proj": "mlp.down_proj"` can. Dotted
-  aliases need nnsight `dev` at d565f5f8 or later.
+  aliases need nnsight 0.8 or later.
 - A key may be a module **class**: nnsight binds it on every envoy with exactly one
   direct child of that class, for a native name whose meaning depends on the block.
   Nemotron-H's one `mixer` per block is keyed by class:
@@ -294,9 +309,9 @@ inputs against the family's own norm (`ATTENTION_NORM`, `MLP_NORM` below), not t
 - Several module types may share one envoy class (a dense MLP and a shared expert of the
   same class); a mixture gets its own (`DeepseekV2MLP: Mlp, DeepseekV2Moe: Moe`), and the
   suite accepts either class on a block.
-- `envoys=` matches by type (walking the module's MRO) or by native path suffix, never by
-  alias, and type keys are tried before path keys. A user displaces a family's envoy by
-  keying on the same type.
+- `envoys=` matches by type (walking the module's MRO) or by path suffix (the native path
+  or any alias spelling of it), and type keys are tried before path keys. A user displaces
+  a family's envoy by keying on the same type.
 - Define `Layer`, `Attention` and `Mlp` even when a module type has no such module; the
   suite reads `FAMILY.Attention`. OPT keys no `Mlp` in `ENVOYS`, and `support()`, which
   walks the tree, then lists no `mlp` value at all (`"mlp.mlp_output" not in
@@ -1415,9 +1430,10 @@ with GPT-2's `NATIVE` and `REFUSES_IN_PLACE_QKV`, passes the whole suite on
 - **Import the modeling module only inside the family module.** An import at
   `nnterp/__init__.py` or in `components/` would load transformers modeling code on
   `import nnterp`.
-- **Import nnterp (or nnsight) before any `transformers.models...` import** in a script
-  or test; the reverse order segfaults at import on this stack. nnterp's `conftest.py` is
-  the one line `import nnsight` for that reason.
+- **A silent segfault at import is pyarrow's, not nnterp's.** On glibc 2.31 (Ubuntu
+  20.04) with pyarrow installed, `import transformers.modeling_layers` before nnsight
+  crashes in pyarrow's jemalloc thread; nnterp's `conftest.py` imports nnsight first and
+  sets `JE_ARROW_MALLOC_CONF=background_thread:false` for every test process.
 - **Every family test loads eager.** Values still unavailable on that checkpoint go in
   `EXPECTED_UNAVAILABLE` with a substring of the reason.
 - **Interior values bind at different points of the forward.** A family-specific test
