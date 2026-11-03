@@ -12,7 +12,7 @@ per family under `nnterp/families/`, named after `config.model_type`
 (`len(nnterp.families.known())` is 99: 98 families, plus `kimi_k25`, Kimi K2's family
 under its wrapper's name). This skill is for when that is not enough: a `model_type`
 nnterp does not ship, a forward that puts a value where the base classes do not look, or
-a value nnterp does not have. Verified on nnterp `v2.0.0` at `3fb2cc0` with nnsight
+a value nnterp does not have. Verified on nnterp `v2.0.0` at `1a63f2d` plus nnterp #134 (`4c5f8f1`), with nnsight
 0.8.2 (0.8 or later binds the dotted aliases below) and transformers 5.20.2, against
 `openai-community/gpt2` and `HuggingFaceTB/SmolLM2-135M-Instruct`. The nnterp repo's
 pages: `docs/extending/` (`adding-a-family.md`, `overriding-values.md`,
@@ -189,6 +189,8 @@ Keep the name, the layout annotation and the description; change only the locati
 | routes off the interface on a config flag | `def off_interface(self): return "<reason>" if flag else super().off_interface()` | gpt2.py |
 | maps the queries, keys, values and head outputs onto one call of its own (`_attn(q, k, v, mask, ...)`) | `EProperty("source.<call>.inputs", select=n)` for the three and `("source.<call>.output", select=0)` for the head outputs; `interface` then re-runs that call, and is `OWN_ARITHMETIC` otherwise | gptj.py, gpt_neo.py, codegen.py |
 | applies no rotary embedding, on every block or on some | `def no_rotary(self): return "no rotary embedding: <why>"` (`"... on this block: ..."` where the module decides, `None` otherwise) | gpt2.py, bloom.py, smollm3.py |
+| fuses or transposes the value / output projection | override `value_weight(kv_head)` / `output_weight(head)` on the `Attention`, reading the projection through `projection_weight(self, name)` (which keeps the refusal and the PEFT adapters) and indexing a view: `projection_weight(self, "qkv_proj")[self.num_heads * self.head_dim:].unflatten(0, (2, self.num_kv_heads, self.head_dim))[1, kv_head]` | phi3.py, gpt2.py, gpt_neox.py, falcon.py |
+| has no per-head value or output slice (latent values, a norm on the values, an output projection per expert) | `def no_head_weights(self): return "<why>"`, the one place `value_weight` and `output_weight` ask | deepseek_v2.py, gemma4_text.py, jetmoe.py |
 | rotates another way (cos and sin from elsewhere, another apply function, a slice outside it) | override `rotary_embedding(x, position_ids)` or `apply_rotary(x, embedding)` on the `Attention`, so `rotate` keeps giving the served rotated values | gptj.py, granite_swa.py, phi.py, llama4_text.py |
 | picks its operation by a config flag | a key function of the envoy returning the path: `EProperty(by_alibi("F_softmax_0", "F_softmax_1", "input"))` | falcon.py |
 | the value is a binding in the *block's* forward, read after the block starts | `@EProperty("../source.<op>.output")` on the child, `sourced = True` on the block's class | llama4_text.py |

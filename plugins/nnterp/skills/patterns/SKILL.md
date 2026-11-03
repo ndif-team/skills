@@ -13,7 +13,7 @@ layer_output`), the pattern is `attention_probabilities`, the per-head view is
 `attention_head_outputs` (or `attention_premix` at the output projection, under any
 attention implementation), an MLP's neurons are `mlp_neurons`, and `project_on_vocab`
 is the model's own head. Nothing here indexes `.output[0]` or names `ln_f` versus
-`norm`. Verified on nnterp `v2.0.0` at `3fb2cc0` with nnsight 0.8.2 and transformers
+`norm`. Verified on nnterp `v2.0.0` at `1a63f2d` plus nnterp #134 (`4c5f8f1`), with nnsight 0.8.2 and transformers
 5.20.2; the executed blocks run on
 `openai-community/gpt2`, `HuggingFaceTB/SmolLM2-135M-Instruct` (30 layers, 576
 hidden, 9 heads, 3 kv heads, bf16) and `trl-internal-testing/tiny-LlavaForConditionalGeneration`.

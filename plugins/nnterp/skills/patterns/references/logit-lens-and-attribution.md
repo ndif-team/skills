@@ -229,10 +229,11 @@ not a sum of anything: `project_on_vocab` applies the cap, the linear form does 
 `attention_premix` is what the output projection receives, split by head,
 `[batch, seq, heads, head_dim]`: each head's output after any gate, read at the
 projection under any `attn_implementation`. The projection is linear, so head `h`'s
-share of `attention_output` is its slice times the projection weight's matching
-rows. The projection is `self_attn.o_proj` on every family (aliased from `c_proj`,
-`dense`, `out_proj`); its weight layout differs: `torch.nn.Linear` stores `[out, in]`,
-GPT-2's `Conv1D` stores `[in, out]`.
+share of `attention_output` is its slice times `self_attn.output_weight(h)`, the
+projection's columns for that head, `[hidden, head_dim]`. The projection is
+`self_attn.o_proj` on every family (aliased from `c_proj`, `dense`, `out_proj`), and
+`output_weight` reads its layout for you (GPT-2's `Conv1D` stores `[in, out]`) and, under
+a PEFT adapter, the weight the adapter applies (the `nnterp` skill, "The weights per head").
 
 ```python
 LAYER = model.num_layers // 2
@@ -243,10 +244,9 @@ with model.trace(prompt):
     heads = attention.attention_premix.save()                # [batch, seq, heads, head_dim]
     contribution = attention.attention_output.save()         # [batch, seq, hidden]
 
-W = projection._module.weight
-W_in_out = W.t() if isinstance(projection._module, torch.nn.Linear) else W       # [heads * head_dim, hidden]
-H, D = heads.shape[2], heads.shape[3]
-per_head = torch.einsum("bshd,hdo->bsho", heads, W_in_out.reshape(H, D, -1))      # [batch, seq, heads, hidden]
+per_head = torch.stack(
+    [heads[:, :, h] @ attention.output_weight(h).T for h in range(attention.num_heads)], dim=2,
+)                                                            # [batch, seq, heads, hidden]
 bias = projection._module.bias
 assert torch.allclose(per_head.sum(2) + (bias if bias is not None else 0), contribution, atol=1e-4)
 

@@ -14,7 +14,7 @@ mean the same thing everywhere. Everything nnsight does (`trace`, `generate`,
 unchanged; this skill covers only what nnterp adds. Load the `nnsight` skill for
 the underlying API.
 
-Verified on nnterp `v2.0.0` at `3fb2cc0` (98 families) with nnsight 0.8.2 and transformers 5.20.2.
+Verified on nnterp `v2.0.0` at `1a63f2d` plus nnterp #134 (`4c5f8f1`) (98 families), with nnsight 0.8.2 and transformers 5.20.2.
 nnterp needs nnsight 0.8 or later: the families alias `o_proj` and `down_proj` with dotted
 rename keys (`"attn.c_proj": "attn.o_proj"` on GPT-2), which older nnsight cannot bind.
 
@@ -280,6 +280,15 @@ an error, as any late read does there (trap 6). Within one invoke, a padded batc
 it reproduces the model bit for bit; across invokes only to rounding (about `1e-8` in
 float32), so put prompts in one invoke (`model.trace([a, b])`) when that matters
 ([Calling the attention function again](#calling-the-attention-function-again-interface)).
+
+**19. A head's weights are `value_weight` / `output_weight`, not slices of `.weight`.**
+Under a PEFT adapter (`peft=` at load) `self_attn.v_proj.weight` is the base weight alone;
+`value_weight(kv)` and `output_weight(j)` give the weight the LoRA layer applies (the base
+plus every active, unmerged adapter's delta, what `merge()` would leave), so an adapted
+model's weights need no merge-and-clone. They also read the fused and transposed layouts
+(Phi-3 has no `v_proj`, GPT-2's `c_attn` is `[in, out]`), and `attention_input_gain` is the
+norm's gain whatever its parameterization (Gemma's `1 + weight`), ones on a post-norm block
+([The weights per head](#the-weights-per-head)).
 
 ## The vocabulary
 
@@ -683,6 +692,51 @@ Everything else (decode steps, padded batches, the per-family calls, the cache u
 `generate`):
 [references/attention-interior.md](references/attention-interior.md#calling-the-attention-function-again-interface).
 
+## The weights per head
+
+Three accessors read a head's weights off the modules, outside a trace or inside one:
+`self_attn.value_weight(kv)` is key/value head `kv`'s slice of the value projection,
+`[head_dim, hidden_size]`; `self_attn.output_weight(j)` is head `j`'s slice of the output
+projection, `[hidden_size, head_dim]` (what maps its slice of `attention_premix` into the
+stream); `layers[i].attention_input_gain` is the per-channel gain between the stream and
+what the attention reads, `[hidden_size]`: the pre-attention norm's gain (`weight`, Gemma's
+`1 + weight`), ones on a post-norm block (OLMo-2/3). Use them for anything that multiplies a
+head's weights: an OV circuit, a head's write of a stream direction, direct logit
+attribution through `output_weight`, and an adapted model's weights without merging (trap
+19). Query head `j` reads key/value head `j // (num_heads // num_kv_heads)`:
+
+```python
+layer = llama.layers[14]
+attn = layer.self_attn
+group = attn.num_heads // attn.num_kv_heads                # 3 on SmolLM2
+
+with llama.trace(fact):
+    x = attn.input.save()                                  # what the attention is called with: the normed stream
+    v = attn.attention_values.save()                       # [batch, num_kv_heads, seq, head_dim]
+
+value = attn.value_weight(1)                               # [head_dim, hidden_size]; SmolLM2's v_proj has no bias
+torch.testing.assert_close(x.float() @ value.float().T, v[:, 1].float(), rtol=2e-2, atol=2e-2)   # bf16: to rounding
+
+h = llama.embed_tokens.weight[lparis].float()
+h = h / h.pow(2).mean().sqrt()                             # unit RMS, as the block's norm leaves the stream
+j = 4                                                      # reads key/value head 4 // 3 = 1
+ov = attn.output_weight(j).float() @ attn.value_weight(j // group).float() @ (layer.attention_input_gain.float() * h)
+assert ov.shape == (576,)                                  # what head 4 writes, per unit of attention on " Paris"
+assert model.layers[5].self_attn.value_weight(0).shape == (64, 768)   # GPT-2's fused, transposed c_attn, read for you
+```
+
+They are the weight's dtype and device, views of the parameter where torch allows, and
+need a dispatched model (an undispatched one's weights are meta). The layouts the families
+fuse (Phi-3's `qkv_proj`, GPT-NeoX's and BLOOM's per-head `query_key_value`, Falcon's three,
+MPT's and DBRX's `Wqkv`, CodeGen's four parts, GPT-2's `Conv1D`) are read for you; the
+weights carry no bias (read it off the module). `self_attn.no_head_weights()` is the one
+reason both methods raise where a head has no such slice: latent attention (DeepSeek-V2/V3,
+Kimi-K2, GLM-5, GLM-4.7-Flash, Youtu, Kimi-Linear), DeepSeek-V4, Gemma-4 (`v_norm` on the
+values), JetMoE, ZAYA, the default family, a vision tower, a model split tensor-parallel,
+and `StandardizedVLLM` (which refuses `attention_input_gain` too). Details and the layout
+table:
+[references/attention-interior.md](references/attention-interior.md#the-weights-per-head).
+
 ## Methods over the values
 
 ```python
@@ -797,7 +851,7 @@ piece, edits split back), except a split mixture's `expert_outputs`, a per-rank 
 | File | Covers |
 |---|---|
 | [references/values.md](references/values.md) | the boundary values and the identity, tuple blocks, where families relocate a contribution, the non-additive families with their stream-weight recipes, root values, sizes, layouts |
-| [references/attention-interior.md](references/attention-interior.md) | queries/keys/values/scores/probabilities/head outputs, family caveats (GPT-2, MPT, Falcon, sinks, latent attention, Gemma-4 borrowed keys), what edits do to the mask, under `generate`; the queries and keys before the rotary and `rotate` (moving a query or key to another position, per-family differences, rope scaling, on vLLM); `interface`, the block's attention function called again (edits of keys or values that must not reach the cache or the rest of a group, per-row patches, exact recomputes; where it is unavailable) |
+| [references/attention-interior.md](references/attention-interior.md) | queries/keys/values/scores/probabilities/head outputs, family caveats (GPT-2, MPT, Falcon, sinks, latent attention, Gemma-4 borrowed keys), what edits do to the mask, under `generate`; the queries and keys before the rotary and `rotate` (moving a query or key to another position, per-family differences, rope scaling, on vLLM); `interface`, the block's attention function called again (edits of keys or values that must not reach the cache or the rest of a group, per-row patches, exact recomputes; where it is unavailable); the weights per head (`value_weight`, `output_weight`, `attention_input_gain`: layouts, PEFT adapters, the gain, where refused) |
 | [references/mixture-of-experts.md](references/mixture-of-experts.md) | a `Moe`'s six values, usage / entropy / ablation / rerouting recipes with pad masking, bf16 and invoke caveats, per-family gaps |
 | [references/recurrent-mixers.md](references/recurrent-mixers.md) | `LinearAttention` (DeltaNet), `SelectiveScan` (Mamba-1), `StateSpace` (Mamba-2): what each name means on each, kernels, per-token state, read-order traps |
 | [references/availability-and-support.md](references/availability-and-support.md) | `support()` forms, the reasons, `Unavailable` vs `SourceNotAvailable`, guarding a script |
