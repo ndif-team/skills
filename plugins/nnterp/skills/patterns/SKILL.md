@@ -13,7 +13,7 @@ layer_output`), the pattern is `attention_probabilities`, the per-head view is
 `attention_head_outputs` (or `attention_premix` at the output projection, under any
 attention implementation), an MLP's neurons are `mlp_neurons`, and `project_on_vocab`
 is the model's own head. Nothing here indexes `.output[0]` or names `ln_f` versus
-`norm`. Verified on nnterp `v2.0.0` at `1a310b7` with nnsight 0.8.2 and transformers
+`norm`. Verified on nnterp `v2.0.0` at `3fb2cc0` with nnsight 0.8.2 and transformers
 5.20.2; the executed blocks run on
 `openai-community/gpt2`, `HuggingFaceTB/SmolLM2-135M-Instruct` (30 layers, 576
 hidden, 9 heads, 3 kv heads, bf16) and `trl-internal-testing/tiny-LlavaForConditionalGeneration`.
@@ -216,6 +216,23 @@ rotates what you write for the position it lands at, so the transplant is one as
 (the `nnterp` skill, "Before the rotary embedding", runs it on SmolLM2; GPT-2 has no
 rotary). `attention_queries` / `attention_keys` are already rotated for the position they
 ran at.
+
+### Head-selective K/V patching
+
+To make chosen query heads read another run's keys and values over a span, without the
+rest of their group, the other rows or the KV cache seeing the edit, do not write
+`attention_keys` / `attention_values`: they are `num_kv_heads` wide (an edit of key/value
+head `g` reaches every query head `h` with `h // group == g`), every query row reads them
+(an edit at the span moves every row from the span on), and under `generate` they are the
+cache (an in-place edit stays for every later step). Clone the keys and values, replace the
+span for the chosen heads' key/value heads, call `self_attn.interface` (the block's own
+attention function, with this call's mask and scale) on the copies, and write only the
+chosen heads' last row of `attention_head_outputs`. The same patch runs on every
+`generate` step, and the cache keeps the target's own keys. Eager only, and unavailable
+on BLOOM, MPT, Falcon, XGLM and DeepSeek-V4 (`support()["self_attn.interface"]` says so).
+The recipe, the bleed it avoids and the `generate` form run on SmolLM2 in
+`references/patching-and-attention.md`, "Head-selective K/V patching"; the `nnterp`
+skill's "Calling the attention function again" has the rules.
 
 ## Steering
 
@@ -449,6 +466,13 @@ exact checks.
   (`attention_queries_prerope` / `attention_keys_prerope`): a rotated
   `attention_queries` written elsewhere is attended with the position it came from.
   A direction found on unrotated queries or keys is added there too.
+- **What some heads read is patched through `self_attn.interface`, never by writing
+  `attention_keys` / `attention_values`**, which reaches the whole GQA group, every row
+  from the span on and, in place under `generate`, the cache. Clone `k` and `v` before
+  editing, read `interface` once with the queries, call it before the scores, the pattern
+  or the head outputs, and pass whole tensors (the call takes the live call's query and key
+  lengths) then slice the result. One invoke is bit for bit; across invokes it matches the
+  model to rounding only.
 - **Equal prompt lengths for a layer×position map**: assert
   `len(tokenizer(clean).input_ids) == len(tokenizer(corrupt).input_ids)`.
 - **Pick layers as depths** (`model.num_layers // 2`), never as constants, and
@@ -468,7 +492,8 @@ exact checks.
 - `references/steering-and-ablation.md`: the steering vector, `steer` and `+=`,
   under `generate`; zero/mean ablation, `skip_layers`, heads, a recurrent mixer.
 - `references/patching-and-attention.md`: saved, barrier and session patching,
-  sweeps, the layer×position map; pattern metrics and edits.
+  sweeps, the layer×position map; head-selective K/V patching through
+  `self_attn.interface`; pattern metrics and edits.
 - `references/sweeps-and-probing.md`: the cross-family loop, ridge probing with
   controls, recurrent state patching.
 - `references/image-pathway.md`: on a vision-language model, ablating the image at

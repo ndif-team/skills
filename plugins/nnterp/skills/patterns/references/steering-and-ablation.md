@@ -357,9 +357,11 @@ slightly negative.
   `nnterp.Unavailable`.
 - Head-level ablation needs eager; `attention_output`, `mlp_output` and
   `layer_output` do not.
-- Gemma-4: an in-place edit of a KV-sharing source block's `attention_keys` /
-  `attention_values` reaches the 11-20 later blocks that borrow them; assign to keep
-  it local. Skipping a source block with `skip_layers` fails (`KeyError`).
+- Gemma-4: the KV-sharing blocks attend with an earlier block's keys and values.
+  Zeroing `attention_keys` / `attention_values`, in place or by assignment, ablates them
+  on that block alone; to ablate what every borrower attends with, edit the source
+  block's `k_proj` / `v_proj` output. Skipping a source block with `skip_layers` fails
+  (`KeyError`).
 - Granite line in bf16: a write at one position of a contribution shifts every
   position by up to half the edit's own effect (the scaled copy is divided back);
   run position-specific ablations in float32.

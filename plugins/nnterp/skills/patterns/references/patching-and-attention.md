@@ -4,9 +4,10 @@ Patching copies a value from a clean run into a corrupt one at the same site and
 position; if the corrupt run now gives the clean answer, that value was sufficient.
 The sites are `layer_output` (everything up to block `i` at that position),
 `attention_output` / `mlp_output` (one sublayer's addition) and
-`attention_head_outputs[..., h, :]` (one head). Attention-pattern analysis reads
+`attention_head_outputs[..., h, :]` (one head); what chosen heads *read* is patched through
+`self_attn.interface` ([below](#head-selective-kv-patching)). Attention-pattern analysis reads
 `attention_probabilities`, `[batch, heads, query, key]`, on any family loaded eager.
-nnterp pages: `docs/patterns/activation-patching.md`,
+nnterp pages: `docs/patterns/activation-patching.md`, `docs/patterns/head-kv-patching.md`,
 `docs/patterns/attention-patterns.md`, `docs/usage/attention-interior.md`.
 
 <!-- test: setup -->
@@ -196,7 +197,9 @@ Patching `layer_output` at block `i` replaces everything up to and including `i`
 that position; a contribution replaces one sublayer's addition. On a family whose
 block returns a tuple (GPT-J, BLOOM, MPT, Falcon) `layer_output` is still the
 tensor and an assignment puts it back in the tuple. One head is
-`attention_head_outputs[..., HEAD, :]` patched the same way, under eager. A query or
+`attention_head_outputs[..., HEAD, :]` patched the same way, under eager; to patch what a
+head *reads* (its keys and values over a span) rather than what it writes, see
+[Head-selective K/V patching](#head-selective-kv-patching). A query or
 key is patched before the rotary, at `self_attn.attention_queries_prerope` /
 `attention_keys_prerope` (any attention implementation): the block rotates what you
 write for the position it lands at, so a query from another prompt or position is one
@@ -213,13 +216,152 @@ SmolLM2. Noising swaps the roles; the code is symmetric.
 - Use a logit difference (Paris minus Rome) when the corrupt run is near-degenerate;
   a tiny shift can flip an argmax.
 - Effects are a few percent on one pair; average over pairs.
-- **Gemma-4**: an in-place patch of a KV-sharing source block's keys or values
-  spreads to every block that borrows them; assign to keep it local.
+- **Gemma-4**: the KV-sharing blocks attend with an earlier block's keys and values. A
+  patch of `attention_keys` / `attention_values`, in place or by assignment, is local to
+  the block it is made on; to patch what every borrower attends with, patch the source
+  block's `k_proj` / `v_proj` output.
 - **Granite line in bf16**: a write at one position of a contribution shifts every
   position slightly (the scaled copy is divided back); patch in float32.
 - **Gemma-4, Doge, ZAYA**: a contribution patched at block `i` reaches the last
   stream scaled by the later blocks' scalars or gates (the `nnterp` skill's
   `references/values.md`); patching `layer_output` is unaffected.
+
+## Head-selective K/V patching
+
+Activation patching on a head's *inputs*: does query head `h` of block `L`, reading the
+keys and values another prompt has over a span, carry that prompt's information into the
+prediction? The edit has to reach the chosen heads and nothing else, and writing
+`attention_keys` or `attention_values` cannot do that:
+
+- **The keys and values are `num_kv_heads` wide.** Under grouped-query attention
+  key/value head `g` is read by every query head `h` with `h // group == g`, so an edit of
+  it reaches the whole group.
+- **Every query row reads them.** An edit of the keys at the span changes the attention of
+  every row from the span on, not only the last.
+- **Under `generate` they are the cache.** On most families the attention receives the
+  cache's own tensors, so an in-place edit stays in the cache for every later step, and
+  an assignment, though it lasts one forward, still reaches the whole group and every row.
+
+The recipe: clone the keys and values, replace the span for the chosen heads' key/value
+heads, call `self_attn.interface` (the model's own attention function, with this call's
+mask and scale) on the copies, and write only the chosen heads' last row of
+`attention_head_outputs`. On SmolLM2 (`llama`, loaded above; three query heads per
+key/value head):
+
+```python
+KV_LAYER, HEADS = 14, [4]                                 # the query heads that read the source
+hattn = llama.layers[KV_LAYER].self_attn
+group = hattn.num_heads // hattn.num_kv_heads            # 3 query heads per key/value head
+kv_heads = sorted({h // group for h in HEADS})           # [1]: the key/value head they read
+
+source, target = "The capital of France is", "The capital of Italy is"
+pair = llama.tokenizer([source, target]).input_ids
+span = [i for i, (a, b) in enumerate(zip(*pair)) if a != b]   # [3]: the country, at the same position in both
+
+with llama.trace(source):
+    k_src = hattn.attention_keys.save()                  # [1, num_kv_heads, seq, head_dim], rotated for their positions
+    v_src = hattn.attention_values.save()
+
+def patch():
+    """In a trace or a generate step: the chosen heads' last row, attended over the source's span."""
+    q, k, v = hattn.attention_queries, hattn.attention_keys, hattn.attention_values
+    k2, v2 = k.clone(), v.clone()                        # copies: k and v are what the model attends with
+    k2[:, kv_heads, span] = k_src[:, kv_heads, span]
+    v2[:, kv_heads, span] = v_src[:, kv_heads, span]
+    heads, _ = hattn.interface(q, k2, v2)                # the model's own attention function on the patched copies
+    hattn.attention_head_outputs[:, -1, HEADS] = heads[:, -1, HEADS]   # the chosen heads, the last row: the only write
+
+with llama.trace(target):
+    unpatched = llama.logits[:, -1].save()
+with llama.trace(target):
+    patch()
+    patched = llama.logits[:, -1].save()
+
+lrome = llama.tokenizer(" Rome", add_special_tokens=False).input_ids[0]
+gap = lambda logits: round((logits[0, lparis] - logits[0, lrome]).item(), 3)
+print(gap(unpatched), gap(patched))                      # Paris minus Rome, unpatched and patched
+assert (group, kv_heads, span) == (3, [1], [3]) and not torch.equal(unpatched, patched)
+```
+
+`patch()` reads in forward order: the queries, keys and values and `interface` at the
+attention call, then the head outputs after it. The call reruns the whole attention
+(every head, every row) on the copies, so its matmuls have the model's shapes and every
+head outside the patched group comes out bit for bit as the model computed it; the
+write then takes the chosen heads' last row alone. The span here is one position in
+prompts of one length, so the source's keys, rotated for their positions, are at the
+right positions in the target too.
+
+### Why not write the keys
+
+Written directly, the same span edit reaches every head of the group and every row
+from the span on:
+
+```python
+with llama.trace(target):
+    served = hattn.attention_head_outputs.save()         # [1, seq, num_heads, head_dim], unpatched
+with llama.trace(target):
+    hattn.attention_keys[:, kv_heads, span] = k_src[:, kv_heads, span]
+    hattn.attention_values[:, kv_heads, span] = v_src[:, kv_heads, span]
+    bled = hattn.attention_head_outputs.save()
+
+moved = bled.ne(served).any(-1)[0]                       # [seq, num_heads]
+assert moved[-1].nonzero().flatten().tolist() == [3, 4, 5]   # every head of the group
+assert moved[:-1].any().item()                           # and the rows before the last
+```
+
+### Under `generate`
+
+The same `patch()` on every step: the last row is the new token's, and on a decode step
+the keys and values the call receives are the whole cache, the span among them. The
+cache keeps the target's own keys, since nothing writes them:
+
+```python
+with llama.generate(target, max_new_tokens=4, do_sample=False) as tracer:
+    for step in tracer.iter[:4]:
+        cached = hattn.attention_keys[:, kv_heads].save()   # this step's cache, after the earlier steps' patches
+        patch()                                          # every step: the last row is the new token's
+    generated = tracer.result.save()
+
+with llama.trace(target):
+    own_keys = hattn.attention_keys[:, kv_heads].save()
+n_target = len(pair[1])
+assert torch.equal(cached[:, :, :n_target], own_keys)    # the cache holds the target's own keys
+```
+
+`cached` is read before `patch()`: the keys come before the call, and `patch()` ends past
+it, at the head outputs.
+
+### Variations
+
+- **Several heads, several blocks.** `HEADS` may hold any heads of the block; for several
+  blocks, run `patch()`'s body per block in forward order, each with its block's
+  `attention_keys` / `attention_values` from the source run.
+- **Scale what the heads read.** `v2[:, kv_heads, span] = s * v_src[:, kv_heads, span]`
+  amplifies the transplanted values without changing the pattern.
+- **Every row, not the last.** Write `attention_head_outputs[:, :, HEADS] = heads[:, :, HEADS]`
+  on the prompt pass.
+- **Other positions.** The keys are served after the rotary embedding, rotated for the
+  positions they were computed at; a span written at other positions in the target needs
+  keys rotated for those positions: read `attention_keys_prerope` in the source run and
+  pass `hattn.rotate(k_prerope, positions)` (the `nnterp` skill, "Before the rotary
+  embedding").
+
+### Gotchas
+
+- **Clone before editing.** `k` and `v` are the tensors the model attends with and, under
+  `generate`, the cache's; an in-place edit of them is the bleed above.
+- **Read `interface` with the queries and call it before the head outputs.** The call
+  takes the function as the forward runs it, so it comes before any read of the scores,
+  the pattern or the head outputs; to call it twice, read `hattn.interface` once and call
+  the result twice (the `nnterp` skill, trap 18).
+- **Pass whole tensors.** The call takes the live call's query and key lengths (its mask
+  has them): patch inside `k2` and `v2`, pass all of `q`, and slice the result.
+- **Eager only, and not everywhere.** `support()` reports `self_attn.interface` unavailable
+  under `sdpa` and on families with no such call (BLOOM, MPT, Falcon, XGLM, DeepSeek-V4);
+  check it before the trace.
+- **One invoke for bit-exactness.** Across invokes the call runs one invoke's rows where
+  the model ran them all at once, so what it computes agrees with the model's own to
+  rounding, not bit for bit; a batch of prompts in one invoke is bit for bit.
 
 ## Attention patterns
 

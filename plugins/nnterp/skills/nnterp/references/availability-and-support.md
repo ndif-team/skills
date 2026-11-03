@@ -50,7 +50,7 @@ assert set(support) == {
     "self_attn.attention_output", "self_attn.attention_probabilities",
     "self_attn.attention_queries", "self_attn.attention_keys", "self_attn.attention_values",
     "self_attn.attention_scores", "self_attn.attention_head_outputs", "self_attn.attention_premix",
-    "self_attn.attention_queries_prerope", "self_attn.attention_keys_prerope",
+    "self_attn.attention_queries_prerope", "self_attn.attention_keys_prerope", "self_attn.interface",
     "mlp.mlp_activation", "mlp.mlp_neurons", "mlp.mlp_output",
 }
 assert plain.support(layer=0)["self_attn.attention_probabilities"] == EAGER          # one block, flat
@@ -158,6 +158,7 @@ assert eager.support(layer=0)["self_attn.attention_probabilities"] is None      
 | `no self_attn module on this block` / `no linear_attn module on this block` | every value of that module | another block has the module and this one does not (a hybrid's blocks). A module no block has (OPT's `mlp`) has no key in `support()` at all |
 | `no rotary embedding: ...` / `no rotary embedding on this block: ...` | `self_attn.attention_queries_prerope`, `self_attn.attention_keys_prerope` (and `self_attn.rotate` raises it) | the family has no rotary embedding (absolute or sinusoidal positions, ALiBi, none in the attention: GPT-2, OPT, BLOOM, ...), or this block skips it (a NoPE block: Cohere 2, SmolLM3, Llama 4, ...) ([attention-interior.md](attention-interior.md#before-the-rotary-embedding-attention_queries_prerope-attention_keys_prerope-rotate)) |
 | `a KV-sharing block: its keys are an earlier block's, rotated there; ...` | `self_attn.attention_keys_prerope` (Gemma-4) | the block attends with an earlier block's keys and rotates none of its own |
+| `the queries, keys and values are not the arguments of one call in this forward that returns the head outputs (the attention does its own arithmetic, or changes the call's output before the projection), so there is no attention function to call again` (`nnterp.components.OWN_ARITHMETIC`) | `self_attn.interface` | BLOOM, MPT, Falcon and XGLM (their own arithmetic) and DeepSeek-V4 (the head outputs are the interface's output rotated back); elsewhere `interface` has the reason of the queries, keys, values, head outputs or pattern it works with ([attention-interior.md](attention-interior.md#calling-the-attention-function-again-interface)) |
 | `no <module> module on this block` (`input_layernorm`, `post_attention_layernorm`, `mlp`) | `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input` | the block has no module the value is keyed on (OPT's `mlp_input`) |
 | `a parallel block: the attention and the MLP read the same input, so there is no stream between them` (`nnterp.components.PARALLEL`) | `layer_mid` | GPT-J, CodeGen, Cohere, Phi, Falcon; GPT-NeoX and StableLM with `use_parallel_residual` |
 | `a post-norm block: the attention reads the residual stream itself, layer_input` / `... the MLP reads the residual stream itself, layer_mid` (`POST_NORM_ATTENTION`, `POST_NORM_MLP`) | `attention_norm_output` / `mlp_norm_output` | OLMo-2/3, EXAONE-4, FlexOlmo, OLMo-Hybrid's attention blocks |
@@ -177,11 +178,12 @@ assert eager.support(layer=0)["self_attn.attention_probabilities"] is None      
 | `the <family> family keys no ImageScatter on the '<model_type>' wrapper, so where its image features enter the text stream is unknown` | `vision.image_features` | the tower's names bind but the family does not say where the wrapper writes the features in |
 | `the config names no image_token_id` | `vision.image_token_mask`, `vision.image_features` | the wrapper's config has no image token id |
 | `<tower>.image_size is not available: the tower takes images of any resolution, each cut into its own patch grid by the processor; read the grid off the processor's output (image_grid_thw, image_sizes, image_position_ids)` | `vision.image_size` (a size: raised at the read, not a `support()` row) | the Qwen ViT, Pixtral, Gemma 4, Gemma 4 unified |
-| `the Qwen ViT's attention makes one interface call per image (attention_interface_2; ...` | the Qwen ViT's `attention_scores`, `attention_probabilities` | under every `attn_implementation` |
+| `the Qwen ViT's attention makes one interface call per image (attention_interface_2; ...` | the Qwen ViT's `attention_scores`, `attention_probabilities`, `interface` | under every `attn_implementation` |
 | `flash attention runs every image in one call over cu_seqlens, with no concatenation to read; load with attn_implementation='eager' or 'sdpa'` | the Qwen ViT's `attention_head_outputs` | a flash load |
 
 BLOOM and MPT do their attention arithmetic themselves, so their pattern and
-interior need no eager load and are `None` under any implementation.
+interior need no eager load and are `None` under any implementation; their
+`self_attn.interface` reports `OWN_ARITHMETIC` under every one.
 
 A block-structure reason is the same string on every family that has it, so compare
 against the constant (a meta load, on Pythia's parallel block):
@@ -311,7 +313,8 @@ assert reads == [("token_embeddings", None), ("mlp.mlp_output", 0), ("layer_outp
 
 Equal ranks are one location (the queries, keys and values are one attention call's
 arguments), so either is read first; the queries and keys before the rotary are the
-arguments of the rotary call, ranked before them. A hybrid ranks each block shape separately. An
+arguments of the rotary call, ranked before them, and `self_attn.interface` is ranked
+between the values and the scores. A hybrid ranks each block shape separately. An
 unavailable value is not ranked, and `rank` raises `Unavailable` with `support()`'s
 reason; a name that is no value raises `KeyError`. The vision tower's values are not
 ranked, and `StandardizedVLLM` raises `NotImplementedError`.

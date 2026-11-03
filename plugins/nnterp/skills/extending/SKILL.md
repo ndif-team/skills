@@ -12,7 +12,7 @@ per family under `nnterp/families/`, named after `config.model_type`
 (`len(nnterp.families.known())` is 99: 98 families, plus `kimi_k25`, Kimi K2's family
 under its wrapper's name). This skill is for when that is not enough: a `model_type`
 nnterp does not ship, a forward that puts a value where the base classes do not look, or
-a value nnterp does not have. Verified on nnterp `v2.0.0` at `1a310b7` with nnsight
+a value nnterp does not have. Verified on nnterp `v2.0.0` at `3fb2cc0` with nnsight
 0.8.2 (0.8 or later binds the dotted aliases below) and transformers 5.20.2, against
 `openai-community/gpt2` and `HuggingFaceTB/SmolLM2-135M-Instruct`. The nnterp repo's
 pages: `docs/extending/` (`adding-a-family.md`, `overriding-values.md`,
@@ -130,6 +130,14 @@ ENVOYS = {<X>DecoderLayer: Layer, <X>Attention: Attention, <X>MLP: Mlp}
   and `Attention.rotate` ask; redefine values for
   own arithmetic (GPT-J, BLOOM, MPT, Falcon), a residual added inside (BLOOM, MPT), a
   post-norm (Gemma-2/3/4, OLMo-2/3) or a scaled add (Granite's `residual_multiplier`).
+  `Attention.interface` needs nothing from a family: `attention_call`
+  (`nnterp.components.attention`) reads which call to re-run off the family's own
+  `attention_queries` / `attention_keys` / `attention_values` / `attention_head_outputs`
+  keys (the operation whose positional arguments the first three are, when its first return
+  is the head outputs: `attention_interface_1`, or `_attn` on GPT-J), and a family whose
+  values are not one call's arguments reports `OWN_ARITHMETIC` (`nnterp.components`) without
+  saying so (BLOOM, MPT, Falcon, XGLM; DeepSeek-V4, whose head outputs are read after the
+  module rotates the call's output back).
 - **A mixture of experts** is an `nnterp.components.Moe` keyed on the MoE module class:
   `class Mlp(Moe)` where every MLP is one (Mixtral), `class Moe(Moe, Mlp)` beside a
   dense `Mlp` (DeepSeek-V3). Alias the router `router` and the shared expert
@@ -179,6 +187,7 @@ Keep the name, the layout annotation and the description; change only the locati
 | its own attention arithmetic | `EProperty("source.<op>.inputs", select=n)` / `("source.<op>.output", select=i)`; pattern at the dropout after its softmax | bloom.py, falcon.py, gptj.py |
 | has no such value | `attention_scores = unavailable(NOT_ON_INTERFACE)` | DBRX `expert_outputs` (`unavailable(...)`) |
 | routes off the interface on a config flag | `def off_interface(self): return "<reason>" if flag else super().off_interface()` | gpt2.py |
+| maps the queries, keys, values and head outputs onto one call of its own (`_attn(q, k, v, mask, ...)`) | `EProperty("source.<call>.inputs", select=n)` for the three and `("source.<call>.output", select=0)` for the head outputs; `interface` then re-runs that call, and is `OWN_ARITHMETIC` otherwise | gptj.py, gpt_neo.py, codegen.py |
 | applies no rotary embedding, on every block or on some | `def no_rotary(self): return "no rotary embedding: <why>"` (`"... on this block: ..."` where the module decides, `None` otherwise) | gpt2.py, bloom.py, smollm3.py |
 | rotates another way (cos and sin from elsewhere, another apply function, a slice outside it) | override `rotary_embedding(x, position_ids)` or `apply_rotary(x, embedding)` on the `Attention`, so `rotate` keeps giving the served rotated values | gptj.py, granite_swa.py, phi.py, llama4_text.py |
 | picks its operation by a config flag | a key function of the envoy returning the path: `EProperty(by_alibi("F_softmax_0", "F_softmax_1", "input"))` | falcon.py |

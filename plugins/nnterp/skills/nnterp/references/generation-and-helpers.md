@@ -46,6 +46,7 @@ print(model.tokenizer.decode(ids[0, n:]))
 | `attention_keys`, `attention_values` | `[batch, kv_heads, prompt_len, head_dim]` | `[batch, kv_heads, prompt_len + step, head_dim]`: the cache |
 | `attention_keys_prerope` | `[batch, kv_heads, prompt_len, head_dim]` | `[batch, kv_heads, 1, head_dim]`: the new token's only, at position `prompt_len + step - 1` |
 | `attention_scores`, `attention_probabilities` | `[batch, heads, prompt_len, prompt_len]` | `[batch, heads, 1, prompt_len + step]` |
+| `self_attn.interface` | the prompt call | that step's call: one query row, the whole cache as keys and values, the step's mask (none on an unpadded `generate`) |
 | `model.logits` | `[batch, prompt_len, vocab]` | `[batch, 1, vocab]` |
 | `model.next_token_probs` | `[batch, vocab]` | `[batch, vocab]` |
 
@@ -75,6 +76,18 @@ step's shapes (`[batch, 1, ...]` on a decode step, the cache length on the key
 axis) when a per-step result looks off. Every step repeats one forward's order, so
 `model.rank(name, layer)` sorts a step's reads as it does a trace's
 ([availability-and-support.md](availability-and-support.md#forward-order-order-and-rank)).
+
+**An in-place edit of `attention_keys` or `attention_values` stays in the cache.** On
+most families a decode step's attention receives the cache's own tensors, so the edit
+reaches every later step; an assignment replaces the argument of that one forward. Under
+latent attention (DeepSeek-V2/V3) and on Gemma-4 an edit lasts one forward either way. To
+patch what chosen heads read on every step without touching the cache, call
+`self_attn.interface` on edited copies and write the chosen heads of
+`attention_head_outputs`
+([attention-interior.md](attention-interior.md#calling-the-attention-function-again-interface);
+the `patterns` skill's head-selective K/V patching runs it under `generate`). The keys and
+values grow with the cache and the queries do not, so a head-wise edit of `attention_keys`
+on a decode step touches the whole context.
 
 **`tracer.result` after an open loop is never bound.** `tracer.iter[:]` and
 `tracer.all()` end by outrunning the run, and the statements after the loop do
