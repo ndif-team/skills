@@ -260,11 +260,30 @@ the availability check of model.transformer.h.0.attn.typo failed: 'GPT2Config' o
 
 The shipped predicates: `needs_eager` (the module's `config._attn_implementation` is not
 `"eager"`), `interface_reason` (calls `self.off_interface()`, which the base `Attention`
-defines as `needs_eager` and a family may override once for every interface value), and
-`NOT_ON_INTERFACE`, the reason string for an interface value a family with its own
-arithmetic has not mapped. On GPT-2 `self._module.config` exists on the attention module
+defines as `needs_eager` and a family may override once for every interface value),
+`rotary_reason` (calls `self.no_rotary()`, `None` on the base `Attention`: the predicate of
+`attention_queries_prerope` and `attention_keys_prerope`, which `Attention.rotate` asks
+too), and `NOT_ON_INTERFACE`, the reason string for an interface value a family with its
+own arithmetic has not mapped. On GPT-2 `self._module.config` exists on the attention module
 and not on `GPT2MLP`; a predicate on another host reads the config from where that
 module keeps it.
+
+`no_rotary()` is the one override for a family without a rotary embedding, or with blocks
+that skip it, read off the module where the block decides:
+
+<!-- test: skip -->
+```python
+# nnterp/families/smollm3.py
+class Attention(Attention):
+    def no_rotary(self) -> str | None:
+        if not self._module.use_rope:
+            return "no rotary embedding on this block: SmolLM3 skips it on the blocks no_rope_layers marks"
+        return None
+```
+
+A family whose values before the rotary sit at another operation redefines them on it with
+`unavailable=rotary_reason`; [finding-source-ops.md](finding-source-ops.md#picking-the-operation)
+says which operation.
 
 ## Inside the forward: a `source` segment
 
@@ -772,6 +791,10 @@ size and `project_on_vocab` functions too. Which shipped families define which:
 | `needs_eager(envoy)` | `nnterp.components` | the sdpa reason, or `None` under `attn_implementation="eager"` |
 | `interface_reason(envoy)` | `nnterp.components` | `envoy.off_interface()`; the `unavailable=` every base interface value takes |
 | `Attention.off_interface(self)` | method | one decision for every interface value; override it (GPT-2) rather than each value |
+| `rotary_reason(envoy)` | `nnterp.components` | `envoy.no_rotary()`; the `unavailable=` of the queries and keys before the rotary |
+| `Attention.no_rotary(self)` | method | why this block applies no rotary embedding, or `None`: what the two values before the rotary and `rotate` report; override it (GPT-2, BLOOM, SmolLM3) rather than each value |
+| `Attention.rotary_embedding(self, x, position_ids)` / `Attention.apply_rotary(self, x, embedding)` | methods | the `(cos, sin)` the block's rotary call is given, and the family's apply function: what `rotate` runs; override where the family rotates another way (GPT-J's sinusoid table, Granite-SWA's per-theta `rotary_embs`, Phi's `rotary_ndims` slice, Llama 4's complex `apply_rotary_emb`) |
+| `ROTARY` | `nnterp.components` | `"apply_rotary_pos_emb_0"`: the shared rotary call the base reads the values before the rotary at (its first two arguments) |
 | `NOT_ON_INTERFACE` | `nnterp.components` | the reason for `attention_scores = unavailable(NOT_ON_INTERFACE)` on a family with its own arithmetic |
 | `seq_first(t)` | `nnterp.components` | `t.transpose(1, 2)`: `[batch, heads, seq, d]` to `[batch, seq, heads, d]` as a view, its own inverse |
 | `first_tensor(v)` / `rewrap(envoy, t)` | `nnterp.components` | a tuple module's first element on read; the tensor back in its tuple on write |

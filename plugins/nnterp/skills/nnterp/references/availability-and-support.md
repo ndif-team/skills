@@ -50,6 +50,7 @@ assert set(support) == {
     "self_attn.attention_output", "self_attn.attention_probabilities",
     "self_attn.attention_queries", "self_attn.attention_keys", "self_attn.attention_values",
     "self_attn.attention_scores", "self_attn.attention_head_outputs", "self_attn.attention_premix",
+    "self_attn.attention_queries_prerope", "self_attn.attention_keys_prerope",
     "mlp.mlp_activation", "mlp.mlp_neurons", "mlp.mlp_output",
 }
 assert plain.support(layer=0)["self_attn.attention_probabilities"] == EAGER          # one block, flat
@@ -58,11 +59,13 @@ assert plain.layers[0].self_attn.support()["attention_output"] is None
 ```
 
 Loaded with `attn_implementation="eager"`, every `self_attn.*` entry is `None`
-on GPT-2 and Llama. The root values (`logits`, `token_embeddings`,
-`final_norm_output`, `lm_head_output`, `next_token_probs`, `input_ids`,
-`attention_mask`, `input_size`), the block's boundary values and the sublayers'
-interiors at module boundaries (`attention_premix`, `mlp_activation`, `mlp_neurons`)
-never depend on the implementation.
+on Llama, and on GPT-2 every one but the queries and keys before the rotary
+embedding, which a model without a rotary does not have. The root values (`logits`,
+`token_embeddings`, `final_norm_output`, `lm_head_output`, `next_token_probs`,
+`input_ids`, `attention_mask`, `input_size`), the block's boundary values, the
+sublayers' interiors at module boundaries (`attention_premix`, `mlp_activation`,
+`mlp_neurons`) and the queries and keys before the rotary never depend on the
+implementation.
 
 A hybrid (`Qwen/Qwen3.5-9B` with `attn_implementation="eager"`) reads as a dict
 per value, because each block has `self_attn` or `linear_attn` and the per-token
@@ -153,6 +156,8 @@ assert eager.support(layer=0)["self_attn.attention_probabilities"] is None      
 | `this checkpoint sets reorder_and_upcast_attn, which takes GPT-2's own upcast attention path` | the GPT-2 interior | `config.reorder_and_upcast_attn` is set |
 | `The attention does its own arithmetic rather than transformers' shared attention interface; not mapped for this family yet` | an interior value a family has not mapped | a family off the shared interface that marks it `unavailable(NOT_ON_INTERFACE)`; no shipped family does |
 | `no self_attn module on this block` / `no linear_attn module on this block` | every value of that module | another block has the module and this one does not (a hybrid's blocks). A module no block has (OPT's `mlp`) has no key in `support()` at all |
+| `no rotary embedding: ...` / `no rotary embedding on this block: ...` | `self_attn.attention_queries_prerope`, `self_attn.attention_keys_prerope` (and `self_attn.rotate` raises it) | the family has no rotary embedding (absolute or sinusoidal positions, ALiBi, none in the attention: GPT-2, OPT, BLOOM, ...), or this block skips it (a NoPE block: Cohere 2, SmolLM3, Llama 4, ...) ([attention-interior.md](attention-interior.md#before-the-rotary-embedding-attention_queries_prerope-attention_keys_prerope-rotate)) |
+| `a KV-sharing block: its keys are an earlier block's, rotated there; ...` | `self_attn.attention_keys_prerope` (Gemma-4) | the block attends with an earlier block's keys and rotates none of its own |
 | `no <module> module on this block` (`input_layernorm`, `post_attention_layernorm`, `mlp`) | `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input` | the block has no module the value is keyed on (OPT's `mlp_input`) |
 | `a parallel block: the attention and the MLP read the same input, so there is no stream between them` (`nnterp.components.PARALLEL`) | `layer_mid` | GPT-J, CodeGen, Cohere, Phi, Falcon; GPT-NeoX and StableLM with `use_parallel_residual` |
 | `a post-norm block: the attention reads the residual stream itself, layer_input` / `... the MLP reads the residual stream itself, layer_mid` (`POST_NORM_ATTENTION`, `POST_NORM_MLP`) | `attention_norm_output` / `mlp_norm_output` | OLMo-2/3, EXAONE-4, FlexOlmo, OLMo-Hybrid's attention blocks |
@@ -305,7 +310,8 @@ assert reads == [("token_embeddings", None), ("mlp.mlp_output", 0), ("layer_outp
 ```
 
 Equal ranks are one location (the queries, keys and values are one attention call's
-arguments), so either is read first. A hybrid ranks each block shape separately. An
+arguments), so either is read first; the queries and keys before the rotary are the
+arguments of the rotary call, ranked before them. A hybrid ranks each block shape separately. An
 unavailable value is not ranked, and `rank` raises `Unavailable` with `support()`'s
 reason; a name that is no value raises `KeyError`. The vision tower's values are not
 ranked, and `StandardizedVLLM` raises `NotImplementedError`.

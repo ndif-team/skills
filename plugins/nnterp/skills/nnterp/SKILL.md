@@ -14,7 +14,7 @@ mean the same thing everywhere. Everything nnsight does (`trace`, `generate`,
 unchanged; this skill covers only what nnterp adds. Load the `nnsight` skill for
 the underlying API.
 
-Verified on nnterp `v2.0.0` at `feeb24c` (98 families) with nnsight 0.8.2 and transformers 5.20.2.
+Verified on nnterp `v2.0.0` at `1a310b7` (98 families) with nnsight 0.8.2 and transformers 5.20.2.
 nnterp needs nnsight 0.8 or later: the families alias `o_proj` and `down_proj` with dotted
 rename keys (`"attn.c_proj": "attn.o_proj"` on GPT-2), which older nnsight cannot bind.
 
@@ -121,7 +121,8 @@ DeepSeek-V4): [references/values.md](references/values.md).
 
 **6. Reads follow the forward, within one invoke.** `input_ids` before any
 block; within a block `layer_input`, `attention_norm_output`, the attention's
-interior (queries, scores, `attention_probabilities`, `attention_premix`),
+interior (the queries and keys before the rotary, then the queries, scores,
+`attention_probabilities`, `attention_premix`),
 `attention_output`, `layer_mid`, `mlp_norm_output`, `mlp_input`, `mlp_activation`,
 `mlp_neurons`, `mlp_output`, `layer_output` (`model.order(i)` lists a block's
 values in forward order); block 3 before block 5; `final_norm_output`,
@@ -192,7 +193,9 @@ after masking, so `scores[:] = 0` attends to the future. Add to them
 (`scores[..., k] += c`, or `-inf` to block a key) instead.
 
 **9. GPT-2, GPT-BigCode and MPT queries/keys/values are split views**; so are
-Mamba-1's. torch refuses an in-place edit with grad on; assign instead:
+Mamba-1's, and before the rotary CodeGen's, DBRX's and GPT-NeoX's queries and keys,
+JetMoE's keys and latent attention's shared rope key. torch refuses an in-place edit
+with grad on; assign instead:
 
 <!-- test: expect-error RuntimeError -->
 ```python
@@ -252,6 +255,17 @@ run clean and ablated as two traces.
 not `[batch, ...]`. Index one row (`out[0, mask[0]]`) or mask instead of indexing
 (`out.masked_fill(~mask[..., None], 0)`) to keep the batch.
 
+**17. A query or key moved to another position goes in before the rotary.**
+`attention_queries` and `attention_keys` are rotated for the positions they ran at: a
+rotated query written at another position or into another prompt is attended with the
+wrong position. Write `attention_queries_prerope` / `attention_keys_prerope` instead; the
+block rotates what you wrote for the position it lands at
+([Before the rotary embedding](#before-the-rotary-embedding)). Hand-rotating
+`self_attn.q_proj.output` is wrong too: Phi-3 has no `q_proj`, and Qwen3, OLMo-2/3 and
+Gemma norm between the projection and the rotary. `self_attn.rotate` is the rotary
+alone: HunYuan and Llama 4 norm the queries and keys after it, JetMoE tiles its keys,
+Ministral 3 scales its queries, so there `attention_queries` is not `rotate(...)` itself.
+
 ## The vocabulary
 
 Llama's block names, with the containers lifted out of the inner `.model`:
@@ -291,7 +305,8 @@ neither attention nor MLP.
 | `attention_premix` | `self_attn` | `HeadOutputs` | `o_proj.input` split by head, after any gate; any `attn_implementation` |
 | `mlp_activation`, `mlp_neurons` | `mlp` | `Neurons` | `act_fn.output`; `down_proj.input` (`act(gate) * up` on a gated MLP, the activation on a plain one); none on a routed mixture |
 | `mlp_output` | `mlp` | `Residual` | the contribution |
-| `attention_queries`, `_keys`, `_values` | `self_attn` | `Queries`, `Keys`, `Values` | seq on axis 2; keys/values before `repeat_kv`; eager |
+| `attention_queries_prerope`, `attention_keys_prerope` | `self_attn` | `Queries`, `Keys` | what the rotary embedding receives: after the projection and any q/k norm, before the rotation; any `attn_implementation`; [below](#before-the-rotary-embedding) |
+| `attention_queries`, `_keys`, `_values` | `self_attn` | `Queries`, `Keys`, `Values` | seq on axis 2; queries and keys after the rotary; keys/values before `repeat_kv`; eager |
 | `attention_scores` | `self_attn` | `Pattern` | masked, scaled, pre-softmax; eager |
 | `attention_probabilities` | `self_attn` | `Pattern` | the tensor the values are mixed with; eager |
 | `attention_head_outputs` | `self_attn` | `HeadOutputs` | `[batch, seq, heads, head_dim]`, before the output projection; eager |
@@ -477,6 +492,82 @@ edit's own effect; compare such edits in float32. On Gemma-4 an in-place edit of
 KV-sharing source block's keys or values reaches every block that borrows them;
 assign to keep it local.
 
+## Before the rotary embedding
+
+`attention_queries` and `attention_keys` are rotated for the positions they run at.
+`self_attn.attention_queries_prerope` and `self_attn.attention_keys_prerope` are the same
+queries and keys one step earlier, as the block's rotary embedding receives them: after the
+projection and any query or key norm (Qwen3's `q_norm` / `k_norm`, OLMo-2/3, Gemma-3/4),
+before the rotation, laid out `Queries` and `Keys` (the keys before the cache and
+`repeat_kv`). `self_attn.rotate(x, positions)` applies that block's own rotary embedding to
+any tensor laid out like them, at the absolute positions you give it, and needs no trace:
+`rotate(attention_queries_prerope, range(seq))` is `attention_queries` bit for bit. Both
+values are read on the attention module's own forward, not inside the eager interface, so
+they are served under any `attn_implementation`, and they come before `attention_queries`
+in a trace (`model.order(i)` ranks them first).
+
+Use them instead of `attention_queries` / `attention_keys`:
+
+- **To move a query or key to another position or prompt.** A rotated query carries its
+  position in its rotation; written elsewhere it is attended with the wrong one. Write the
+  value before the rotary instead: the block rotates what you wrote for the position it
+  lands at, so the transplant is one assignment.
+- **For an edit that must come before the rotation**: a direction found on the unrotated
+  queries or keys (a probe, a steering vector), which the rotary would turn by a different
+  angle at every position.
+- **To recompute attention with keys from elsewhere**: `rotate` the source keys at the
+  destination positions, outside the trace.
+
+And instead of `self_attn.q_proj.output`, whose layout nnterp does not promise (Phi-3 and
+GPT-NeoX fuse the queries, keys and values into one projection; Phi-3 has no `q_proj`), and
+which on Qwen3, OLMo-2/3 and Gemma misses the norm between the projection and the rotary.
+GPT-2 has no rotary, so this runs on SmolLM2 (`llama`, loaded above):
+
+```python
+attn = llama.layers[1].self_attn
+
+source, target = "The capital of France is Paris", "My favourite city in the whole world is Rome"
+with llama.trace(source):
+    q_src = attn.attention_queries_prerope.save()       # [1, num_heads, seq, head_dim], not rotated yet
+    k_src = attn.attention_keys_prerope.save()          # [1, num_kv_heads, seq, head_dim]
+with llama.trace(target):
+    attn.attention_queries_prerope[:, :, -1] = q_src[:, :, -1]   # the source's last query, rotated for the target's last position
+    moved = attn.attention_queries.save()
+    logits = llama.logits.save()
+
+seq = k_src.shape[2]
+assert torch.equal(moved[:, :, -1:], attn.rotate(q_src[:, :, -1:], [moved.shape[2] - 1]))
+later = attn.rotate(k_src, range(5, 5 + seq))           # the source's keys as if five positions later
+assert q_src.shape == (1, 9, seq, 64) and later.shape == k_src.shape == (1, 3, seq, 64)
+```
+
+On a block without a rotary embedding both values are `Unavailable`, and `rotate` raises
+`Unavailable` with the same reason, which `support()` gives per block:
+
+```python
+assert plain.support(layer=0)["self_attn.attention_queries_prerope"] == (
+    "no rotary embedding: GPT-2 adds learned absolute position embeddings (wpe) to the stream")
+```
+
+That is GPT-2, GPT-BigCode, GPT-Neo, OPT and XGLM (absolute positions), BLOOM, MPT and Falcon
+with `alibi` (ALiBi), the attention blocks of Jamba, Nemotron-H and Kimi-Linear, and the NoPE
+blocks: the full-attention blocks of Cohere 2, AFMoE and a hybrid EXAONE 4, the blocks
+SmolLM3's and Llama 4's `no_rope_layers` mark, a Granite-SWA block whose `layer_rope_theta`
+is 0. Under latent attention (DeepSeek-V2/V3, Kimi-K2, GLM-5, ...) `attention_keys_prerope`
+is the one rope key per position that every head shares, `[batch, 1, seq, qk_rope_head_dim]`
+(`SharedRopeKeys`). Assignment reaches the model on every family; an in-place edit is
+refused on the split views of trap 9.
+
+On `StandardizedVLLM` both values are served (the arguments of vLLM's own
+`self.rotary_emb(positions, q, k)` call, private copies, rotated for where a write lands),
+but **`rotate` runs inside a trace only** there: it calls the engine's rotary embedding, and
+outside a trace raises `RuntimeError`. Neither value is served on the families vLLM runs
+through its transformers backend (OLMo, OLMo 2, SmolLM3, StarCoder2) or under its latent
+attention (DeepSeek-V2/V3, Kimi-K2, GLM-4.7-Flash): read them, and rotate, on a
+`StandardizedTransformer` there. Where a family's values differ, positions under rope
+scaling and `generate`, and the vLLM recipe:
+[references/attention-interior.md](references/attention-interior.md#before-the-rotary-embedding-attention_queries_prerope-attention_keys_prerope-rotate).
+
 ## Methods over the values
 
 ```python
@@ -570,8 +661,9 @@ with vmodel.trace("The Eiffel Tower is in the city of", temperature=0.0, max_tok
 ```
 
 The pattern and scores are recomputed from the queries and keys (read-only, prefill only),
-and an assigned value must keep the shape it was served with. vLLM itself is the `nnsight`
-plugin's `vllm` skill.
+`self_attn.rotate` runs inside a trace only (it calls the engine's rotary embedding), and an
+assigned value must keep the shape it was served with. vLLM itself is the `nnsight` plugin's
+`vllm` skill.
 
 A model too big for one GPU loads sharded with
 `distributed_config=DistributedConfig(tp_size=N)` under `torchrun`: every value reads whole
@@ -585,7 +677,7 @@ piece, edits split back), except a split mixture's `expert_outputs`, a per-rank 
 | File | Covers |
 |---|---|
 | [references/values.md](references/values.md) | the boundary values and the identity, tuple blocks, where families relocate a contribution, the non-additive families with their stream-weight recipes, root values, sizes, layouts |
-| [references/attention-interior.md](references/attention-interior.md) | queries/keys/values/scores/probabilities/head outputs, family caveats (GPT-2, MPT, Falcon, sinks, latent attention, Gemma-4 borrowed keys), what edits do to the mask, under `generate` |
+| [references/attention-interior.md](references/attention-interior.md) | queries/keys/values/scores/probabilities/head outputs, family caveats (GPT-2, MPT, Falcon, sinks, latent attention, Gemma-4 borrowed keys), what edits do to the mask, under `generate`; the queries and keys before the rotary and `rotate` (moving a query or key to another position, per-family differences, rope scaling, on vLLM) |
 | [references/mixture-of-experts.md](references/mixture-of-experts.md) | a `Moe`'s six values, usage / entropy / ablation / rerouting recipes with pad masking, bf16 and invoke caveats, per-family gaps |
 | [references/recurrent-mixers.md](references/recurrent-mixers.md) | `LinearAttention` (DeltaNet), `SelectiveScan` (Mamba-1), `StateSpace` (Mamba-2): what each name means on each, kernels, per-token state, read-order traps |
 | [references/availability-and-support.md](references/availability-and-support.md) | `support()` forms, the reasons, `Unavailable` vs `SourceNotAvailable`, guarding a script |

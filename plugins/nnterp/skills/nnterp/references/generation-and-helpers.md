@@ -44,6 +44,7 @@ print(model.tokenizer.decode(ids[0, n:]))
 | `layer_output`, `attention_output`, `mlp_output`, `token_embeddings` | `[batch, prompt_len, hidden]` | `[batch, 1, hidden]` |
 | `attention_queries`, `attention_head_outputs` | `seq == prompt_len` | `seq == 1` |
 | `attention_keys`, `attention_values` | `[batch, kv_heads, prompt_len, head_dim]` | `[batch, kv_heads, prompt_len + step, head_dim]`: the cache |
+| `attention_keys_prerope` | `[batch, kv_heads, prompt_len, head_dim]` | `[batch, kv_heads, 1, head_dim]`: the new token's only, at position `prompt_len + step - 1` |
 | `attention_scores`, `attention_probabilities` | `[batch, heads, prompt_len, prompt_len]` | `[batch, heads, 1, prompt_len + step]` |
 | `model.logits` | `[batch, prompt_len, vocab]` | `[batch, 1, vocab]` |
 | `model.next_token_probs` | `[batch, vocab]` | `[batch, vocab]` |
