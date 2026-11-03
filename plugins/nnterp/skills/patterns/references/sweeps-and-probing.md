@@ -34,7 +34,7 @@ prompt = "The Eiffel Tower is in the city of"
 def mixer(layer):
     """The block's sequence mixer: self_attn, or linear_attn on a recurrent block."""
     attn = getattr(layer, "self_attn", None)
-    return attn if attn is not None else layer.linear_attn      # `is not None`: `or` truth-tests the envoy
+    return attn if attn is not None else layer.linear_attn      # decided outside the trace
 
 
 def kl(clean_logits, other_logits):

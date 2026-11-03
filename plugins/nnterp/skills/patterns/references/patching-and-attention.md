@@ -282,9 +282,8 @@ assert best[4] == (11, 1.0)                                              # GPT-2
 `attn_blocks` is decided outside the trace; on a non-hybrid it is every block and the
 code is unchanged, on a Qwen3.5 or Jamba hybrid it skips the recurrent blocks. The
 same search finds induction heads unmodified on GPT-2 (5.1, 5.5, 6.9, 7.2, 7.10) and
-on six other families' trained checkpoints. All the heads of all the prompts go in
-**one invoke**: a pattern read in two invokes of one trace raises
-`TypeError: 'NoneType' object is not subscriptable` (an nnsight bug).
+on six other families' trained checkpoints. All the heads of all the prompts are read in
+one invoke.
 
 ### Editing the pattern
 

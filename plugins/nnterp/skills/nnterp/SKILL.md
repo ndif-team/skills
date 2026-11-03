@@ -14,9 +14,9 @@ mean the same thing everywhere. Everything nnsight does (`trace`, `generate`,
 unchanged; this skill covers only what nnterp adds. Load the `nnsight` skill for
 the underlying API.
 
-Verified on nnterp `0.8-refactor` at `f9d186c` (98 families), nnsight `dev` at `d565f5f8`, transformers 5.17.0 and 5.19.0.
-nnterp needs nnsight `dev` at `d565f5f8` or later: the families alias `o_proj` and `down_proj`
-with dotted rename keys (`"attn.c_proj": "attn.o_proj"` on GPT-2), which older nnsight cannot bind.
+Verified on nnterp `v2.0.0` at `feeb24c` (98 families) with nnsight 0.8.2 and transformers 5.20.2.
+nnterp needs nnsight 0.8 or later: the families alias `o_proj` and `down_proj` with dotted
+rename keys (`"attn.c_proj": "attn.o_proj"` on GPT-2), which older nnsight cannot bind.
 
 ## Orientation
 
@@ -45,7 +45,7 @@ with model.trace(prompt):
     resid = model.layers[5].layer_output.save()                 # the stream leaving the block
     logits = model.logits.save()
 
-assert model.family.__name__ == "nnterp.families.gpt2" and len(nnterp.families.known()) == 98
+assert model.family.__name__ == "nnterp.families.gpt2" and len(nnterp.families.known()) == 99   # 98 families + kimi_k25
 assert (model.num_layers, model.hidden_size, model.num_heads) == (12, 768, 12)
 assert x.shape == attn.shape == mlp.shape == resid.shape == (1, 10, 768)
 assert torch.equal(x + attn + mlp, resid)                       # the contribution identity, exact in fp32
@@ -136,6 +136,41 @@ with model.trace(prompt):
     late_pattern = model.layers[3].self_attn.attention_probabilities.save()   # inside the attention: too late
 ```
 
+When code decides which values to read or edit (a list of sites, a sweep over several
+values per block, a port of code that hooked modules in its own order), sort the sites by
+`model.rank(name, layer)` before the trace instead of keeping a table of what comes first:
+that table differs per family (on Falcon without alibi the values come before the queries;
+a mixture's shared expert runs first on some families and last on others), and `rank` is
+measured on the loaded checkpoint. `model.order(i)` lists block `i`'s values in that order,
+equal ranks sharing one location. Both are asked outside the trace, by `support()`'s
+dotted names; `rank` raises `Unavailable` for a value the checkpoint lacks:
+
+```python
+sites = [("layer_output", 3), ("self_attn.attention_probabilities", 3), ("mlp.mlp_output", 1)]
+sites.sort(key=lambda site: model.rank(*site))                 # (block, r): forward order on any family
+assert sites == [("mlp.mlp_output", 1), ("self_attn.attention_probabilities", 3), ("layer_output", 3)]
+assert model.order(3)["self_attn.attention_probabilities"] < model.order(3)["self_attn.attention_output"]
+
+def value_at(name, layer):                                     # "self_attn.attention_probabilities" -> (envoy, attribute)
+    host = model.layers[layer]
+    *path, attr = name.split(".")
+    for part in path:
+        host = getattr(host, part)
+    return host, attr
+
+saved = []
+with model.trace(prompt):
+    for name, layer in sites:                                  # issued in rank order: no OutOfOrderError
+        host, attr = value_at(name, layer)
+        saved.append(getattr(host, attr).save())
+
+assert [tuple(s.shape) for s in saved] == [(1, 10, 768), (1, 12, 10, 10), (1, 10, 768)]
+```
+
+An edit lands at its value's location as a read does, so a list of edits sorts the same
+way. The ranks also explain a failure after the fact: compare them for the reads around an
+`OutOfOrderError` or a shifted `tracer.iter` list.
+
 Three variants do not raise. Under `generate` + `tracer.iter`, an out-of-order
 read *binds the next step's value*, so per-step lists come back shifted by one. A
 read pinned to a step the run never reaches (past `max_new_tokens`, or that
@@ -144,10 +179,13 @@ names are unbound, so look for the warning when a saved name is missing. On a Ma
 `state_output` returns the next step's state ([references/recurrent-mixers.md](references/recurrent-mixers.md)).
 `skip_layers` consumes `layers[start].input`: read it first or not at all.
 
-**7. Patterns in two invokes of one trace raise.** Reading `attention_probabilities`
-or `attention_scores` in two invokes of one trace fails with
-`TypeError: 'NoneType' object is not subscriptable` (an nnsight bug). Batch the
-prompts in one invoke, or use one trace per prompt.
+**7. On BLOOM and XGLM an attention-interior edit in one invoke reaches every invoke.**
+Their interior is served off `[batch * num_heads, ...]` tensors, so a one-forward sweep with
+one invoke per head gives wrong numbers there (and on XGLM a read returns the whole batch):
+run one trace per head. On the other families two invokes of one trace can both read and
+edit `attention_probabilities` and `attention_scores`; at one location the invoke written
+first is served first, so an empty `tracer.invoke()` after an invoke that edits the scores
+reads the edited pattern.
 
 **8. Overwriting `attention_scores` lifts the causal mask.** The scores are read
 after masking, so `scores[:] = 0` attends to the future. Add to them
@@ -178,16 +216,19 @@ Falcon-Mamba and Jamba with `mamba_ssm` installed, a CPU run crashes with
 `nnterp.chunk_per_token(model)`.
 
 **11. Hybrids: decide `self_attn` vs `linear_attn` outside the trace**, with
-`getattr(layer, "self_attn", None) is not None`. `getattr` inside a trace can trip
-a served value, and `a or b` over envoys truth-tests the module's `__len__`
-(`TypeError`). `linear_attn` is a DeltaNet, a Mamba-1 scan or a Mamba-2 mixer;
+`getattr(layer, "self_attn", None) is not None`; `getattr` inside a trace can trip
+a served value. `linear_attn` is a DeltaNet, a Mamba-1 scan or a Mamba-2 mixer;
 the same names mean different things on each.
 
-**12. `envoys=` keys are module types or native paths, never aliases.** Displace
-a family envoy by keying on its type; `"layers.0.mlp"` matches nothing.
+**12. `envoys=` keys match a module type first, then a path (native, or any alias
+spelling of it).** A family keys its envoys on module types, so a path key such as
+`"layers.0.mlp"` binds but loses to the family's `GPT2MLP` key; displace a family envoy
+by keying on its type.
 
-**13. Import `nnterp` (or `nnsight`) before any `transformers.models...` module**;
-the reverse order segfaults at import.
+**13. A silent segfault at import is pyarrow's, not nnterp's.** On glibc 2.31 (Ubuntu
+20.04) with pyarrow installed, `import transformers.modeling_layers` before nnsight crashes
+in pyarrow's jemalloc thread. Set `JE_ARROW_MALLOC_CONF=background_thread:false`, or import
+`nnterp` (or `nnsight`) first.
 
 **14. A vision-language wrapper loaded without `task="image-text-to-text"` sees no image.**
 The default `task="text-generation"` load has no processor, so the tower never runs:
@@ -282,6 +323,20 @@ print(type(model.layers[0].self_attn).attention_probabilities)
 # (attention_probabilities) -> Pattern [batch num_heads query key]: The attention pattern the values are mixed with
 ```
 
+An axis that is a fact about the model is named after the size that holds it (`hidden_size`,
+`num_heads`, `num_kv_heads`, `head_dim`, `vocab_size`, `num_experts`; the constants `HIDDEN`,
+`HEADS`, ... in `nnterp.components`), so `nnterp.axis_size(envoy, axis)` resolves it to a
+number for a value served on that envoy, the block's own count where blocks differ. Use it
+to check or allocate shapes without naming a family's config key; `batch`, `seq`, `query`
+and `key` are the tensor's own and raise `ValueError`:
+
+```python
+from nnterp import axis_size
+
+assert type(model.layers[0].self_attn).attention_probabilities.dims == ("batch", "num_heads", "query", "key")
+assert axis_size(model.layers[0].self_attn, "num_heads") == 12 and axis_size(model.layers[0], "hidden_size") == 768
+```
+
 **Between and inside the sublayers.** The module boundaries are values too, so a recipe
 that wants the stream after the attention, the normed input of a sublayer, a neuron or a
 head's output at the projection never names a per-family module:
@@ -301,6 +356,13 @@ assert torch.equal(mid, x + attn) and normed.shape == x.shape
 assert premix.shape == (1, 10, 12, 64) and neurons.shape == (1, 10, 3072)
 assert torch.equal(head, logits)                         # GPT-2's head applies nothing after lm_head
 ```
+
+For one head, `attention_premix` is the value to ablate or attribute when the model is not
+loaded eager: it is served under any `attn_implementation`, and on a plain attention it is
+the same tensor as `attention_head_outputs`, which needs eager (on Qwen3-Next and Laguna the
+premix is after the gate, the head outputs before it). For one neuron, `mlp_neurons` is the
+per-neuron coefficient the down projection sums into the stream; `mlp_activation` is
+`act_fn`'s output, which on a gated MLP is not yet multiplied by the up projection.
 
 Each is defined on the pre-norm block; a family whose block is built otherwise points it
 at its own module or marks it unavailable with the reason (a parallel block has no
@@ -464,13 +526,59 @@ python scripts/inspect_family.py <repo_id> [--layer N] [--eager] [--task image-t
 
 ## Families
 
-98 families, `nnterp.families.known()`; an unknown `model_type` raises
-`UnsupportedFamily` before any weights load (the `extending` skill adds
-one). 16 of them also host a vision tower on their image-text-to-text wrappers
-(the family is the text model's: Llava resolves to `llama`); the wrappers table
-is in [references/vision.md](references/vision.md#which-wrappers). What a recipe must survive is grouped by quirk in
-[references/api-reference.md](references/api-reference.md); the full per-family
-table is nnterp's `docs/reference/families.md`.
+98 families; `nnterp.families.known()` lists 99 modules, counting `kimi_k25` (Kimi K2's
+family under its wrapper's name). 16 of the families also host a vision tower on their
+image-text-to-text wrappers (the family is the text model's: Llava resolves to `llama`);
+the wrappers table is in [references/vision.md](references/vision.md#which-wrappers).
+What a recipe must survive is grouped by quirk in
+[references/api-reference.md](references/api-reference.md); the full per-family table is
+nnterp's `docs/reference/families.md`.
+
+A `model_type` with no family loads with the best-effort `nnterp.families.default` and a
+`UserWarning` (`nnterp has no family for model_type ...`): it serves `layer_output`, the
+module boundaries its aliases reach, the root values, the sizes and the attention
+interior, not `attention_output`, `mlp_output`, `layer_mid`, `mlp_norm_output`, a
+mixture's interior or `project_on_vocab`, and raises `UnsupportedFamily` when it cannot
+standardize the checkpoint (no blocks, embedding, final norm or head under a name it
+knows, or a stream of the wrong shape). `nnterp.families.covers(config.model_type)` says
+before a load whether a shipped or registered family covers a checkpoint (`False` means
+the default), and `nnterp.families.resolve(config)` is the family the load would use;
+the `extending` skill adds a family, registers one, or passes one to a single load with
+`family=`.
+
+## The vLLM engine and several GPUs
+
+`nnterp.StandardizedVLLM(repo_id, dispatch=True, ...)` is the same vocabulary, values
+and layouts on nnsight's `VLLM` engine (60 families). Pick it for throughput: many
+concurrent prompts, long generations, a served engine. Stay on `StandardizedTransformer`
+for gradients, an edit of the attention pattern or a decode step's pattern,
+`model.order()` / `rank()`, and the values the engine does not have (`lm_head_output`, a
+gated MLP's `mlp_activation`, and `attention_mask`, since a request is one unpadded
+sequence). Both are `nnterp.Standardized`, so a helper written against the standard
+names takes either. What differs, from the repo's `docs/usage/vllm.md`:
+
+<!-- test: skip -->
+```python
+from nnterp import StandardizedVLLM
+
+vmodel = StandardizedVLLM("HuggingFaceTB/SmolLM2-135M-Instruct", dispatch=True, gpu_memory_utilization=0.2, max_model_len=1024)
+layer = vmodel.layers[12]
+with vmodel.trace("The Eiffel Tower is in the city of", temperature=0.0, max_tokens=1):   # sampling settings on trace
+    stream_in = layer.layer_input.save()          # never layers[i].input: natively the positions
+    stream = layer.layer_output.save()            # [1, tokens, hidden_size]: one prompt per invoke, a private copy
+    vlogits = vmodel.logits.save()                # [1, 1, vocab_size]: the last position only
+```
+
+The pattern and scores are recomputed from the queries and keys (read-only, prefill only),
+and an assigned value must keep the shape it was served with. vLLM itself is the `nnsight`
+plugin's `vllm` skill.
+
+A model too big for one GPU loads sharded with
+`distributed_config=DistributedConfig(tp_size=N)` under `torchrun`: every value reads whole
+on every rank (the attention interior and `mlp_activation` gathered where a rank holds a
+piece, edits split back), except a split mixture's `expert_outputs`, a per-rank partial sum
+(read `routed_output`). Read values unconditionally, never under a branch on the rank
+(`docs/usage/loading.md`; the `nnsight` plugin's `tensor-parallel` skill).
 
 ## References
 

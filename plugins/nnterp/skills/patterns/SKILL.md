@@ -13,8 +13,8 @@ layer_output`), the pattern is `attention_probabilities`, the per-head view is
 `attention_head_outputs` (or `attention_premix` at the output projection, under any
 attention implementation), an MLP's neurons are `mlp_neurons`, and `project_on_vocab`
 is the model's own head. Nothing here indexes `.output[0]` or names `ln_f` versus
-`norm`. Verified on nnterp `0.8-refactor` at `f9d186c`, nnsight `dev` at `d565f5f8`,
-transformers 5.17.0 and 5.19.0; the executed blocks run on
+`norm`. Verified on nnterp `v2.0.0` at `feeb24c` with nnsight 0.8.2 and transformers
+5.20.2; the executed blocks run on
 `openai-community/gpt2`, `HuggingFaceTB/SmolLM2-135M-Instruct` (30 layers, 576
 hidden, 9 heads, 3 kv heads, bf16) and `trl-internal-testing/tiny-LlavaForConditionalGeneration`.
 
@@ -121,9 +121,7 @@ first = pattern[0, :, 1:, 0].mean(-1)                                  # mass on
 ```
 
 Index blocks through `attn_blocks` (decided outside the trace): on a Qwen3.5 or
-Mamba hybrid most blocks have no `self_attn`. Never read the pattern in two invokes
-of one trace (nnsight raises `TypeError: 'NoneType' object is not subscriptable`):
-batch the prompts in one invoke. In a padded batch, pad *query* rows attend
+Mamba hybrid most blocks have no `self_attn`. In a padded batch, pad *query* rows attend
 uniformly: mask them with `attention_mask` before averaging a head metric. Edits,
 the previous-token head search and the sink caveats:
 `references/patching-and-attention.md`.
@@ -174,7 +172,7 @@ with moe_model.trace() as tracer:
         base = moe_model.logits[0, -1].float().log_softmax(-1)[target].save()
     for e in range(moe.num_experts):
         with tracer.invoke(prompt):
-            moe.expert_weights[:] = moe.expert_weights.masked_fill(moe.expert_indices == e, 0)   # in place under several invokes
+            moe.expert_weights[:] = moe.expert_weights.masked_fill(moe.expert_indices == e, 0)   # this invoke's rows only
             rows.append(moe_model.logits[0, -1].float().log_softmax(-1)[target].save())
 effects = torch.stack(rows) - base                  # [experts]: change in log p(target)
 ```
@@ -427,16 +425,17 @@ exact checks.
   `model.session()`, need nothing.
 - **`skip_layers` goes in a trace of its own, or in every invoke**: inside one
   invoke of several it raises `ValueError: A batched .skip() has to cover every row`.
-- **Decide blocks outside the trace with `is not None`**: `getattr(a, ...) or
-  getattr(b, ...)` over envoys raises `TypeError` (an envoy's truth is its module's
-  `__len__`), and `hasattr(envoy, value)` raises instead of answering. Guard on
-  `model.support()`.
+- **Decide blocks outside the trace** (`getattr(layer, "self_attn", None) is not
+  None`): `getattr` inside a trace can trip a served value, and `hasattr(envoy, value)`
+  raises instead of answering. Guard on `model.support()`.
 - **Reads follow the forward within one invoke**: one loop over the layers is
   ordered, two comprehensions over them are not; queries/keys/values before the
   pattern, the pattern before `attention_head_outputs`, both before
   `attention_output`; `model.logits` after the loop. Out of order raises
   `OutOfOrderError`, except under `generate` + `tracer.iter`, where the read binds
-  the *next* step and per-step lists come back shifted by one.
+  the *next* step and per-step lists come back shifted by one. To read, patch or ablate
+  several sites in one invoke, sort them by `model.rank(name, layer)` first (the `nnterp`
+  skill, trap 6).
 - **Overwriting `attention_scores` lifts the causal mask**; add to them instead.
 - **Equal prompt lengths for a layer×position map**: assert
   `len(tokenizer(clean).input_ids) == len(tokenizer(corrupt).input_ids)`.

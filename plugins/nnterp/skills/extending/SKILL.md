@@ -1,20 +1,21 @@
 ---
 name: extending
-description: Extend nnterp when a checkpoint or value is outside what it ships. Load for UnsupportedFamily on a model_type; a family whose attention_output, mlp_output or pattern the base classes locate wrongly (sandwich norms, residual added inside, own attention arithmetic, scaled residual); adding your own value to a block, attention or MLP; finding the .source op names an EProperty path needs; registering a family or overriding a shipped one; a root size or logit step the family spells its own way (`def <size>(model)`, `def project_on_vocab(model, hidden)`); MoE, recurrent-mixer or vision envoys in a new family; a transformers upgrade that moved op names. Covers the family module (RENAME incl. class keys, ENVOYS, Moe/RecurrentMixer/Vision subclasses, ImageScatter, handing values to children), EProperty paths/select/unavailable/sourced, DerivedEProperty, TokenEProperty, StandardizedProperty/Capability, per-module sizes, layouts, envoys=, register() and FamilySuite. To use the standard values, load the nnterp skill.
+description: Extend nnterp when a checkpoint or value is outside what it ships. Load for a model_type with no family ("no family" warning, UnsupportedFamily); a family whose attention_output, mlp_output or pattern the base classes locate wrongly (sandwich norms, residual added inside, own attention arithmetic, scaled residual); adding your own value to a block, attention or MLP; finding the .source op names an EProperty path needs; registering a family or overriding a shipped one; a root size or logit step the family spells its own way (`def <size>(model)`, `def project_on_vocab(model, hidden)`); MoE, recurrent-mixer or vision envoys in a new family; a transformers upgrade that moved op names. Covers the family module (RENAME, ENVOYS, Moe/RecurrentMixer/Vision subclasses, ImageScatter), EProperty paths/select/unavailable/sourced, DerivedEProperty, TokenEProperty, StandardizedProperty/Capability, per-module sizes, layouts, envoys=, register(), family= and FamilySuite. To use the standard values, load the nnterp skill.
 ---
 
 # Extending nnterp
 
-nnterp gives every transformer family one vocabulary (`model.layers[i].self_attn`, `.mlp`,
-`.linear_attn`, `model.norm`, ...) and standard values (`layer_output`,
+nnterp gives every transformer family one vocabulary (`model.layers[i].self_attn`,
+`.mlp`, `.linear_attn`, `model.norm`, ...) and standard values (`layer_output`,
 `attention_output`, `attention_probabilities`, `router_logits`, ...) through one module
 per family under `nnterp/families/`, named after `config.model_type`
-(`len(nnterp.families.known())` is 98). This skill is for when that is not enough: a
-`model_type` nnterp does not ship, a forward that puts a value where the base classes do
-not look, or a value nnterp does not have. Verified on nnterp `0.8-refactor` at `f9d186c`,
-nnsight `dev` at `d565f5f8` (the dotted aliases below need it), transformers 5.17.0 and
-5.19.0, against `openai-community/gpt2` and `HuggingFaceTB/SmolLM2-135M-Instruct`. The
-nnterp repo's pages: `docs/extending/` (`adding-a-family.md`, `overriding-values.md`,
+(`len(nnterp.families.known())` is 99: 98 families, plus `kimi_k25`, Kimi K2's family
+under its wrapper's name). This skill is for when that is not enough: a `model_type`
+nnterp does not ship, a forward that puts a value where the base classes do not look, or
+a value nnterp does not have. Verified on nnterp `v2.0.0` at `feeb24c` with nnsight
+0.8.2 (0.8 or later binds the dotted aliases below) and transformers 5.20.2, against
+`openai-community/gpt2` and `HuggingFaceTB/SmolLM2-135M-Instruct`. The nnterp repo's
+pages: `docs/extending/` (`adding-a-family.md`, `overriding-values.md`,
 `custom-values.md`, `finding-source-ops.md`, `registering.md`),
 `docs/developing/eproperty-internals.md`, `docs/developing/recurrent-mixer-internals.md`
 and `docs/reference/families.md` (every family's overrides).
@@ -23,8 +24,10 @@ and `docs/reference/families.md` (every family's overrides).
 
 1. **Operation names are version-bound.** A release that renames a local or adds a
    binding before an op renames it; `print(envoy.source)` on the version you run.
-2. **Import order.** `import nnterp` (or `nnsight`) before any
-   `from transformers.models... import`; the reverse segfaults at import on this stack.
+2. **A silent segfault at import is pyarrow's.** On glibc 2.31 (Ubuntu 20.04) with
+   pyarrow installed, `import transformers.modeling_layers` before nnsight crashes in
+   pyarrow's jemalloc thread; set `JE_ARROW_MALLOC_CONF=background_thread:false`, or
+   import `nnterp` (or `nnsight`) first.
 3. **`hasattr(envoy, value)` never answers `False`.** Unavailable: it raises
    `nnterp.Unavailable`. Available, outside a trace: a value at the module boundary or
    one `source` level deep raises nnsight's `ValueError: Cannot access ... outside of
@@ -38,13 +41,15 @@ and `docs/reference/families.md` (every family's overrides).
    works; `"../post_attention_layernorm.output"` builds a location nothing serves and
    the trace fails with `OutOfOrderError` on `...h.0.post_attention_layernorm.output.i0`.
    A child segment below the host (`"embed_tokens.output"`) does take aliases.
-6. **`envoys=` matches by module type or native path, never by alias, and type keys
-   win.** `envoys={"attn": X}` on GPT-2 loses to the family's `GPT2Attention` key.
+6. **`envoys=` matches by module type first, then by path (native, or any alias
+   spelling of it), so type keys win.** On GPT-2 `envoys={"layers.0.input_layernorm": X}`
+   binds `X` on `ln_1`, and `envoys={"layers.0.mlp": X}` loses to the family's `GPT2MLP` key.
 7. **A root size or `project_on_vocab` override is a module-level function.** The root
    looks up `model.family.<name>`; a `head_dim` on the family's `Attention` class is the
    per-module size, which the root never reads.
-8. **A child never finds its parent through `interleaver.envoys`.** The family's
-   `Layer.__init__` hands down what the child lacks (`self.mlp.router = self.router`).
+8. **A child's module often lacks what its value needs.** An envoy reaches its parent
+   and the model through `.parent` and `.root`; the family's `Layer.__init__` hands down
+   what the child's module lacks (`self.mlp.router = self.router`).
 9. **`inputs` serves `(args, kwargs)`; `input` the first argument.** `select=` names one
    element of `inputs` (int: positional, str: keyword) and repacks a write.
 10. **`register()` is process-wide, silent, and read at load.** A model built before it
@@ -349,7 +354,7 @@ try:
         logits = registered.logits.save()
     assert torch.allclose(lens, 2 * logits, atol=1e-4)                 # the family's function, bound in the root's place
     assert model.family is gpt2                                        # loaded before register: keeps what it resolved
-    assert "gpt2" in families.REGISTRY and len(families.known()) == 98  # known() lists the shipped modules only
+    assert "gpt2" in families.REGISTRY and len(families.known()) == 99  # known() lists the shipped modules only
 finally:
     del families.REGISTRY["gpt2"]
 
@@ -357,7 +362,35 @@ assert families.lookup("gpt2") is gpt2
 ```
 
 A family that will ship is the same module saved as `nnterp/families/<model_type>.py`
-with the `register` line removed. `rename=` / `envoys=` on one load are the per-model alternative.
+with the `register` line removed.
+
+For one load, pass the family instead of registering it: `StandardizedTransformer(repo_id,
+family=...)` skips the lookup for that model only, touches no `REGISTRY` entry and checks no
+model type, so it suits an experiment that must not change other loads, or a fork whose
+`model_type` is new but whose modules match a shipped family. Any module or object with
+`RENAME` and `ENVOYS` works; a `SimpleNamespace` spread from a shipped family's `vars` is a
+variant of it. `rename=` / `envoys=` add names and envoys on top of whichever family loads:
+
+```python
+variant = types.SimpleNamespace(**{**vars(gpt2), "RENAME": {**gpt2.RENAME, "mlp": ["mlp", "ffn"]}})
+one = StandardizedTransformer("openai-community/gpt2", device="cpu", family=variant)
+assert one.family is variant and one.layers[0].ffn is one.layers[0].mlp
+assert families.lookup("gpt2") is gpt2                   # every other load is unchanged
+```
+
+Before writing a family, ask whether one already covers the checkpoint:
+`families.covers(model_type)` answers without importing it (shipped or registered), and
+`families.resolve(config)` is the family a load of that config would use. A type no family
+covers loads with the best-effort `nnterp.families.default` and a `UserWarning`; read
+`model.support()` to see what the guess serves, and write a family for what it does not
+(the contributions, `project_on_vocab`):
+
+```python
+from transformers import AutoConfig
+
+assert families.covers("gpt2") and not families.covers("nanochat")
+assert families.resolve(AutoConfig.from_pretrained("openai-community/gpt2")) is gpt2
+```
 
 ## The test file
 

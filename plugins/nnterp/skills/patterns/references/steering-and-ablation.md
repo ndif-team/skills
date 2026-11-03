@@ -288,6 +288,10 @@ assert not torch.allclose(clean_probs, knocked)
 
 ### Every head of a block in one forward
 
+One invoke per head, each zeroing its own head's output. On BLOOM and XGLM the attention
+interior is served off `[batch * num_heads, ...]` tensors, so an edit in one invoke reaches
+every invoke's rows and this sweep gives wrong numbers there: run one trace per head.
+
 ```python
 rows = []
 with model.trace() as tracer:
@@ -314,7 +318,7 @@ model = StandardizedTransformer("Qwen/Qwen3.5-9B", device="cpu", dispatch=True, 
 
 def mixer(layer):
     attn = getattr(layer, "self_attn", None)
-    return attn if attn is not None else layer.linear_attn          # `is not None`, never `or`
+    return attn if attn is not None else layer.linear_attn          # decided outside the trace
 
 mixers = [mixer(layer) for layer in model.layers]                   # outside the trace
 

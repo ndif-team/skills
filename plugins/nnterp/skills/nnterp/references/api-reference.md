@@ -26,7 +26,7 @@ with model.trace(prompt):
 torch.testing.assert_close(x + attn + mlp, resid)
 assert pattern.shape == (1, 12, n, n)
 assert set(nnterp.__all__) >= {"StandardizedTransformer", "Moe", "SelectiveScan", "StateSpace", "Vision", "route_kernels", "chunk_per_token"}
-assert len(nnterp.families.known()) == 98
+assert len(nnterp.families.known()) == 99      # 98 families + kimi_k25, Kimi K2's under its wrapper's name
 ```
 
 ## Top-level names
@@ -34,6 +34,8 @@ assert len(nnterp.families.known()) == 98
 | name | what it is |
 |---|---|
 | `StandardizedTransformer` | the model class: a `TransformersModel` renamed to the standard vocabulary and wrapped in the family's envoys |
+| `StandardizedVLLM` | the same over nnsight's `VLLM` engine, families from `nnterp.families.vllm` ([SKILL.md](../SKILL.md#the-vllm-engine-and-several-gpus)) |
+| `Standardized` | what the two share (sizes, `support()`, the methods); `isinstance(model, Standardized)` accepts either engine |
 | `Layer`, `Attention`, `Mlp`, `Moe` | the base envoys a family subclasses; the hosts of the standard values |
 | `RecurrentMixer`, `LinearAttention`, `SelectiveScan`, `StateSpace` | the recurrent-mixer base and its DeltaNet, Mamba-1 and Mamba-2 subclasses |
 | `Vision` | a vision-language wrapper's tower root, `model.vision`; its block and wrapper envoys are in `nnterp.components` (below) |
@@ -41,6 +43,7 @@ assert len(nnterp.families.known()) == 98
 | `EProperty`, `DerivedEProperty`, `unavailable` | the descriptors a value is made of, and a value a family lacks (the `extending` skill); `TokenEProperty` is in `nnterp.components` |
 | `route_kernels`, `route_delta_rule`, `chunk_per_token` | the recurrent kernel switch (process-wide), its DeltaNet spelling, Mamba-2's per-token chunking (per model) |
 | `Unavailable`, `UnsupportedFamily` | the two exceptions nnterp raises itself |
+| `axis_size(envoy, axis)` | the size of a layout axis that is a fact about the model (`num_heads`, `hidden_size`, ...) for a value served on `envoy` |
 
 `nnterp.families`, `nnterp.components`, `nnterp.standardized`, `nnterp.prompt_utils`
 and `nnterp.nnsight_utils` are modules.
@@ -48,20 +51,22 @@ and `nnterp.nnsight_utils` are modules.
 ## `StandardizedTransformer`
 
 ```
-StandardizedTransformer(repo_id, *args, rename=None, envoys=None, tokenizer_kwargs=None, **kwargs)
+StandardizedTransformer(repo_id, *args, family=None, rename=None, envoys=None, tokenizer_kwargs=None, **kwargs)
 ```
 
 | argument | meaning |
 |---|---|
 | `repo_id` | a Hub repo id, or an already-loaded `torch.nn.Module` (its own `config` is read) |
+| `family` | the family for this load instead of the one looked up: a module or object with `RENAME` and `ENVOYS` (the `extending` skill); nothing is registered |
 | `rename` | extra nnsight aliases merged over the family's `RENAME`; a key given here wins |
-| `envoys` | extra `envoys=` entries merged over the family's `ENVOYS`; keys are module **types** or **native** paths, never aliases; type keys are tried first |
+| `envoys` | extra `envoys=` entries merged over the family's `ENVOYS`; keys are module **types** or paths (native, or any alias spelling); type keys are tried first, so a family's type key wins over a path key |
 | `tokenizer_kwargs` | attributes set on the loaded tokenizer: `{"padding_side": "left", "pad_token": ...}` |
-| `**kwargs` | to `TransformersModel`: `dispatch=True`, `device="cpu"` / `"cuda"` (`device_map="cpu"` is ignored by the text-generation pipeline), `attn_implementation="eager"`, `experts_implementation=`, `dtype=`, `revision=`, `trust_remote_code=` |
+| `**kwargs` | to `TransformersModel`: `dispatch=True`, `device="cpu"` / `"cuda"` (`device_map="cpu"` is ignored by the text-generation pipeline), `attn_implementation="eager"`, `experts_implementation=`, `dtype=`, `revision=`, `trust_remote_code=`, `distributed_config=DistributedConfig(tp_size=N)` under `torchrun` |
 
-The constructor reads the config first (a multimodal config's `text_config`),
-looks up `config.model_type` in `nnterp.families`, and raises `UnsupportedFamily`
-(a `ValueError` naming the known types) before any weights load. Neither
+The constructor reads the config first (a multimodal config's `text_config`) and
+resolves the family (`nnterp.families.resolve`); a `model_type` with no family loads
+with the best-effort `default` family and a `UserWarning`, and `UnsupportedFamily` is
+raised before any weights load only when the default cannot standardize it. Neither
 `attn_implementation` nor `experts_implementation` is forced.
 
 ### Root values (inside a trace)
@@ -86,6 +91,8 @@ looks up `config.model_type` in `nnterp.families`, and raises `UnsupportedFamily
 | `get_topk_closest_tokens(hidden, k=5)` | outside, on a saved `[..., hidden]` tensor | `project_on_vocab`, softmax, `{decoded token: probability}` per position; byte tokens decoding alike collapse |
 | `probs_to_dict(probs, k=5)` | outside | the `k` most likely tokens of one `[vocab]` distribution, same keying |
 | `support(layer=None)` | outside; nothing runs | every root and block value, `None` or `{layer: reason}`; with `layer`, that block flat |
+| `order(layer=None)` | outside; one probe `scan` on first use, then kept | the available values in forward order, `{name: rank}`; equal ranks are one location ([availability-and-support.md](availability-and-support.md#forward-order-order-and-rank)) |
+| `rank(name, layer=None)` | outside; as `order` | a sortable `(side, r)`: sort `(value, block)` sites by it to put reads and edits in forward order; `Unavailable` / `KeyError` for a value the checkpoint lacks / no value of that name |
 
 ### Sizes
 
@@ -138,9 +145,12 @@ Every value's descriptor exposes `.layout` (the named alias), `.dims`,
 
 | name | what |
 |---|---|
-| `lookup(model_type)` | the family module: a registered one, else `nnterp.families.<model_type>` imported on first use; `UnsupportedFamily` otherwise |
+| `lookup(model_type)` | the family module: a registered one, else `nnterp.families.<model_type>` imported on first use, else `default` with a warning |
+| `resolve(config)` | the family a load of that config uses: its own `model_type`'s where a family covers it, else its text config's |
+| `covers(model_type)` | whether a shipped or registered family covers the type, without importing it; `False` means a load gets the best-effort default |
+| `default` | the best-effort family for a `model_type` with none: a name guess checked at load; no contributions or `project_on_vocab` |
 | `register(family, *model_types)` | add a family (anything with `RENAME` and `ENVOYS`) for the given model types, or for the type its module name ends in; consulted before the shipped modules, so it also overrides one |
-| `known()` | the 98 shipped model types (registered ones are not listed) |
+| `known()` | the 99 shipped model types: 98 families, plus `kimi_k25`, which re-exports `kimi_k2` (registered ones are not listed) |
 | `all_families()` | every shipped family, imported |
 | `REGISTRY` | `model_type -> family` for what `register` added |
 
@@ -161,7 +171,7 @@ Every value's descriptor exposes `.layout` (the named alias), `.dims`,
 | exception | raised when |
 |---|---|
 | `nnterp.Unavailable` (`RuntimeError`) | a value this checkpoint lacks is read or written, before the model runs; `hasattr` raises it too |
-| `nnterp.UnsupportedFamily` (`ValueError`) | the `model_type` has no family module and nothing registered |
+| `nnterp.UnsupportedFamily` (`ValueError`) | the `model_type` has no family and the best-effort default cannot standardize it (no blocks, embedding, final norm or head under a name it knows, or a stream of the wrong shape) |
 | `nnsight...SourceNotAvailable` | a source-located value's operation is not in this run's forward (another transformers release, an unexpected branch); also `hasattr` on a nested-source value outside a trace |
 | `nnsight...OutOfOrderError` | a value read after the model ran past it; the message names an internal location, not the value |
 | `AttributeError` | assigning a read-only value (`next_token_probs`, `input_size`, `states`, any `DerivedEProperty`); a mixture's `num_experts` / `top_k` / `SCORING` on a dense block |

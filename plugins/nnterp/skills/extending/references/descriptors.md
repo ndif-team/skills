@@ -676,13 +676,14 @@ Under two invokes each reads its own `[1, seq, 64]` rows; assigning
 
 ## A block hands its children what their modules lack
 
-An envoy knows its own path, not its parent, and a child module often lacks what its
-value needs: Gemma-4's mixture is hosted on `mlp` but its `router` and `experts` are the
-block's children; GraniteMoE's mixture module keeps no config, so no
-`residual_multiplier`. The family's `Layer.__init__` hands them down once the children
-exist (`self.mlp.router = self.router`, `hand_residual_multiplier(self)`). Never reach a
-parent through `interleaver.envoys`. On GPT-2 the MLP module has no config, so a
-per-checkpoint predicate on an `Mlp` reads what its block handed it:
+An envoy reaches the envoy that holds it and the model through `.parent` and `.root`,
+but a child module often lacks what its value needs: Gemma-4's mixture is hosted on
+`mlp` but its `router` and `experts` are the block's children; GraniteMoE's mixture
+module keeps no config, so no `residual_multiplier`. The family's `Layer.__init__`
+hands them down once the children exist (`self.mlp.router = self.router`,
+`hand_residual_multiplier(self)`). Never reach a parent through `interleaver.envoys`.
+On GPT-2 the MLP module has no config, so a per-checkpoint predicate on an `Mlp` reads
+what its block handed it:
 
 ```python
 def not_gelu_new(self):
