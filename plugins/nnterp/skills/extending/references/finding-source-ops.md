@@ -237,7 +237,11 @@ softmax, so its family reads `attention_scores` at
   `rotary_embedding` (where cos and sin come from) or `apply_rotary` (the arithmetic), so
   `rotate` keeps giving the served rotated values.
 - **Head outputs** are the last matmul: the interface call's output element 0,
-  `torch_bmm_0` on BLOOM, `torch_matmul_1` on MPT.
+  `torch_bmm_0` on BLOOM, `torch_matmul_1` on MPT. Where one call takes the queries, keys
+  and values as positional arguments and returns the head outputs first (the interface
+  call, GPT-J's `self__attn_0`), reading all four at that call is what lets
+  `Attention.interface` re-run it (`attention_call`); a family read at other operations
+  reports `OWN_ARITHMETIC` for `interface` by itself.
 - **Prefer a real submodule** when one exposes the value: `mlp.output` beats
   `source.self_c_proj_0.output`; it is cheaper and stable across releases.
 

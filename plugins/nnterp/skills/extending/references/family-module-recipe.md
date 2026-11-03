@@ -1224,6 +1224,10 @@ What every subclass asserts:
   the queries and keys before the rotary (every tower reports them, `TOWER_NO_ROTARY` in
   `suite.py`, without the family saying so) and `EXPECTED_VISION_UNAVAILABLE`, and
   `model.support()` carries them as `vision.*` rows;
+- on a tower block that serves `self_attn.interface`, the call on the served queries, keys
+  and values gives its head outputs and pattern bit for bit
+  (`test_tower_interface_reproduces_heads_and_pattern`; skipped on a tower that makes one
+  call per image, whose `EXPECTED_VISION_UNAVAILABLE` lists `self_attn.interface`);
 - `image_token_mask == (input_ids == image_token_id)`, its count is `image_features.shape[0]`,
   and `layers[0].input[image_token_mask] == image_features` exactly, with one image and with
   two images of different shapes in one invoke;
@@ -1283,7 +1287,7 @@ class TestGPT2(FamilySuite):
         config.reorder_and_upcast_attn = True
         try:
             support = model.support()
-            assert all("reorder_and_upcast_attn" in support[f"self_attn.{name}"][0] for name in ("attention_probabilities", "attention_queries"))
+            assert all("reorder_and_upcast_attn" in support[f"self_attn.{name}"][0] for name in ("attention_probabilities", "attention_queries", "interface"))
         finally:
             config.reorder_and_upcast_attn = False
 ```
@@ -1300,6 +1304,7 @@ import tempfile
 import torch
 from suite import NO_ROTARY, FamilySuite, rows, PROMPT
 
+from nnterp.components import OWN_ARITHMETIC
 from nnterp.families import falcon
 
 
@@ -1308,6 +1313,7 @@ class TestFalcon(FamilySuite):
     FAMILY = falcon
     NATIVE = rows("transformer", "h", "word_embeddings", "ln_f", attn="self_attention", ln2=None)
     MLP_NORM = "input_layernorm"             # parallel (7B layout)
+    EXPECTED_UNAVAILABLE = {"layer_mid": "a parallel block", "self_attn.interface": OWN_ARITHMETIC}
 
     def test_mlp_output_is_a_copy_the_block_does_not_touch(self, model):
         """The block adds the attention into the MLP's live tensor in place; the value is a copy."""
@@ -1356,7 +1362,7 @@ class TestFalconAlibi(FamilySuite):
     FAMILY = falcon
     NATIVE = rows("transformer", "h", "word_embeddings", "ln_f", attn="self_attention", ln2=None)
     MLP_NORM = "input_layernorm"
-    EXPECTED_UNAVAILABLE = {**NO_ROTARY, "layer_mid": "a parallel block"}
+    EXPECTED_UNAVAILABLE = {**NO_ROTARY, "layer_mid": "a parallel block", "self_attn.interface": OWN_ARITHMETIC}
 
     def test_alibi_branch(self, model):
         assert model.layers[0].self_attn._module.config.alibi
@@ -1376,6 +1382,7 @@ class TestFalcon40B(FamilySuite):
     ATTENTION_NORM = "ln_attn"
     MLP_NORM = "ln_mlp"
     MLP_NORM_BEFORE_ATTENTION = True   # both norms are taken from the block input before either sublayer runs
+    EXPECTED_UNAVAILABLE = {"layer_mid": "a parallel block", "self_attn.interface": OWN_ARITHMETIC}
 
     def test_new_decoder_architecture(self, model):
         assert model.config.new_decoder_architecture
@@ -1396,8 +1403,8 @@ not have (`ln2=None` on a parallel block, `mlp=None` on OPT). `LLAMA_ROWS` is
 | `REPO` | The pinned tiny checkpoint, offline-cached. |
 | `FAMILY` | The family module the checkpoint must resolve to (`model.family is FAMILY`). |
 | `NATIVE` | Standard path to native path; each pair must be the same envoy, and every `layers.0.*` name must exist on every block. |
-| `EXPECTED_UNAVAILABLE` | `support()` key to a substring of the reason, for values some block lacks (a hybrid: `"self_attn.attention_output": "no self_attn module"` for its linear blocks); every other value must report `None`. `NO_ROTARY` (`suite.py`) is the entry of a family without a rotary embedding (GPT-2, OPT, BLOOM, ...) or with NoPE blocks (Cohere 2, SmolLM3, ...). A module no block has (OPT's `mlp`) is not in `support()` and needs no entry. Default `{}`. |
-| `REFUSES_IN_PLACE_QKV` | torch refuses in-place edits on q/k/v that are views out of a `split`/`chunk` (GPT-2, MPT); the suite expects a `RuntimeError` matching `view` and skips the in-place query edit. |
+| `EXPECTED_UNAVAILABLE` | `support()` key to a substring of the reason, for values some block lacks (a hybrid: `"self_attn.attention_output": "no self_attn module"` for its linear blocks); every other value must report `None`. `NO_ROTARY` (`suite.py`) is the entry of a family without a rotary embedding (GPT-2, OPT, BLOOM, ...) or with NoPE blocks (Cohere 2, SmolLM3, ...); `"self_attn.interface": OWN_ARITHMETIC` (`nnterp.components`) that of a family whose queries, keys and values are not one call's arguments (BLOOM, MPT, Falcon, XGLM, DeepSeek-V4). A module no block has (OPT's `mlp`) is not in `support()` and needs no entry. Default `{}`. |
+| `REFUSES_IN_PLACE_QKV` | torch refuses in-place edits on queries that are views out of a `split`/`chunk` (GPT-2, GPT-BigCode, MPT); the suite expects a `RuntimeError` matching `view` on the in-place query edit and skips it. |
 | `ATTENTION_SINK` | The pattern's rows sum to less than one (GPT-OSS). |
 | `KV_HEADS_EXPANDED` | Keys and values are read already expanded to `num_heads` (latent attention; Falcon's 40B layout). |
 | `MLP_WIDTH_KEY` | A config key naming the first block's MLP width when it is not `intermediate_size` (an all-MoE family's `moe_intermediate_size`). |
@@ -1429,6 +1436,7 @@ HunYuan's and Llama 4's post-rotary norms, JetMoE's tiling of the keys).
 | Sublayer interiors (`test_sublayer_interiors`) | `attention_premix` is `[..., num_heads, head_dim]` and equals `attention_head_outputs` unless `PREMIX_IS_HEAD_OUTPUTS` is off; `mlp_activation` and `mlp_neurons` are `intermediate_size` wide, the neurons `act * up_proj.output` on a gated MLP and the activation on a plain one unless `NEURONS_FROM_ACTIVATION` is off; zeroing each moves the logits. |
 | The pattern | shape `[batch, num_heads, seq, seq]`, `lm_head.weight`'s dtype, rows sum to one (or lie in `(0, 1)` with `ATTENTION_SINK`), lower-triangular; first and last blocks differ and two traces agree; a random pattern and a zeroed head both move the logits (a read can be causally inert); every available value on `FAMILY.Attention` whose key reads inside the forward (`inside_forward()`) reads a tensor on every attention block, one trace per value. |
 | The interior | q `[b, heads, s, qk_head_dim]`, k/v `[b, kv_heads, s, ·]`, scores and pattern `[b, heads, s, s]`, head outputs `[b, s, heads, ·]`, `pattern_from_scores(scores) == pattern`; zeroing each of the five interior values moves the logits and zeroed head outputs give a position-independent contribution; in-place zeroing of scores and head outputs moves the logits, queries too unless `REFUSES_IN_PLACE_QKV`. |
+| Calling the attention function again (skipped where no block serves `interface`) | on every attention block, in one trace, `interface(attention_queries, attention_keys, attention_values)` equals `attention_head_outputs` and `attention_probabilities` bit for bit (`test_interface_reproduces_heads_and_pattern`); the same on a padded batch in one invoke, pad rows included, and to rounding under two invokes (`test_interface_on_a_padded_batch`); read once and called twice, a call on keys and values of key/value head 0 patched moves exactly the query heads `h < num_heads // num_kv_heads`, and written into the last row of `attention_head_outputs` it moves the attention's output at the last position and nowhere else (`test_interface_patch_reaches_its_group_alone`); under `generate` and `tracer.iter[:2]` it reproduces both values on the prompt and on a decode step (`test_interface_on_decode_steps`). |
 | The rotary embedding | on the first block with a rotary, `self_attn.rotate(prerope, arange(seq))` equals `attention_queries` / `attention_keys` bit for bit, in their dtype (through `rotated_as_served`); assigning position 0's value before the rotary at the last position leaves every other position's rotated value bit-identical and makes the last one `rotate(vector, [last])`; on every block whose `no_rotary()` gives a reason, `support()` gives the same one and `rotate` raises `Unavailable` with it; `model.order(i)` and `model.rank` put both values before the rotated ones. |
 | Methods | `skip_layers(1, last)` hands block 0's output straight through and the logits equal `project_on_vocab` of it; `skip_with=zeros` zeroes block 0's output and block 1's input; `steer` moves the last position by `2 * vector` and nothing else; `project_on_vocab` on the last block equals `logits`, `get_topk_closest_tokens(k=3)` returns one dict of three entries summing to at most one. |
 | Layouts | every value with a `layout` on the root, a block, its attention, its MLP and one mixer is an instance of its named layout (`Residual`, `Pattern`, ...: a `jaxtyping` type) with each named axis matching the model's sizes; one value per trace; at least 11 checked. |

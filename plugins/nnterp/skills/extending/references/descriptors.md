@@ -263,10 +263,13 @@ The shipped predicates: `needs_eager` (the module's `config._attn_implementation
 defines as `needs_eager` and a family may override once for every interface value),
 `rotary_reason` (calls `self.no_rotary()`, `None` on the base `Attention`: the predicate of
 `attention_queries_prerope` and `attention_keys_prerope`, which `Attention.rotate` asks
-too), and `NOT_ON_INTERFACE`, the reason string for an interface value a family with its
-own arithmetic has not mapped. On GPT-2 `self._module.config` exists on the attention module
-and not on `GPT2MLP`; a predicate on another host reads the config from where that
-module keeps it.
+too), `call_reason` (in `nnterp.components.attention`: the predicate of `Attention.interface`,
+the reasons of `attention_queries`, `attention_keys`, `attention_values`,
+`attention_head_outputs` and `attention_probabilities` first, then `OWN_ARITHMETIC` where
+`attention_call` finds no call), and `NOT_ON_INTERFACE`, the reason string for an interface
+value a family with its own arithmetic has not mapped. On GPT-2 `self._module.config` exists
+on the attention module and not on `GPT2MLP`; a predicate on another host reads the config
+from where that module keeps it.
 
 `no_rotary()` is the one override for a family without a rotary embedding, or with blocks
 that skip it, read off the module where the block decides:
@@ -643,6 +646,12 @@ Reading through other values means forward order applies to the values it reads:
 the envoy only, not a served value; it is stored as `_preprocess` so `layout` can read its
 annotation, and never called as a preprocess.
 
+`Attention.interface` is the shipped one whose result is a function: its compute reads the
+arguments of the call `attention_call` names (where the queries, keys and values are) and
+returns `f(q, k, v) -> (head_outputs, pattern)`, which takes the call's function on its
+first call, so the forward-order rule covers the call too (before the scores, the pattern
+and the head outputs). Its `unavailable=` is `call_reason`.
+
 ## `TokenEProperty`: a value held flat over tokens
 
 A mixture of experts routes `[batch * seq, ...]` tensors: the router's logits, the
@@ -796,6 +805,9 @@ size and `project_on_vocab` functions too. Which shipped families define which:
 | `Attention.rotary_embedding(self, x, position_ids)` / `Attention.apply_rotary(self, x, embedding)` | methods | the `(cos, sin)` the block's rotary call is given, and the family's apply function: what `rotate` runs; override where the family rotates another way (GPT-J's sinusoid table, Granite-SWA's per-theta `rotary_embs`, Phi's `rotary_ndims` slice, Llama 4's complex `apply_rotary_emb`) |
 | `ROTARY` | `nnterp.components` | `"apply_rotary_pos_emb_0"`: the shared rotary call the base reads the values before the rotary at (its first two arguments) |
 | `NOT_ON_INTERFACE` | `nnterp.components` | the reason for `attention_scores = unavailable(NOT_ON_INTERFACE)` on a family with its own arithmetic |
+| `attention_call(envoy)` | `nnterp.components.attention` | `(path, (q, k, v positions))` of the call `Attention.interface` re-runs, read off the class's keys (so it answers outside a trace): the operation whose positional arguments `attention_queries`, `attention_keys` and `attention_values` are, when its first return is `attention_head_outputs`; `None` where there is none. A family declares nothing for it |
+| `call_reason(envoy)` | `nnterp.components.attention` | the `unavailable=` of `Attention.interface`: the five values' reasons, then `OWN_ARITHMETIC` where `attention_call` is `None` |
+| `OWN_ARITHMETIC` | `nnterp.components` | `call_reason`'s own reason (`the queries, keys and values are not the arguments of one call in this forward that returns the head outputs ...`): BLOOM, MPT, Falcon, XGLM, DeepSeek-V4 |
 | `seq_first(t)` | `nnterp.components` | `t.transpose(1, 2)`: `[batch, heads, seq, d]` to `[batch, seq, heads, d]` as a view, its own inverse |
 | `first_tensor(v)` / `rewrap(envoy, t)` | `nnterp.components` | a tuple module's first element on read; the tensor back in its tuple on write |
 | `per_call(envoy, key, compute)` / `pinned(n)` | `nnterp.components` | one computation per module call; pin the next read to occurrence `n` |

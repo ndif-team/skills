@@ -14,7 +14,7 @@ mean the same thing everywhere. Everything nnsight does (`trace`, `generate`,
 unchanged; this skill covers only what nnterp adds. Load the `nnsight` skill for
 the underlying API.
 
-Verified on nnterp `v2.0.0` at `1a310b7` (98 families) with nnsight 0.8.2 and transformers 5.20.2.
+Verified on nnterp `v2.0.0` at `3fb2cc0` (98 families) with nnsight 0.8.2 and transformers 5.20.2.
 nnterp needs nnsight 0.8 or later: the families alias `o_proj` and `down_proj` with dotted
 rename keys (`"attn.c_proj": "attn.o_proj"` on GPT-2), which older nnsight cannot bind.
 
@@ -121,8 +121,8 @@ DeepSeek-V4): [references/values.md](references/values.md).
 
 **6. Reads follow the forward, within one invoke.** `input_ids` before any
 block; within a block `layer_input`, `attention_norm_output`, the attention's
-interior (the queries and keys before the rotary, then the queries, scores,
-`attention_probabilities`, `attention_premix`),
+interior (the queries and keys before the rotary, then the queries, keys, values and
+`interface`, scores, `attention_probabilities`, `attention_premix`),
 `attention_output`, `layer_mid`, `mlp_norm_output`, `mlp_input`, `mlp_activation`,
 `mlp_neurons`, `mlp_output`, `layer_output` (`model.order(i)` lists a block's
 values in forward order); block 3 before block 5; `final_norm_output`,
@@ -192,10 +192,11 @@ reads the edited pattern.
 after masking, so `scores[:] = 0` attends to the future. Add to them
 (`scores[..., k] += c`, or `-inf` to block a key) instead.
 
-**9. GPT-2, GPT-BigCode and MPT queries/keys/values are split views**; so are
-Mamba-1's, and before the rotary CodeGen's, DBRX's and GPT-NeoX's queries and keys,
-JetMoE's keys and latent attention's shared rope key. torch refuses an in-place edit
-with grad on; assign instead:
+**9. GPT-2's and GPT-BigCode's queries, and MPT's queries, keys and values, are split
+views torch will not edit in place**; so are Mamba-1's, and before the rotary CodeGen's,
+DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent attention's shared rope
+key. torch refuses an in-place edit with grad on; assign instead (or edit under
+`torch.no_grad()`):
 
 <!-- test: expect-error RuntimeError -->
 ```python
@@ -210,6 +211,8 @@ with model.trace(prompt):
 
 assert not torch.allclose(edited, logits)
 ```
+
+GPT-2's and GPT-BigCode's keys and values take an in-place edit, and it lands.
 
 **10. Recurrent mixers route kernels before the first trace.** On Mamba,
 Falcon-Mamba and Jamba with `mamba_ssm` installed, a CPU run crashes with
@@ -266,6 +269,18 @@ Gemma norm between the projection and the rotary. `self_attn.rotate` is the rota
 alone: HunYuan and Llama 4 norm the queries and keys after it, JetMoE tiles its keys,
 Ministral 3 scales its queries, so there `attention_queries` is not `rotate(...)` itself.
 
+**18. Read `self_attn.interface` once per forward, and call it before the scores.**
+Reading it takes the attention call's arguments, so it goes where the queries, keys and
+values are, in any order with them; calling it takes the function the forward is about to
+run, so call it before reading or writing the scores, the pattern or the head outputs. Call
+the result as often as you need. A second read after a call, or a call after those reads,
+asks for a point the forward has passed and raises `OutOfOrderError`, under `tracer.iter`
+too; a first read placed after them under `tracer.iter` binds the next step's call without
+an error, as any late read does there (trap 6). Within one invoke, a padded batch included,
+it reproduces the model bit for bit; across invokes only to rounding (about `1e-8` in
+float32), so put prompts in one invoke (`model.trace([a, b])`) when that matters
+([Calling the attention function again](#calling-the-attention-function-again-interface)).
+
 ## The vocabulary
 
 Llama's block names, with the containers lifted out of the inner `.model`:
@@ -310,6 +325,7 @@ neither attention nor MLP.
 | `attention_scores` | `self_attn` | `Pattern` | masked, scaled, pre-softmax; eager |
 | `attention_probabilities` | `self_attn` | `Pattern` | the tensor the values are mixed with; eager |
 | `attention_head_outputs` | `self_attn` | `HeadOutputs` | `[batch, seq, heads, head_dim]`, before the output projection; eager |
+| `interface` | `self_attn` | a function, `f(Queries, Keys, Values) -> (HeadOutputs, Pattern)` | the attention function the block called, bound to this call's mask, scale, dropout and sliding window; read-only; eager; [below](#calling-the-attention-function-again-interface) |
 | `router_logits`, `expert_weights`, `expert_indices`, `expert_outputs`, `routed_output`, `shared_expert_output` | `mlp` on a `Moe` | `RouterLogits`, `ExpertWeights`, ... | [references/mixture-of-experts.md](references/mixture-of-experts.md) |
 | `state_input`, `state_output`, `state`, `states`, `decays`, `betas`, ... | `linear_attn` | `State`, `Gates`, `Scan*`, `SSD*` | [references/recurrent-mixers.md](references/recurrent-mixers.md) |
 | `per_layer_output` | `layers[i]` (Gemma-4 E2B/E4B) | `Residual` | the block's third add |
@@ -488,9 +504,11 @@ assert not torch.allclose(changed, logits) and not torch.allclose(zeroed, logits
 
 On Granite (and GraniteMoE, ZAYA) a contribution is a scaled copy divided back
 on write: in bf16 an edit at one position shifts every position by up to half the
-edit's own effect; compare such edits in float32. On Gemma-4 an in-place edit of a
-KV-sharing source block's keys or values reaches every block that borrows them;
-assign to keep it local.
+edit's own effect; compare such edits in float32. On Gemma-4 `attention_keys` and
+`attention_values` are served as a copy private to each block: an edit, in place or by
+assignment, changes what that block attends with and nothing else; to change what every
+borrower of a KV-sharing source block attends with, edit the source block's `k_proj` /
+`v_proj` output.
 
 ## Before the rotary embedding
 
@@ -568,6 +586,103 @@ attention (DeepSeek-V2/V3, Kimi-K2, GLM-4.7-Flash): read them, and rotate, on a
 scaling and `generate`, and the vLLM recipe:
 [references/attention-interior.md](references/attention-interior.md#before-the-rotary-embedding-attention_queries_prerope-attention_keys_prerope-rotate).
 
+## Calling the attention function again: `interface`
+
+To recompute a block's attention with other keys or values, or to patch what some heads
+read without touching the KV cache, call the block's own attention function.
+`model.layers[i].self_attn.interface` is the function this block's forward called
+(`eager_attention_forward`, or the family's own: Gemma-2's with its logit softcap, GPT-OSS's
+with its sink column; the `_attn` method on GPT-J, GPT-Neo, CodeGen and GPT-NeoX-Japanese),
+bound to everything else the call received this time: the mask, the scale, the dropout, the
+sliding window. `attn.interface(q, k, v)` takes tensors in the layouts of
+`attention_queries`, `attention_keys` and `attention_values` (keys and values `num_kv_heads`
+wide: it repeats them for each group itself), with the live call's query and key lengths,
+and returns `(head_outputs, pattern)` in the layouts of `attention_head_outputs` and
+`attention_probabilities`; on the served tensors it is those two values bit for bit. It
+computes and returns: nothing reaches the model, the cache, the other heads or the other
+rows until you write a result. GPT-2 serves it (`model`, loaded eager above); its queries are
+split views (trap 9), so edit a clone, as below:
+
+```python
+attn = model.layers[5].self_attn
+fact = "The capital of France is"
+
+with model.trace(fact):
+    q, k, v = attn.attention_queries, attn.attention_keys, attn.attention_values
+    heads, pattern = attn.interface(q, k, v)         # the function this call ran, run again on the same tensors
+    probs = attn.attention_probabilities.save()      # read after the call: the pattern comes later in the forward
+    served = attn.attention_head_outputs.save()
+    heads, pattern = heads.save(), pattern.save()
+
+assert torch.equal(heads, served) and torch.equal(pattern, probs)   # the same function on the same shapes
+assert heads.shape == (1, 5, 12, 64) and pattern.shape == (1, 12, 5, 5)
+```
+
+Use it instead of writing `attention_keys` or `attention_values`:
+
+- **For an edit of keys or values that must not reach the KV cache or the other heads of a
+  group.** Writing `attention_keys` changes the keys every query head of the group reads, at
+  every query row, and under `generate` an in-place edit stays in the cache for every later
+  step (an assignment replaces the argument of that one forward). Call `interface` on
+  edited copies instead and write only the heads you chose.
+- **For a per-row patch**: compute with the edited tensors, then write the rows you want of
+  `attention_head_outputs` (the last one, for the prediction).
+- **For a recompute that must match the model bit for bit.** A hand-written
+  `softmax(q @ k.T * scale)` needs the module's scale, misses Gemma-2's softcap and a sink
+  column, and rounds differently in bf16 when its matmuls have other shapes than the
+  model's; the call runs the model's function on the model's shapes.
+
+Read it once and call the result as often as you need (trap 18). Under grouped-query
+attention a key/value head edited in a copy moves the whole group in the result, and only
+the heads you write reach the model; SmolLM2 has three query heads per key/value head
+(`llama`, loaded above):
+
+```python
+attn = llama.layers[14].self_attn
+
+with llama.trace(fact):
+    interface = attn.interface                       # read once, with the queries, keys and values
+    q, k, v = attn.attention_queries, attn.attention_keys, attn.attention_values
+    k2 = k.clone()                                   # a copy: k is what the model attends with (and, under generate, the cache)
+    k2[:, 1, 0] = 0                                  # key/value head 1, position 0
+    clean, _ = interface(q, k, v)
+    edited, _ = interface(q, k2, v)                  # called again: same mask, same scale
+    attn.attention_head_outputs[:, -1, 4] = edited[:, -1, 4]   # head 4, last row: the only write
+    moved = edited.ne(clean).flatten(0, 1).any(0).any(-1).save()
+
+assert moved.nonzero().flatten().tolist() == [3, 4, 5]   # the result moves for the whole group; only head 4 is written
+```
+
+A key or query edited before the rotary goes in rotated for its position,
+`interface(q, attn.rotate(k_prerope, positions), v)`, with `attention_keys_prerope` read
+first, since the forward reaches it before the interface
+([Before the rotary embedding](#before-the-rotary-embedding)). Inside `tracer.iter` it is
+that step's call: on a decode step the queries have one row, the keys and values are the
+whole cache, and the mask is the step's. On a model split tensor-parallel it takes the
+gathered queries, keys and values and runs every head on every rank. In training mode with
+a dropout the call draws its own mask. Chosen heads reading another run's keys and values
+over a span, on the prompt and on every `generate` step, is the `patterns` skill's
+head-selective K/V patching.
+
+`support()` reports `self_attn.interface` unavailable where the values it works with are
+(any `attn_implementation` but `"eager"`, with the same reason) and, with
+`nnterp.components.OWN_ARITHMETIC` (`the queries, keys and values are not the arguments of
+one call in this forward that returns the head outputs ...`), where no such call exists:
+BLOOM, MPT, Falcon and XGLM do their own arithmetic, and DeepSeek-V4 rotates the
+interface's output back before its projection. On a vision tower it is served on SigLIP,
+CLIP, Pixtral, Gemma 4 and Llama 4; the Qwen ViT and RADIO make one call per image and
+report that. `StandardizedVLLM` does not serve it: the engine's attention is a kernel that
+writes the step's keys and values into its cache as it runs.
+
+```python
+eager_reason = plain.support(layer=0)["self_attn.attention_probabilities"]
+assert plain.support(layer=0)["self_attn.interface"] == eager_reason   # sdpa: the reason of the values it works with
+```
+
+Everything else (decode steps, padded batches, the per-family calls, the cache under
+`generate`):
+[references/attention-interior.md](references/attention-interior.md#calling-the-attention-function-again-interface).
+
 ## Methods over the values
 
 ```python
@@ -643,7 +758,7 @@ the `extending` skill adds a family, registers one, or passes one to a single lo
 and layouts on nnsight's `VLLM` engine (60 families). Pick it for throughput: many
 concurrent prompts, long generations, a served engine. Stay on `StandardizedTransformer`
 for gradients, an edit of the attention pattern or a decode step's pattern,
-`model.order()` / `rank()`, and the values the engine does not have (`lm_head_output`, a
+`self_attn.interface`, `model.order()` / `rank()`, and the values the engine does not have (`lm_head_output`, a
 gated MLP's `mlp_activation`, and `attention_mask`, since a request is one unpadded
 sequence). Both are `nnterp.Standardized`, so a helper written against the standard
 names takes either. What differs, from the repo's `docs/usage/vllm.md`:
@@ -677,7 +792,7 @@ piece, edits split back), except a split mixture's `expert_outputs`, a per-rank 
 | File | Covers |
 |---|---|
 | [references/values.md](references/values.md) | the boundary values and the identity, tuple blocks, where families relocate a contribution, the non-additive families with their stream-weight recipes, root values, sizes, layouts |
-| [references/attention-interior.md](references/attention-interior.md) | queries/keys/values/scores/probabilities/head outputs, family caveats (GPT-2, MPT, Falcon, sinks, latent attention, Gemma-4 borrowed keys), what edits do to the mask, under `generate`; the queries and keys before the rotary and `rotate` (moving a query or key to another position, per-family differences, rope scaling, on vLLM) |
+| [references/attention-interior.md](references/attention-interior.md) | queries/keys/values/scores/probabilities/head outputs, family caveats (GPT-2, MPT, Falcon, sinks, latent attention, Gemma-4 borrowed keys), what edits do to the mask, under `generate`; the queries and keys before the rotary and `rotate` (moving a query or key to another position, per-family differences, rope scaling, on vLLM); `interface`, the block's attention function called again (edits of keys or values that must not reach the cache or the rest of a group, per-row patches, exact recomputes; where it is unavailable) |
 | [references/mixture-of-experts.md](references/mixture-of-experts.md) | a `Moe`'s six values, usage / entropy / ablation / rerouting recipes with pad masking, bf16 and invoke caveats, per-family gaps |
 | [references/recurrent-mixers.md](references/recurrent-mixers.md) | `LinearAttention` (DeltaNet), `SelectiveScan` (Mamba-1), `StateSpace` (Mamba-2): what each name means on each, kernels, per-token state, read-order traps |
 | [references/availability-and-support.md](references/availability-and-support.md) | `support()` forms, the reasons, `Unavailable` vs `SourceNotAvailable`, guarding a script |
