@@ -11,7 +11,9 @@ step earlier, before the rotary embedding, with `rotate` to apply a block's rota
 yourself: the values to write when a query or key moves to another position
 ([below](#before-the-rotary-embedding-attention_queries_prerope-attention_keys_prerope-rotate)).
 And `interface` is the block's attention function itself, to call again on queries, keys
-and values of your own ([below](#calling-the-attention-function-again-interface)).
+and values of your own ([below](#calling-the-attention-function-again-interface)); the
+per-head weights, `value_weight`, `output_weight` and `attention_input_gain`, are read off
+the modules ([below](#the-weights-per-head)).
 
 They are source-located: nnterp reaches them through nnsight `.source` at
 transformers' shared eager attention call (`attention_interface_1`), or at the
@@ -465,6 +467,59 @@ assert OWN_ARITHMETIC.startswith("the queries, keys and values are not the argum
 The head-selective recipe (chosen heads reading another run's keys and values over a span,
 on the prompt and on every `generate` step) is the `patterns` skill's
 `references/patching-and-attention.md`, "Head-selective K/V patching".
+
+## The weights per head
+
+`self_attn.value_weight(kv)` (`[head_dim, hidden_size]`), `self_attn.output_weight(j)`
+(`[hidden_size, head_dim]`) and `layers[i].attention_input_gain` (`[hidden_size]`) are read
+off the modules, outside a trace or inside one. `value_weight(kv) @ x`, plus that head's
+slice of the projection's bias, is `attention_values[:, kv]` for what the attention is called
+with; `sum_j output_weight(j) @ attention_premix[:, t, j]`, plus the bias, is what `o_proj`
+returns at `t`; and the attention reads `attention_input_gain * n(x)` (plus the norm's bias)
+of a stream `x` normalized by its norm (`x / rms(x)`, centred first on a LayerNorm). nnterp's
+suite checks all three on every family, to the rounding of a matmul over a slice of rows.
+On GPT-2 (`model`, above) `c_attn` is a `Conv1D` holding every query, key and value as
+columns; the accessors read it:
+
+```python
+with model.trace(prompt):
+    x = attn.input.save()
+    v = attn.attention_values.save()
+    premix = attn.attention_premix.save()
+    out = attn.o_proj.output.save()
+
+bias = attn.c_attn.bias.unflatten(0, (3, 12, 64))[2]            # [num_heads, head_dim]: the values' third of the bias
+torch.testing.assert_close(x @ attn.value_weight(3).T + bias[3], v[:, 3], rtol=1e-4, atol=1e-4)
+heads = sum(premix[:, :, j] @ attn.output_weight(j).T for j in range(12))
+torch.testing.assert_close(heads + attn.o_proj.bias, out, rtol=1e-4, atol=1e-4)
+gain = model.layers[5].attention_input_gain                     # ln_1's weight: a LayerNorm, its bias left out
+assert torch.allclose(gain, model.layers[5].input_layernorm.weight, atol=1e-6)
+```
+
+The layouts a family's `Attention` reads for you: every query, every key, then every value
+in one projection (Phi-3's `qkv_proj`, DBRX's and MPT's `Wqkv`, GPT-BigCode's `c_attn` under
+multi-query); each head's query, key and value, `[num_heads, 3, head_dim]` (GPT-NeoX,
+GPT-NeoX-Japanese, BLOOM, Persimmon, GPT-BigCode and Falcon-RW without multi-query); per
+key/value head its group's queries, key and value (Falcon's 40B layout); every query, then
+the one key and value (Falcon's multi-query 7B); four parts of the heads' queries, values and
+keys (CodeGen); `Conv1D` columns and rows (GPT-2). MiMo-V2-Flash's `value_weight` carries the
+`attention_value_scale` its forward multiplies the values by; DBRX, and MPT and OLMo with
+`clip_qkv`, clamp the projections' outputs after these weights.
+
+Under a PEFT adapter the weight is the one the LoRA layer applies, computed as `merge()`
+computes it, in the base weight's dtype: the base plus each active adapter's delta; the base
+alone once an adapter is merged (the forward then runs the base layer only); the base without
+a merged adapter when the adapters are disabled (the forward unmerges first). That is a new
+tensor; otherwise the result is a view of the parameter. A DoRA or aLoRA adapter, or another
+tuner, raises `NotImplementedError`. The gain is measured by calling the norm on `+-256` in
+alternating channels, which any RMS norm or LayerNorm normalizes to `+-1`: exact on a norm
+without a bias, to rounding with one; ones on a post-norm block; with
+`attention_norm_output`'s reason where that is unavailable.
+
+`self_attn.no_head_weights()` is the one reason `value_weight` and `output_weight` raise:
+latent attention, DeepSeek-V4, Gemma-4 (`v_norm`), JetMoE (an output projection per expert),
+ZAYA (half of each value head from the previous token), the default family, a vision tower,
+a model split tensor-parallel (`nnterp.components.SHARDED_WEIGHTS`), and `StandardizedVLLM`.
 
 ## Family caveats
 
