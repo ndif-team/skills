@@ -12,7 +12,7 @@ per family under `nnterp/families/`, named after `config.model_type`
 (`len(nnterp.families.known())` is 99: 98 families, plus `kimi_k25`, Kimi K2's family
 under its wrapper's name). This skill is for when that is not enough: a `model_type`
 nnterp does not ship, a forward that puts a value where the base classes do not look, or
-a value nnterp does not have. Verified on nnterp `v2.0.0` at `1a63f2d` plus nnterp #134 (`4c5f8f1`), with nnsight
+a value nnterp does not have. Verified on nnterp `v2.0.0` at `200ac05`, with nnsight
 0.8.2 (0.8 or later binds the dotted aliases below) and transformers 5.20.2, against
 `openai-community/gpt2` and `HuggingFaceTB/SmolLM2-135M-Instruct`. The nnterp repo's
 pages: `docs/extending/` (`adding-a-family.md`, `overriding-values.md`,

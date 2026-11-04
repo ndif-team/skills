@@ -14,7 +14,7 @@ mean the same thing everywhere. Everything nnsight does (`trace`, `generate`,
 unchanged; this skill covers only what nnterp adds. Load the `nnsight` skill for
 the underlying API.
 
-Verified on nnterp `v2.0.0` at `1a63f2d` plus nnterp #134 (`4c5f8f1`) (98 families), with nnsight 0.8.2 and transformers 5.20.2.
+Verified on nnterp `v2.0.0` at `200ac05` (98 families), with nnsight 0.8.2 and transformers 5.20.2.
 nnterp needs nnsight 0.8 or later: the families alias `o_proj` and `down_proj` with dotted
 rename keys (`"attn.c_proj": "attn.o_proj"` on GPT-2), which older nnsight cannot bind.
 
