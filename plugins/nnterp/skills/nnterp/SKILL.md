@@ -14,7 +14,7 @@ mean the same thing everywhere. Everything nnsight does (`trace`, `generate`,
 unchanged; this skill covers only what nnterp adds. Load the `nnsight` skill for
 the underlying API.
 
-Verified on nnterp `v2.0.0` at `200ac05` (98 families), with nnsight 0.8.2 and transformers 5.20.2.
+Verified on nnterp `feat/head-weights-followup` at `ec5b85d` (ndif-team/nnterp#135; 98 families), with nnsight 0.8.2 and transformers 5.20.2.
 nnterp needs nnsight 0.8 or later: the families alias `o_proj` and `down_proj` with dotted
 rename keys (`"attn.c_proj": "attn.o_proj"` on GPT-2), which older nnsight cannot bind.
 
@@ -283,12 +283,14 @@ float32), so put prompts in one invoke (`model.trace([a, b])`) when that matters
 
 **19. A head's weights are `value_weight` / `output_weight`, not slices of `.weight`.**
 Under a PEFT adapter (`peft=` at load) `self_attn.v_proj.weight` is the base weight alone;
-`value_weight(kv)` and `output_weight(j)` give the weight the LoRA layer applies (the base
-plus every active, unmerged adapter's delta, what `merge()` would leave), so an adapted
-model's weights need no merge-and-clone. They also read the fused and transposed layouts
-(Phi-3 has no `v_proj`, GPT-2's `c_attn` is `[in, out]`), and `attention_input_gain` is the
-norm's gain whatever its parameterization (Gemma's `1 + weight`), ones on a post-norm block
-([The weights per head](#the-weights-per-head)).
+`value_weight(kv)` and `output_weight(j)` give the weight the projection's next forward
+applies (the base plus each active, unmerged adapter's delta; the base once merged), so an
+adapted model's weights need no merge-and-clone. They also read the fused and transposed
+layouts (Phi-3 has no `v_proj`, GPT-2's `c_attn` is `[in, out]`), and the two gains are the
+norms' gains whatever their parameterization (Gemma's `1 + weight`): `attention_input_gain`
+before the attention (ones on a post-norm block), `attention_output_gain` after it (the
+post-attention norm on OLMo-2/3 and Gemma-2/3/4, ones where the output enters the stream
+unnormed) ([The weights per head](#the-weights-per-head)).
 
 ## The vocabulary
 
@@ -694,16 +696,21 @@ Everything else (decode steps, padded batches, the per-family calls, the cache u
 
 ## The weights per head
 
-Three accessors read a head's weights off the modules, outside a trace or inside one:
+Four accessors read a head's weights off the modules, outside a trace or inside one:
 `self_attn.value_weight(kv)` is key/value head `kv`'s slice of the value projection,
 `[head_dim, hidden_size]`; `self_attn.output_weight(j)` is head `j`'s slice of the output
-projection, `[hidden_size, head_dim]` (what maps its slice of `attention_premix` into the
-stream); `layers[i].attention_input_gain` is the per-channel gain between the stream and
-what the attention reads, `[hidden_size]`: the pre-attention norm's gain (`weight`, Gemma's
-`1 + weight`), ones on a post-norm block (OLMo-2/3). Use them for anything that multiplies a
-head's weights: an OV circuit, a head's write of a stream direction, direct logit
-attribution through `output_weight`, and an adapted model's weights without merging (trap
-19). Query head `j` reads key/value head `j // (num_heads // num_kv_heads)`:
+projection, `[hidden_size, head_dim]` (what maps its slice of `attention_premix` to the
+projection's output); `layers[i].attention_input_gain` is the per-channel gain between the
+stream and what the attention reads, `[hidden_size]`: the pre-attention norm's gain
+(`weight`, Gemma's `1 + weight`), ones on a post-norm block (OLMo-2/3); and
+`layers[i].attention_output_gain` is the gain between the projection's output and what the
+block adds to the stream: the norm `attention_output` is read at (`post_attention_layernorm`
+on OLMo-2/3, FlexOlmo, EXAONE-4 and Gemma-2/3/4), ones where the output enters unnormed. Use
+them for anything that multiplies a head's weights: an OV circuit, a head's write of a stream
+direction, direct logit attribution through `output_weight` (through the final norm frozen at
+the real stream, as the `patterns` skill's per-head recipe does), and an adapted model's
+weights without merging (trap 19). Query head `j` reads key/value head
+`j // (num_heads // num_kv_heads)`:
 
 ```python
 layer = llama.layers[14]
@@ -720,21 +727,24 @@ torch.testing.assert_close(x.float() @ value.float().T, v[:, 1].float(), rtol=2e
 h = llama.embed_tokens.weight[lparis].float()
 h = h / h.pow(2).mean().sqrt()                             # unit RMS, as the block's norm leaves the stream
 j = 4                                                      # reads key/value head 4 // 3 = 1
-ov = attn.output_weight(j).float() @ attn.value_weight(j // group).float() @ (layer.attention_input_gain.float() * h)
+W_V, W_O = attn.value_weight(j // group).float(), attn.output_weight(j).float()  # the gains are float32
+ov = layer.attention_output_gain * (W_O @ W_V @ (layer.attention_input_gain * h))
 assert ov.shape == (576,)                                  # what head 4 writes, per unit of attention on " Paris"
 assert model.layers[5].self_attn.value_weight(0).shape == (64, 768)   # GPT-2's fused, transposed c_attn, read for you
 ```
 
-They are the weight's dtype and device, views of the parameter where torch allows, and
-need a dispatched model (an undispatched one's weights are meta). The layouts the families
-fuse (Phi-3's `qkv_proj`, GPT-NeoX's and BLOOM's per-head `query_key_value`, Falcon's three,
-MPT's and DBRX's `Wqkv`, CodeGen's four parts, GPT-2's `Conv1D`) are read for you; the
-weights carry no bias (read it off the module). `self_attn.no_head_weights()` is the one
-reason both methods raise where a head has no such slice: latent attention (DeepSeek-V2/V3,
-Kimi-K2, GLM-5, GLM-4.7-Flash, Youtu, Kimi-Linear), DeepSeek-V4, Gemma-4 (`v_norm` on the
-values), JetMoE, ZAYA, the default family, a vision tower, a model split tensor-parallel,
-and `StandardizedVLLM` (which refuses `attention_input_gain` too). Details and the layout
-table:
+The weights are the parameter's dtype and device, live views of the parameter where torch
+allows (they require grad as it does); the gains are float32 and detached. The weights need
+a dispatched, unquantized model: an undispatched one's are meta and a quantized one's are
+codes, and both raise `Unavailable`. The layouts the families fuse (Phi-3's `qkv_proj`,
+GPT-NeoX's and BLOOM's per-head `query_key_value`, Falcon's three, MPT's and DBRX's `Wqkv`,
+CodeGen's four parts, GPT-2's `Conv1D`) are read for you; the weights carry no bias (read it
+off the module). `value_weight` alone is refused on latent attention (DeepSeek-V2/V3,
+Kimi-K2, GLM-5, GLM-4.7-Flash, Youtu, Kimi-Linear), Gemma-4 (`v_norm` on the values) and
+ZAYA, whose `o_proj` is plain, so `output_weight` is served; `self_attn.no_head_weights()`
+is the one reason both raise on DeepSeek-V4, JetMoE, the default family, a vision tower, a
+model split tensor-parallel, and `StandardizedVLLM` (which refuses both gains too). Details
+and the layout table:
 [references/attention-interior.md](references/attention-interior.md#the-weights-per-head).
 
 ## Methods over the values
