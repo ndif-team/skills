@@ -187,6 +187,52 @@ value
   `[512]`, `W_dec` `[512, 768]` and `b_dec` `[768]`, with a header recording `activation`, `centered` and
   `latents`. A document loading it writes `{"kind": "sae", "file_path": ...}` alone.
 
+## Compare dictionaries in one document
+
+An `encode`'s or an `apply`'s `featurizer` may be a sweep over featurizer names. This document loads
+`out/sae_train/` and `out/sae_topk/`, `sae_train.json` with the TopK dictionary above, from the corpus root:
+
+<!-- test: skip -->
+```json
+{
+  "description": "The ReLU dictionary sae_train.json trained and the TopK one (k 16) the same document trains with that activation, compared on four of their training sentences in one document; a TopK bundle states its activation and k, which the header checks. One sweep over the two names, sae, runs in the encode that counts each token's active latents and in the apply that splices the reconstruction in; kl is KL(clean || spliced) at the last token.",
+  "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
+  "data": {"text": {"rows": [
+    {"input": "The cat sat on the mat and looked out of the window."}, {"input": "Stock markets fell sharply after the bank raised interest rates."},
+    {"input": "She poured the coffee and opened the morning newspaper."}, {"input": "The train to London leaves the station at nine."}
+  ]}},
+  "sites": {"target": {"component": "layer_output", "layers": 5}, "head": {"component": "lm_head_output"}},
+  "featurizers": {"relu": {"kind": "sae", "file_path": "out/sae_train/fit.dictionary.safetensors"},
+                  "topk": {"kind": "sae", "file_path": "out/sae_topk/fit.dictionary.safetensors", "activation": "topk", "k": 16}},
+  "steps": {
+    "base": {"kind": "forward", "input": "text.input", "interventions": {
+      "latents": {"site": "target", "pos": {"index": "1:"}, "ops": [{"op": "encode", "featurizer": {"sweep": ["relu", "topk"], "label": "sae"}}]},
+      "logits": {"site": "head", "pos": -1}}},
+    "spliced": {"kind": "forward", "input": "text.input", "interventions": {
+      "splice": {"site": "target", "pos": {"index": "1:"}, "ops": [{"op": "apply", "featurizer": {"sweep": ["relu", "topk"], "label": "sae"}}]},
+      "logits": {"site": "head", "pos": -1}}},
+    "active": {"kind": "op", "op": "gt", "of": "base.latents", "with": 0.0},
+    "l0": {"kind": "op", "op": "sum", "of": "active", "over": ["features"]}, "mean_l0": {"kind": "op", "op": "mean", "of": "l0"},
+    "kl": {"kind": "op", "op": "kl", "of": "base.logits", "against": "spliced.logits"}, "mean_kl": {"kind": "op", "op": "mean", "of": "kl"}
+  },
+  "saves": ["mean_l0", "mean_kl"]
+}
+```
+
+```text
+clab run documents/sae_compare.json
+clab table out/sae_compare mean_l0 mean_kl
+at              mean_l0             mean_kl
+{"sae":"relu"}  24.625              0.07636677473783493
+{"sae":"topk"}  14.574999809265137  0.06824039667844772
+```
+
+- **Each point is one dictionary's use**, keyed by its name: TopK keeps 14.6 latents a token against 24.6, and
+  its splice moves the last token's distribution less, 0.068 nats against 0.076.
+- **`base` only encodes**, so one forward serves both points; `spliced` writes, and runs one per dictionary.
+- **A TopK bundle states `activation` and `k`**; with `file_path` alone the unstated `relu` is refused
+  (`header 'activation' is 'topk'; this document expects 'relu'`).
+
 ## Rank latents, then ablate one
 
 Rank the latents where the variable is, here at the day token of the seven weekday prompts:

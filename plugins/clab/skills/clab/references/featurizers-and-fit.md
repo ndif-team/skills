@@ -37,6 +37,21 @@ prints each kind's fields and the math of its ops.
 - **A featurizer's width is the last axis of every site it is used at**, and one featurizer at two widths is refused.
 - **`encode` runs in the value's dtype**; `apply` and the edits between a pair compute in float32 and round once.
 
+## A sweep over featurizers
+
+An `encode`'s, `decode`'s or `apply`'s `featurizer` may be a sweep over featurizer names, declared or a fit's
+trained ones: `{"op": "encode", "featurizer": {"sweep": ["sae_a", "sae_b"], "label": "sae"}}`. Each point is
+that featurizer's use, as if the document named it alone. The `clab-trained-featurizers` skill compares a
+trained rotation with a PCA and a draw this way, and two dictionaries.
+
+- **A `decode` carries its `encode`'s sweep**, the same label and names. A `decode` of one name is refused at the point: `… at space="pc": decode of 'rot', and the open encode is of 'pc' (ops[0])`.
+- **The coordinates are the names**: a swept save's `at` in `clab table` is `{"sae":"sae_a"}`.
+- **A read that only encodes shares one forward**; a write runs one per point.
+- **After a fit, `{"sweep": ["rot", "fit.rot"]}` scores the draw beside the trained featurizer.** In the body the two names are one featurizer, refused at compile: `label 'r' sweeps 'fit.rot' twice ('rot' and 'fit.rot' in the body of fit 'fit' are one featurizer, …)`.
+- **A sweep in the body over the featurizers the fit trains is refused once the model loads**, since each point would train every one and use one: `fit at r="fit.rot": 'rot2' is trained but used at no site at this point, …`.
+- **`train` takes no sweep**: write one fit per featurizer it trains.
+- **Sweep a field where one declaration serves** (a subspace's `seed`); name several featurizers where they differ in kind, `k` or bundle.
+
 ## A published sparse autoencoder
 
 An `sae` whose `file_path` names a published safetensors file (SAELens and Gemma Scope's layout) states the three

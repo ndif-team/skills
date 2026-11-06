@@ -9,7 +9,8 @@ accuracy out of 7 unless a line says otherwise. The fit fields are the `clab` sk
 ## What breaks here
 
 - **A trained subspace is evidence only beside controls of the same rank**, on the same rows, scored by the
-  same op. Compare `k: 4` with drawn and PCA subspaces of `k: 4`, never with another rank.
+  same op. Compare `k: 4` with drawn and PCA subspaces of `k: 4`, never with another rank, in one document
+  ([all three](#the-trained-rotation-the-pca-and-the-draw-in-one-document)).
 - **What a PCA reads decides how strong a control it is.** A PCA of the day token alone swaps the day on 7/7;
   a PCA of every token after the first swaps it on 0/7. State which one a comparison used.
 - **Accuracy ties hide differences.** Where two featurizers both reach 7/7, compare a continuous score: the
@@ -104,15 +105,73 @@ pca_harvest on nnterp (batch size 8, device cpu, tp 1) -> out/pca_harvest
   basis.safetensors  basis  {"basis":[768,4],"mean":[768]}
 ```
 
-`das_apply.json` with `rot` replaced by `{"kind": "pca", "k": 4, "file_path": "out/pca_harvest/basis.safetensors"}`
-runs the same interchange through those directions, under the same name, so the two documents differ only in
-what `rot` is. It swaps the day on 7/7, at a mean `ce` of 1.462 against the trained rotation's 1.093.
-
 - **A PCA needs more vectors than its `k`.** One position of four rows is refused before any forward
   (`pca of 4 vectors has no rank-4 basis; it needs more than 4`); read more rows or a range of positions.
 - **Read every token instead** (`{"index": "1:"}`, 42 vectors) and the top 4 directions are the sentence's
-  variance, not the day's: the same interchange swaps 0/7, mean `ce` 2.454.
+  variance, not the day's: as `pc` in the interchange below it swaps 0/7, mean `ce` 2.454.
 - **A `pca` is never drawn or trained.** It exists only as the bundle a `pca` op wrote.
+
+### The trained rotation, the PCA and the draw in one document
+
+An `encode`'s and a `decode`'s `featurizer` may be a sweep over featurizer names, so one document scores
+every control by the same interchange. This one needs `out/das/fit.rot.safetensors` from `das.json` and
+`out/pca_harvest/basis.safetensors` from the harvest above, under the corpus root:
+
+<!-- test: skip -->
+```json
+{
+  "description": "das.json's trained rotation, the top-4 principal directions of the day token and the rotation's starting draw, each scored by the same interchange on the 7 held-out pairs. One sweep over featurizer names, space, runs in the encode, the decode and the counterfactual's encode, so each point is one featurizer's interchange.",
+  "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
+  "data": {"test": {"rows": [
+    {"input": "If today is Sunday, tomorrow is", "counterfactual": "If today is Friday, tomorrow is", "cf_answer": " Saturday"},
+    {"input": "If today is Wednesday, tomorrow is", "counterfactual": "If today is Sunday, tomorrow is", "cf_answer": " Monday"},
+    {"input": "If today is Tuesday, tomorrow is", "counterfactual": "If today is Thursday, tomorrow is", "cf_answer": " Friday"},
+    {"input": "If today is Saturday, tomorrow is", "counterfactual": "If today is Friday, tomorrow is", "cf_answer": " Saturday"},
+    {"input": "If today is Monday, tomorrow is", "counterfactual": "If today is Friday, tomorrow is", "cf_answer": " Saturday"},
+    {"input": "If today is Sunday, tomorrow is", "counterfactual": "If today is Saturday, tomorrow is", "cf_answer": " Sunday"},
+    {"input": "If today is Friday, tomorrow is", "counterfactual": "If today is Sunday, tomorrow is", "cf_answer": " Monday"}
+  ]}},
+  "sites": {"target": {"component": "layer_output", "layers": 5}, "head": {"component": "lm_head_output"}},
+  "featurizers": {
+    "rot": {"kind": "subspace", "file_path": "out/das/fit.rot.safetensors"},
+    "pc": {"kind": "pca", "k": 4, "file_path": "out/pca_harvest/basis.safetensors"},
+    "draw": {"kind": "subspace", "k": 4, "seed": 0}
+  },
+  "steps": {
+    "counterfactual": {"kind": "forward", "input": "test.counterfactual", "interventions": {
+      "v_cf": {"site": "target", "pos": -4, "ops": [
+        {"op": "encode", "featurizer": {"sweep": ["rot", "pc", "draw"], "label": "space"}}]}}},
+    "patched": {"kind": "forward", "input": "test.input", "interventions": {
+      "patch": {"site": "target", "pos": -4, "ops": [
+        {"op": "encode", "featurizer": {"sweep": ["rot", "pc", "draw"], "label": "space"}},
+        {"op": "swap", "with": "counterfactual.v_cf"},
+        {"op": "decode", "featurizer": {"sweep": ["rot", "pc", "draw"], "label": "space"}}]},
+      "logits": {"site": "head", "pos": -1}}},
+    "ce": {"kind": "op", "op": "cross_entropy", "of": "patched.logits", "target": "test.cf_answer"},
+    "hit": {"kind": "op", "op": "match", "of": "patched.logits", "expected": "test.cf_answer"},
+    "acc": {"kind": "op", "op": "mean", "of": "hit"},
+    "mean_ce": {"kind": "op", "op": "mean", "of": "ce"}
+  },
+  "saves": ["acc", "mean_ce"]
+}
+```
+
+```text
+clab run documents/das_controls.json
+clab table out/das_controls acc mean_ce
+at                acc  mean_ce
+{"space":"rot"}   1.0  1.0930441617965698
+{"space":"pc"}    1.0  1.4620361328125
+{"space":"draw"}  0.0  2.4739460945129395
+```
+
+- **The PCA swaps the day on 7/7**, at a mean `ce` of 1.462 against the trained rotation's 1.093. The draw,
+  0/7 at 2.474, is `das.json`'s own null.
+- **The `decode` carries its `encode`'s sweep**, the same label and names. A `decode` of one name is refused
+  at the point: `… at space="pc": decode of 'rot', and the open encode is of 'pc' (ops[0])`.
+- **`counterfactual` only encodes**, so one forward serves all 3 points; `patched` writes, and runs one each.
+- **Sweep a field where one declaration serves**, as the seeds above do; name several featurizers where they
+  differ in kind, `k` or bundle.
 
 ## DBM: which units carry the day
 

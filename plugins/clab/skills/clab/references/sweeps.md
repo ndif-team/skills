@@ -30,12 +30,14 @@ mean_patched` one row per point, keyed in `at` (the full table is in the clab sk
 | an entry's `pos`: its `frame`, its `index`, a scope's `occurrence` | `{"frame": 0, "index": {"sweep": [-1, -2]}}` |
 | an op's arguments, in an entry or a step | `add`'s `scale` (a dose), `scale`'s `factor`, `top_k`'s `k` |
 | a featurizer's fields | `k`, `seed` |
+| an `encode`'s, `decode`'s or `apply`'s `featurizer` | `{"sweep": ["sae_a", "sae_b"], "label": "sae"}` |
 | a fit's values | `epochs`, `seed`, an objective weight, `lr`, `batch_size` |
 | a generate step's options | `max_new_tokens` |
 
 - **Each value is a number, a string, a boolean or a list of them.** To vary a `pos` object, sweep a scalar inside it.
+- **Each value is listed once**, since a point is keyed by its value: `{"sweep": [5, 5]}` is refused (`label 'layers' sweeps 5 twice; …`).
 - **Refused**: the names that choose what runs (`kind`, `op`, `site`, `component`, `input`, `of`, `train`, `interventions`, `saves`, `file_path`, a scope's `column`), a featurizer's `over`, the optimizer's `name`, and anything under `model` or `data`: `sites.resid.component: a sweep cannot stand for 'component'`.
-- **A sweep cannot stand for `featurizer`**: to compare a trained direction with random ones, write one entry per featurizer.
+- **A sweep over featurizer names compares featurizers in one document**; a `decode` carries its `encode`'s sweep ([featurizers and fit](featurizers-and-fit.md#a-sweep-over-featurizers)).
 - **Two datasets**: write the steps twice, one set per dataset.
 - **Two checkpoints or revisions**: a run loads one model, so write one document per revision and join their tables in Python.
 - **Two scope columns**: one entry per column.

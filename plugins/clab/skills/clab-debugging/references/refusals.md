@@ -44,6 +44,7 @@ then `steps.clean: unknown step kind 'forwards'; …`.
 | `a column's strip goes on its reference` | before load | `strip` or `lower` beside a `column` scope | `{"column": {"column": "<dataset>.<column>", "strip": true}}` |
 | `frame 1: a forward makes one call, the prefill` | before load | a decode frame on a `forward` | frame 0, or a `generate` step |
 | `label 'layers' is also the sweep at sites.target.layers, over [3, 6]; one label is one axis` | before load | two sweeps sharing a label (a field's name is the default) over other values | its own `label` on each to cross them, or the same values to pair them |
+| `label 'layers' sweeps 5 twice; a sweep's points are its values, each keyed by its value` | before load | a sweep that lists one value twice, featurizer names included; in a fit's body `rot` and `fit.rot` are one | each value once |
 
 At a sweep point the path gains the point: `steps.patched.interventions.logits.pos.frame at frame=1: frame 1: …`.
 
@@ -114,6 +115,8 @@ the bundle's path.
 | `'linear' takes no 'seed'; its arguments: classes, file_path` | before load | a field the kind does not take | the listed fields; `clab describe featurizers` |
 | `'probe' is a 'linear' featurizer, which has no decode: it serves encode` | before load | an op the kind does not serve | an op it serves, as listed |
 | `the entry writes back here with the encode of 'rot' (ops[0]) still open` | before load | an edit after an `encode` and no `decode` | `{"op": "decode", "featurizer": "rot"}` after the edits |
+| `decode of 'rot', and the open encode is of 'pc' (ops[0])`, at a point (`at space="pc"`) | before load | a `decode` without its swept `encode`'s sweep, or brackets closed out of order | the `encode`'s sweep, label and names, on the `decode` |
+| `'rot2' is trained but used at no site at this point` | after load | a sweep in a fit's body over the featurizers the fit trains | one fit per featurizer it trains |
 | `decode closes an encode of its own entry, so it runs inside the entry that encodes` | before load | `decode` as an op step | the `encode` … `decode` pair inside one entry |
 | `featurizer 'rot' is used at width 3072 here and 768 elsewhere; a featurizer has one width` | after load | one featurizer at sites of two widths | one featurizer per width |
 | `<file> does not exist under the corpus root; run the document that writes it first` | before load | a bundle not written yet, or a document under another corpus root | run the writing document; run from the corpus root |
