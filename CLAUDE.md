@@ -12,7 +12,7 @@ symlinks). **Four plugins**, with different audiences and different rules:
 |---|---|---|---|
 | `nnsight` | writing interpretability code against model internals | 19 | **executed** against real models |
 | `nnterp` | the same, once, against one module vocabulary that runs on every transformer family | 3 | **executed** against real models; skipped when `nnterp` is not installed |
-| `clab` | running an experiment as a JSON document with clab, for agents using it rather than changing it | 7 | every complete document is **compiled** through clab (no model); python blocks are syntax-checked |
+| `nnspec` | running an experiment as a JSON document with nnspec, for agents using it rather than changing it | 7 | every complete document is **compiled** through nnspec (no model); python blocks are syntax-checked |
 | `ndif` | running your *own* NDIF server (the backend behind `remote=True`) | 4 | docs only — every block is `<!-- test: skip -->` |
 
 The split matters when you edit: a claim in an nnsight skill is proved by the
@@ -60,12 +60,12 @@ plugin whose package is not installed skips with that reason. Keep it that way.
 `<!-- test: skip -->` anyway, so nothing would run if the harness were ever
 widened, and its shell blocks (```bash) are never executed in either plugin.
 
-`plugins/clab` has its own check, `tests/test_documents.py`: every ```json block
+`plugins/nnspec` has its own check, `tests/test_documents.py`: every ```json block
 parses, and one holding `model` and `steps` is a complete document that
-`clab.Plan(**doc).compile()` must accept (no model, no network, no cache). A
+`nnspec.Plan(**doc).compile()` must accept (no model, no network, no cache). A
 document that needs a file (a bundle, another run's output) carries
 `<!-- test: skip -->`. Its python blocks are syntax-checked, never run. The
-numbers a clab skill quotes come from runs its writer made; say the checkpoint.
+numbers an nnspec skill quotes come from runs its writer made; say the checkpoint.
 
 Directives go in an HTML comment immediately above the fence:
 
@@ -161,6 +161,6 @@ routes into its `docs/`.
 - nnterp: `ndif-team/nnterp`, branch `0.8-refactor` (every docs snippet ran
   against the tiny checkpoints in its `tests/families/`)
 - Tutorials and paper implementations: `ndif-team/nnsight-website`, `docs/`
-- clab: `JadenFiotto-Kaufman/clab`, branch `master`; `clab describe <section>`
+- nnspec: `JadenFiotto-Kaufman/nnspec`, branch `master`; `nnspec describe <section>`
   prints the format the installed version accepts, and `docs/` routes from its
   `CLAUDE.md`
