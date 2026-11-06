@@ -1,18 +1,18 @@
 ---
 name: nnspec-ablation
-description: Measure what a component contributes by removing it in a clab document, scored against a clean forward on the same rows: a test of necessity with no counterfactual prompt. Use it to ask whether the model still works without a layer, an attention head, an MLP neuron or a token, or to knock out every head one at a time. Also for neurons zeroed or mean-ablated beside random ones, attention knockout of keys, expert knockout, forced routing and routing usage on a mixture of experts, and the hydra effect. Covers zero, mean, resample (`permute`), optimal-constant, direction, noise and clamp ablation, each with its null control. Copying a value from another prompt is clab-patching, and reading attention patterns or the logit lens is clab-lenses-and-attention. Trained masks, probes and SAEs are clab-trained-featurizers; a refusal or a null that fails is clab-debugging; the document format is the clab skill.
+description: Measure what a component contributes by removing it in an nnspec document, scored against a clean forward on the same rows: a test of necessity with no counterfactual prompt. Use it to ask whether the model still works without a layer, an attention head, an MLP neuron or a token, or to knock out every head one at a time. Also for neurons zeroed or mean-ablated beside random ones, attention knockout of keys, expert knockout, forced routing and routing usage on a mixture of experts, and the hydra effect. Covers zero, mean, resample (`permute`), optimal-constant, direction, noise and clamp ablation, each with its null control. Copying a value from another prompt is nnspec-patching, and reading attention patterns or the logit lens is nnspec-lenses-and-attention. Trained masks, probes and SAEs are nnspec-trained-featurizers; a refusal or a null that fails is nnspec-debugging; the document format is the nnspec skill.
 ---
 
-# Ablation in clab
+# Ablation in nnspec
 
-Verified on clab `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
+Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `openai-community/gpt2` (12 layers of 12 heads, 768 wide), the expert ones on
 `hf-internal-testing/tiny-random-MixtralForCausalLM`, in seconds each.
 
 An ablation is a write in one forward, scored against a clean forward over the same rows: what the score
 loses is what the component contributed. The kinds differ only in what the write puts in the component's
 place, and that choice decides what the number means. Sites, `pos`, entries, ops, sweeps and fits are the
-[`clab` skill](../clab/SKILL.md)'s; this skill is the recipes and their nulls. Beyond the four below,
+[`nnspec` skill](../nnspec/SKILL.md)'s; this skill is the recipes and their nulls. Beyond the four below,
 [constants, directions and writes](references/constants-directions-and-writes.md) has the optimal constant,
 ragged means, directions, noise, clamp and holding a coordinate; [keys, experts and hydra](references/keys-experts-and-hydra.md)
 has attention knockout, the hydra effect and mixtures of experts.
@@ -22,7 +22,7 @@ has attention knockout, the hydra effect and mixtures of experts.
 - **Zero ablation overstates.** Zeroing GPT-2's last-token residual stream after layer 3 takes the logit
   difference from 2.75 to -1.51; the mean over the rows leaves 2.82. A zero vector is a point no forward
   reaches. Report mean or resample ablation; keep zero as the extreme.
-- **An entry without an edit in `ops` only reads** (the `clab` skill's list).
+- **An entry without an edit in `ops` only reads** (the `nnspec` skill's list).
 - **A small total effect can hide a large one.** Mean-ablating layer 9's attention at the last token costs
   0.11 of the logit difference, yet its direct effect falls by 2.18: layer 10 makes up 2.13. Measure the
   [hydra effect](references/keys-experts-and-hydra.md#the-hydra-effect) before calling a component unimportant.
@@ -33,7 +33,7 @@ has attention knockout, the hydra effect and mixtures of experts.
   null inside the average.
 - **The optimal constant fits the score it trains on**: held-out rows kept 0.65 of a clean 3.46 and their KL
   rose. Score it on held-out rows and with `kl` ([the recipe](references/constants-directions-and-writes.md#the-optimal-constant)).
-- **`attention_probabilities` and `attention_scores` need eager attention**; `attention_premix` does not ([eager](../clab/references/sites-and-interventions.md#attention-needs-eager)).
+- **`attention_probabilities` and `attention_scores` need eager attention**; `attention_premix` does not ([eager](../nnspec/references/sites-and-interventions.md#attention-needs-eager)).
 
 ## What to put in its place
 
@@ -86,8 +86,8 @@ scores, a `mean` step over that read, and one ablated forward per value `fill` s
 ```
 
 ```text
-$ clab run documents/zero_vs_mean.json
-$ clab table out/zero_vs_mean clean_ld ablated_ld
+$ nnspec run documents/zero_vs_mean.json
+$ nnspec table out/zero_vs_mean clean_ld ablated_ld
 at                               clean_ld            ablated_ld
 {"layer":3,"fill":0.0}           2.7463290691375732  -1.5115877389907837
 {"layer":3,"fill":"mean"}        2.7463290691375732  2.8224666118621826
@@ -107,9 +107,9 @@ at                               clean_ld            ablated_ld
   keeps `pos`, so it is written at the static width it was read at, as a resample donor is.
 - A sweep may hold numbers and names alike, and `score` is a bundle of entries each forward names. Means over
   [a ragged scope or from another dataset](references/constants-directions-and-writes.md#means-over-a-ragged-scope-or-another-dataset)
-  are in the reference; a harvest another document saved comes in by a [`load` step](../clab-trained-featurizers/references/harvest-and-bundles.md#cached-harvests), and a `mean` of it needs no forward.
+  are in the reference; a harvest another document saved comes in by a [`load` step](../nnspec-trained-featurizers/references/harvest-and-bundles.md#cached-harvests), and a `mean` of it needs no forward.
 
-Ops used: `swap`, `mean`, `logit_diff`; their lists are `clab describe ops`.
+Ops used: `swap`, `mean`, `logit_diff`; their lists are `nnspec describe ops`.
 
 ## Resample ablation
 
@@ -151,7 +151,7 @@ and the donor costs no forward.
 ```
 
 ```text
-$ clab table out/resample clean_ld resample_ld null_ld
+$ nnspec table out/resample clean_ld resample_ld null_ld
 at                    clean_ld            resample_ld           null_ld
 {"layer":3,"seed":0}  2.7463290691375732  2.84393572807312      2.7463290691375732
 {"layer":3,"seed":1}  2.7463290691375732  2.7677524089813232    2.7463290691375732
@@ -211,7 +211,7 @@ two labels makes every head a point and a forward. No eager attention is needed.
 ```
 
 ```text
-$ clab table out/head_knockout clean_ld zero_ld mean_ld
+$ nnspec table out/head_knockout clean_ld zero_ld mean_ld
 at                      clean_ld            zero_ld             mean_ld
 {"layer":9,"head":9}    2.7463290691375732  2.678971529006958   2.6351585388183594
 {"layer":10,"head":0}   2.7463290691375732  2.4221343994140625  2.4627342224121094
@@ -268,7 +268,7 @@ beside random sets of its size from its layer: the sets are one sweep, crossed b
 ```
 
 ```text
-$ clab table out/neuron_ablation clean_ld ablated_ld
+$ nnspec table out/neuron_ablation clean_ld ablated_ld
 at                                              clean_ld            ablated_ld
 {"set":[1645,1811,2314,2864],"fill":0.0}        2.7463290691375732  2.1083984375
 {"set":[1645,1811,2314,2864],"fill":"mean"}     2.7463290691375732  2.749048948287964
@@ -279,10 +279,10 @@ at                                              clean_ld            ablated_ld
 ```
 
 - **The null is the third `fill`**: writing `clean.n` back equals `clean_ld` to the bit at every set.
-- **The four are on for every row**, between 0.5 and 2.6 (`clab table out/neuron_ablation clean.n`). Zeroing
+- **The four are on for every row**, between 0.5 and 2.6 (`nnspec table out/neuron_ablation clean.n`). Zeroing
   them costs 0.64; their mean costs nothing (+0.003): nothing that varies across these rows passes there.
 - **Activation × gradient estimates the zero ablation**, so it ranks always-on neurons first; the gradient
-  times the activation less its mean estimates the mean ablation (the `clab-patching` skill's shortcut).
+  times the activation less its mean estimates the mean ablation (the `nnspec-patching` skill's shortcut).
 - **The control is the random sets**: at most 0.01 under zero, 0.002 under the mean. A `select` holds fixed
   ids, so draw the sets outside the document and write them in sorted.
 - **Zero is not a resting neuron's value**: GELU's floor is -0.17, and seven of the twelve random neurons
@@ -293,8 +293,8 @@ at                                              clean_ld            ablated_ld
 
 ## Which skill for the neighbouring questions
 
-- The format, sweeps, sites, running and reading back: the [`clab` skill](../clab/SKILL.md).
-- Copying a value in from a counterfactual prompt, path patching, attribution: the `clab-patching` skill.
-- Where a head looks, attention patterns and stripes, the logit lens: the `clab-lenses-and-attention` skill.
-- A trained mask over heads, DAS, a probe's direction, SAE feature ablation: the `clab-trained-featurizers` skill.
-- A null that does not equal the clean run, two runs that differ, a refusal: the `clab-debugging` skill.
+- The format, sweeps, sites, running and reading back: the [`nnspec` skill](../nnspec/SKILL.md).
+- Copying a value in from a counterfactual prompt, path patching, attribution: the `nnspec-patching` skill.
+- Where a head looks, attention patterns and stripes, the logit lens: the `nnspec-lenses-and-attention` skill.
+- A trained mask over heads, DAS, a probe's direction, SAE feature ablation: the `nnspec-trained-featurizers` skill.
+- A null that does not equal the clean run, two runs that differ, a refusal: the `nnspec-debugging` skill.

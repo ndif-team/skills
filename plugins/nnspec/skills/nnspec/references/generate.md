@@ -3,7 +3,7 @@
 A `generate` step runs the model's `generate` on every row of its `input`. Its value is the new token ids,
 `[rows, new]`; `detokenize` makes them text. Its entries read and write at the forward calls their `pos`'s
 `frame` names: call 0 is the prefill, call k ≥ 1 decode call k. Scoring what a generation says, steering it and
-generating from chats are the `clab-steering-and-generation` skill's; this page is the mechanics.
+generating from chats are the `nnspec-steering-and-generation` skill's; this page is the mechanics.
 
 ## Options
 
@@ -34,7 +34,7 @@ A row's calls are the prefill, then one decode call per new token but the last. 
 - **The row's last generated token is never an input**, so no call holds it.
 - **The prefill computes the head at its last position only**: `{"frame": 0, "index": -2}` at the head is refused, and the same `pos` at a stream site reads.
 - **Keep `index: -1` with `frame: -1`**: on a row whose first token was EOS the last call is the prefill, and `{"frame": -1}` alone is every prompt token.
-- **`clab table` adds a `call` column** beside `pos` and `pos_token` in a generation.
+- **`nnspec table` adds a `call` column** beside `pos` and `pos_token` in a generation.
 
 ## Reads at every call
 
@@ -73,7 +73,7 @@ A row's calls are the prefill, then one decode call per new token but the last. 
 ```
 
 ```text
-$ clab table out/generate_reads g.p_first
+$ nnspec table out/generate_reads g.p_first
 example_id  row  pos  pos_token   call  input                                     first    value
 eiffel      0    9    Ġof         0     The Eiffel Tower is in the city of         Paris   0.0699695572257042
 eiffel      0    10   ĠParis      1     The Eiffel Tower is in the city of         Paris   0.00012037013948429376
@@ -82,17 +82,17 @@ eiffel      0    11   ,           2     The Eiffel Tower is in the city of      
 kremlin     2    6    Ġof         0     The Kremlin is in the city of              Moscow  0.021569373086094856
 kremlin     2    7    ĠSochi      1     The Kremlin is in the city of              Moscow  3.3157612051581964e-05
 ...
-$ clab table out/generate_reads text said
+$ nnspec table out/generate_reads text said
 example_id  row  input                                     text                            said
 eiffel      0    The Eiffel Tower is in the city of         Paris, and the Eiff            1.0
 golden      1    The Golden Gate Bridge is in the city of   San Francisco, and the Golden  1.0
 kremlin     2    The Kremlin is in the city of              Sochi, where it has been       0.0
-$ clab table out/generate_reads g.calls conf_positions
+$ nnspec table out/generate_reads g.calls conf_positions
 example_id  row  input                                     g.calls  said            conf_positions  alignment_missing
 eiffel      0    The Eiffel Tower is in the city of        5.0       Paris          1.0
 golden      1    The Golden Gate Bridge is in the city of  5.0       San Francisco  2.0
 kremlin     2    The Kremlin is in the city of             5.0       Moscow                         true
-$ clab table out/generate_reads rows_reached
+$ nnspec table out/generate_reads rows_reached
 value
 2.0
 ```
@@ -117,7 +117,7 @@ waits, then once the batch's generation ends.
 `to_comma` stops each row at its first comma, id 11:
 
 ```text
-$ clab table out/generate_reads to_comma.calls comma_text
+$ nnspec table out/generate_reads to_comma.calls comma_text
 example_id  row  input                                     to_comma.calls  comma_text
 eiffel      0    The Eiffel Tower is in the city of        1.0              Paris
 golden      1    The Golden Gate Bridge is in the city of  2.0              San Francisco
@@ -162,13 +162,13 @@ on through the whole generation, and writes where a row says a word:
 ```
 
 ```text
-$ clab table --csv out/generate_writes plain_text damped_text online_text
+$ nnspec table --csv out/generate_writes plain_text damped_text online_text
 example_id,row,input,plain_text,damped_text,online_text
 eiffel,0,The Eiffel Tower is in the city of," Paris, and the Eiff", Central being-it's-," Paris in the Netherlands.
 "
 golden,1,The Golden Gate Bridge is in the city of," San Francisco, and the Golden"," and was for- the,", San. The bridge is located
 kremlin,2,The Kremlin is in the city of," Sochi, where it has been"," (in the in""it"," Sochi, where it has been"
-$ clab show out/generate_writes
+$ nnspec show out/generate_writes
   ...
   entry          at  positions
   damped.prompt  —   [9], [8], [6]

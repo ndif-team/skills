@@ -1,8 +1,8 @@
 # Output
 
-A run writes one directory: a file per saved value, `manifest.json` and `tokens.json`. `clab show` prints how
-the run went, `clab table` prints saved values as rows labelled with their tokens and data, and `Plan.load`
-reads it all back in Python. The examples are the clab skill's worked document, `documents/ioi_patch.json`,
+A run writes one directory: a file per saved value, `manifest.json` and `tokens.json`. `nnspec show` prints how
+the run went, `nnspec table` prints saved values as rows labelled with their tokens and data, and `Plan.load`
+reads it all back in Python. The examples are the nnspec skill's worked document, `documents/ioi_patch.json`,
 and the documents of the other references.
 
 ## The directory
@@ -24,13 +24,13 @@ out/ioi_patch/
 - **`tokens.json` is every input's tokens per row and every generation's new tokens**; a directory without it is refused.
 - **A run never clears its directory**: files of an earlier run stay beside the new ones, and the new manifest names only its own.
 
-## `clab show`
+## `nnspec show`
 
 ```text
-$ clab show out/ioi_patch
+$ nnspec show out/ioi_patch
 ioi_patch: run on nnterp, device cpu, tp 1, batch size 8, padding dataset, readout full, started …, … s
   served: float32 on cpu
-  versions: clab …, nnsight …, nnterp …, torch …, transformers …, python …
+  versions: nnspec …, nnsight …, nnterp …, torch …, transformers …, python …
   step            at  serves  seconds  memory  forwards  tokens  real
   clean           —   —       …        —       1         56      56
   counterfactual  —   —       …        —       1         56      56
@@ -60,9 +60,9 @@ ioi_patch: run on nnterp, device cpu, tp 1, batch size 8, padding dataset, reado
 - **A `stopped:` line follows the record** when a step ran out of CUDA memory.
 - **Seconds vary from run to run**; compare tokens and forwards, not seconds.
 
-## `clab table`
+## `nnspec table`
 
-`clab table OUT NAME [NAME ...]` prints saved values as rows, one per example and position; `--csv` prints CSV
+`nnspec table OUT NAME [NAME ...]` prints saved values as rows, one per example and position; `--csv` prints CSV
 with every cell whole, where the aligned form cuts cells at 48 characters, as it does a long `top_k.ids` list.
 
 | column | present when | holds |
@@ -89,13 +89,13 @@ with every cell whole, where the aligned form cuts cells at 48 characters, as it
 - **A row never reached prints flagged, with no value**, even where the saved tensor holds a number there: a `count` of a missing read is 0 in the file and blank in the table.
 - **Only saved names table**: `'patched.logits' was not saved; add it to saves`.
 - **A bundle does not table**: `'fit.probe' is a trained featurizer's bundle, which has no rows to table; read it from plan.results`.
-- **`clab table` joins values of one input's rows.** A metric of the base forward and one of the counterfactual's are refused together (`… the column does not mean one thing for both, so they do not join; table them one at a time`), and so are rows of two datasets. Table each input separately, or join their means over rows.
+- **`nnspec table` joins values of one input's rows.** A metric of the base forward and one of the counterfactual's are refused together (`… the column does not mean one thing for both, so they do not join; table them one at a time`), and so are rows of two datasets. Table each input separately, or join their means over rows.
 
 ## In Python
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 
 plan = Plan.load("out/ioi_patch")                     # Plan(ioi_patch, run on nnterp, 4 results)
 plan.results["patched_ld"][:, 0]                      # tensor([1.2577, 4.4744, 2.5320, 3.9496])
@@ -108,18 +108,18 @@ plan.run.tokens["pairs.input"][0][-3:]                # ['Ġa', 'Ġdrink', 'Ġto
 ```
 
 - **`results`** holds each save by name: a tensor, a dict of tensors, or a list or dict where it holds text. A swept value is a dict keyed by coordinate: the value for one axis, a tuple for several.
-- **`table(*names, columns=None)`** returns the rows `clab table` prints, as dicts; `columns=` chooses the dataset columns, which the command line cannot.
+- **`table(*names, columns=None)`** returns the rows `nnspec table` prints, as dicts; `columns=` chooses the dataset columns, which the command line cannot.
 - **`steps[<step>].interventions[<entry>].positions`** is each row's positions under the dataset, or `"alignment_missing"`; a swept step is a list of points, each with its `at`.
 - **`run`** holds `engine`, `batch_size`, `padding`, `readout`, `device`, `options`, `versions`, `threads`, `dtype`, `devices`, `sizes`, `started`, `seconds`, `tokens`, `costs` and `stopped`.
 - **`Plan.load` needs no data files**, but a run that loaded a bundle loads only where its `file_path` resolves.
 - **What no op does** (an interval, a ranking across points, a join across runs) is done here, on `results`.
 
-A `top_k` over several axes has no rows to table. Read it with the python clab is installed in; for
+A `top_k` over several axes has no rows to table. Read it with the python nnspec is installed in; for
 [ops](ops.md#transform)' `documents/head_rank.json`:
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 
 top = Plan.load("out/head_rank").results["top"]       # {'ids': {'layers': ..., 'num_heads': ...}, 'values': ...}
 for layer, head, size in zip(top["ids"]["layers"].tolist(), top["ids"]["num_heads"].tolist(), top["values"].tolist()):
@@ -153,7 +153,7 @@ for read, write in zip(plan.steps["counterfactual"], plan.steps["patched"]):
 ['rows', 'pos'], 'dataset': 'pairs', 'read': 'patched.logits', 'width': 1, 'axes': [], 'shape': [4, 1], 'dtype':
 'float32'}`. Each entry's record holds `positions: {"pairs": 0}`, an index into the top-level list, and a forward's
 record holds its `schedule`. A field at its default is left out, so read the manifest through
-`Plan.load` or `clab.output.manifest(out)`, which put each record's positions back in place.
+`Plan.load` or `nnspec.output.manifest(out)`, which put each record's positions back in place.
 
 ## A saved value elsewhere
 
@@ -167,11 +167,11 @@ load_file("out/ioi_patch/patched_ld.safetensors")     # {'patched_ld': tensor([[
 - **A file holds the value under its save's name**; a swept file one tensor per point, keyed by coordinate; a dict value (`top_k`'s) one per member.
 - **The layout is the manifest's `dims`**: `[rows, pos]` here, rows in the dataset's order after narrowing.
 - **A `.json` save** (text) reads with `json.load`.
-- **Another document brings a saved value in with a `load` step**, `{"kind": "load", "from": "out/x", "value": "<save>"}`, with its layout, dataset and sweep axes; the cached-harvest recipe is the `clab-trained-featurizers` skill's.
+- **Another document brings a saved value in with a `load` step**, `{"kind": "load", "from": "out/x", "value": "<save>"}`, with its layout, dataset and sweep axes; the cached-harvest recipe is the `nnspec-trained-featurizers` skill's.
 
 ## Tabling needs the rows
 
-`clab table` and `plan.table` label rows with dataset columns, so they need each dataset's rows. Inline rows are
+`nnspec table` and `plan.table` label rows with dataset columns, so they need each dataset's rows. Inline rows are
 in the manifest, so a run of inline rows tables from any directory. A file's rows are read again from `data/` under
 the working directory and checked against the digest the run recorded; a hub dataset's from the hub or its cache.
-Run `clab table` from the corpus root and leave the data as it was. `clab show` and `plan.results` need no rows.
+Run `nnspec table` from the corpus root and leave the data as it was. `nnspec show` and `plan.results` need no rows.

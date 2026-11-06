@@ -1,34 +1,34 @@
 ---
 name: nnspec
-description: Write, run and read back a clab experiment, a JSON document that reads and writes a transformer's internals by nnterp component name and scores them. Load it first for any clab task. It covers the document's keys (model, data, sites, interventions, featurizers, steps, saves), the step kinds forward, generate, op, fit and load, entries and their ops, pos and scopes, sweeps and labels, and saves. It covers checking with clab compile, running with clab run on the nnterp, hooks, ndif or vllm engine, and reading back with clab show, clab table, Plan.load, the manifest and the safetensors files. It answers what clab can express (clab describe) and lists the silent mistakes that run without a refusal. For a technique's recipe go on to clab-patching, clab-ablation, clab-lenses-and-attention, clab-steering-and-generation or clab-trained-featurizers. For a refusal or wrong numbers, go to clab-debugging.
+description: Write, run and read back an nnspec experiment, a JSON document that reads and writes a transformer's internals by nnterp component name and scores them. Load it first for any nnspec task. It covers the document's keys (model, data, sites, interventions, featurizers, steps, saves), the step kinds forward, generate, op, fit and load, entries and their ops, pos and scopes, sweeps and labels, and saves. It covers checking with nnspec compile, running with nnspec run on the nnterp, hooks, ndif or vllm engine, and reading back with nnspec show, nnspec table, Plan.load, the manifest and the safetensors files. It answers what nnspec can express (nnspec describe) and lists the silent mistakes that run without a refusal. For a technique's recipe go on to nnspec-patching, nnspec-ablation, nnspec-lenses-and-attention, nnspec-steering-and-generation or nnspec-trained-featurizers. For a refusal or wrong numbers, go to nnspec-debugging.
 ---
 
-# clab
+# nnspec
 
-clab runs an interpretability experiment on a transformer language model from one JSON document. The
+nnspec runs an interpretability experiment on a transformer language model from one JSON document. The
 document holds the checkpoint, the data, the forwards and generations, the reads and writes at the model's
-components, the ops that score them, and what to save. `clab run` runs it in one nnsight session, naming
-components in nnterp's vocabulary, and writes each saved value to a directory that `clab table` prints as rows.
+components, the ops that score them, and what to save. `nnspec run` runs it in one nnsight session, naming
+components in nnterp's vocabulary, and writes each saved value to a directory that `nnspec table` prints as rows.
 
-Verified on clab `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
+Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `openai-community/gpt2` in seconds, with their rows inline.
 
 ## Install and check
 
-clab installs from a checkout of `https://github.com/JadenFiotto-Kaufman/clab`:
+nnspec installs from a checkout of `https://github.com/JadenFiotto-Kaufman/nnspec`:
 
 ```bash
 uv sync                      # nnsight, nnterp, torch and the rest, into .venv
 source .venv/bin/activate
-clab describe records        # prints the format's records: the install works
+nnspec describe records      # prints the format's records: the install works
 ```
 
-- **nnterp comes from a checkout** of `ndif-team/nnterp`, at the path `[tool.uv.sources]` in clab's `pyproject.toml` names: point it at yours.
-- **Into another environment**, install nnterp first, then clab with `--no-deps`, since its `pyproject.toml` names nnterp by that local path.
-- **Inside the venv a command is `clab …`**; outside it, `uv run --no-sync clab …`, since a plain `uv run` re-syncs and moves transformers.
-- **The first run downloads the checkpoint**; after that, `HF_HUB_OFFLINE=1 clab run …` runs from the cache.
-- **Check a document without a model**: `clab compile documents/x.json` prints what would run and exits 0, or prints the refusal `clab run` would print, naming the document path, and exits 1.
-- **`clab describe` is the spec** on your machine; `clab describe ops` (or `components`, `pos`, `steps`, …) prints one section.
+- **nnterp comes from a checkout** of `ndif-team/nnterp`, at the path `[tool.uv.sources]` in nnspec's `pyproject.toml` names: point it at yours.
+- **Into another environment**, install nnterp first, then nnspec with `--no-deps`, since its `pyproject.toml` names nnterp by that local path.
+- **Inside the venv a command is `nnspec …`**; outside it, `uv run --no-sync nnspec …`, since a plain `uv run` re-syncs and moves transformers.
+- **The first run downloads the checkpoint**; after that, `HF_HUB_OFFLINE=1 nnspec run …` runs from the cache.
+- **Check a document without a model**: `nnspec compile documents/x.json` prints what would run and exits 0, or prints the refusal `nnspec run` would print, naming the document path, and exits 1.
+- **`nnspec describe` is the spec** on your machine; `nnspec describe ops` (or `components`, `pos`, `steps`, …) prints one section.
 
 ## A complete experiment
 
@@ -85,14 +85,14 @@ has a counterfactual whose second subject is the other name, so its answer is th
 - `saves` brings four values home, one file each; the forwards' reads stay in the run.
 
 ```text
-$ clab run documents/ioi_patch.json
+$ nnspec run documents/ioi_patch.json
 ioi_patch on nnterp (batch size 8, device cpu, tp 1) -> out/ioi_patch
   clean_ld.safetensors    clean_ld    [4,1]
   null_ld.safetensors     null_ld     [4,1]
   patched_ld.safetensors  patched_ld  [4,1]
   flipped.safetensors     flipped     [4,1]
   out/ioi_patch/manifest.json
-$ clab table out/ioi_patch clean_ld null_ld patched_ld flipped
+$ nnspec table out/ioi_patch clean_ld null_ld patched_ld flipped
 example_id  row  pos  pos_token  input                                             cf_answer  base_answer  clean_ld             null_ld              patched_ld          flipped
 mary        0    13   Ġto        When Mary and John went to the store, John gave…   John       Mary        -2.0063934326171875  -2.0063934326171875  1.2577362060546875  1.0
 tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave a…   Anna       Tom         -2.5811233520507812  -2.5811233520507812  4.474357604980469   1.0
@@ -102,7 +102,7 @@ paul        3    13   Ġto        When Paul and Lisa went to the school, Lisa ga
 
 The null equals the clean run on every row, so the read and the write are one place. The patch flips all four
 rows to the other name. `pos` 13 and `pos_token` `Ġto` say where the scored read landed: GPT-2 adds no BOS, so
-position 0 is `When`. `clab show out/ioi_patch` prints each step's cost, every entry's positions per row and each
+position 0 is `When`. `nnspec show out/ioi_patch` prints each step's cost, every entry's positions per row and each
 saved value's layout ([output](references/output.md)).
 
 ## What breaks
@@ -115,18 +115,18 @@ Each mistake below runs without a refusal and gives wrong numbers.
 - **After a fit, the bare featurizer name is the untrained draw.** Name the trained one `<fit>.<name>` (`fit.probe`) in every step after the fit ([featurizers and fit](references/featurizers-and-fit.md#members)).
 - **A fit with no `epochs: 0` point has no floor.** Sweep `"epochs": {"sweep": [0, N]}`; the trained featurizer means something only where it beats its own draw ([featurizers and fit](references/featurizers-and-fit.md#epochs-0-is-the-null)).
 - **A generate step without `do_sample: false` may sample**, from the checkpoint's generation config, and nothing seeds it. Write `"do_sample": false` on every generate step ([generate](references/generate.md#options)).
-- **Two sweeps of one field without labels zip into the diagonal.** Give each its own `label` for a grid, then check the `axes` column of `clab show` ([sweeps](references/sweeps.md#labels-zip-or-cross)).
+- **Two sweeps of one field without labels zip into the diagonal.** Give each its own `label` for a grid, then check the `axes` column of `nnspec show` ([sweeps](references/sweeps.md#labels-zip-or-cross)).
 - **A write at a slice or list of layers patches them all at once.** To patch one layer at a time, sweep `layers` ([sites and interventions](references/sites-and-interventions.md#writes-across-layers)).
 - **A swept write `pos` with an unswept read `pos` puts one read value at every position.** Sweep the read's `pos` with the write's, under one label ([sweeps](references/sweeps.md#sweep-one-value)).
 - **An unscoped `pos` between two inputs of one length pairs index with index**, whatever tokens sit there. Scope both sides to the word they share ([positions](references/positions.md#pairing-with-another-forward)).
-- **`occurrence` counts matches in the whole row**, from the first. On the IOI prompts `{"text": " to"}` is position 5, not 13; write `"occurrence": -1` for the last, and check `positions` in `clab show` ([positions](references/positions.md#scopes)).
+- **`occurrence` counts matches in the whole row**, from the first. On the IOI prompts `{"text": " to"}` is position 5, not 13; write `"occurrence": -1` for the last, and check `positions` in `nnspec show` ([positions](references/positions.md#scopes)).
 - **An index along a `select`ed axis counts within the select list.** `argmax` over `{"num_heads": [9, 6]}` gives 1 for head 6; map it back through the list ([sites and interventions](references/sites-and-interventions.md#select)).
 - **A search of generated text loses the first token's space on a SentencePiece tokenizer.** Give the column `"strip": true` wherever `contains` or a scope searches a generation ([generate](references/generate.md#the-first-generated-tokens-space)).
 - **A mean over a generation skips rows it never reached.** Count the `alignment_missing` rows first ([positions](references/positions.md#rows-a-scope-never-reached)).
 - **A freeze listed after the patch it protects undoes the patch.** Of two writes on one component and layer the later wins; list the freeze first ([sites and interventions](references/sites-and-interventions.md#the-order-entries-run-in)).
-- **A `grad` null cannot catch the wrong metric.** A `grad` of the metric with `{"op": "mul", "with": 0}` appended must be exactly 0, which proves the gradient is of that entry and the wiring exact. That the entry is the metric you report takes a central difference at one point, and the ranking real patching of the top points ([check the gradient](../clab-patching/references/attribution.md#check-the-gradient)).
+- **A `grad` null cannot catch the wrong metric.** A `grad` of the metric with `{"op": "mul", "with": 0}` appended must be exactly 0, which proves the gradient is of that entry and the wiring exact. That the entry is the metric you report takes a central difference at one point, and the ranking real patching of the top points ([check the gradient](../nnspec-patching/references/attribution.md#check-the-gradient)).
 - **A published SAE with a wrong `centered`, `activation` or layer is not refused.** State all three inline from its release, and compare its mean L0 with the release's ([featurizers and fit](references/featurizers-and-fit.md#a-published-sparse-autoencoder)).
-- **A null that passes in bfloat16 certifies the wiring, not small effects.** Recompute a few points in float32 before reading an effect near bfloat16's rounding ([the float32 rule](../clab-debugging/SKILL.md#the-float32-rule)).
+- **A null that passes in bfloat16 certifies the wiring, not small effects.** Recompute a few points in float32 before reading an effect near bfloat16's rounding ([the float32 rule](../nnspec-debugging/SKILL.md#the-float32-rule)).
 
 ## The document
 
@@ -159,12 +159,12 @@ Each mistake below runs without a refusal and gives wrong numbers.
 - **A fit's members are `<fit>.<featurizer>`, `<fit>.<eval>.<op>` and `<fit>.history.<op>`**; a `top_k` step's are `.ids`, `.probs` over a vocabulary or `.values` over another axis, and `.tokens` over logits.
 - **A forward has no value of its own**: save its entries, never the step.
 
-`clab describe steps` prints every kind's fields.
+`nnspec describe steps` prints every kind's fields.
 
 ### Entries: read or write
 
 An entry is `{"site": ..., "pos": ..., "ops": [...]}`. With no edit among its ops it reads; with one it writes,
-and the forward runs on from the written value. The edits are the `edits` group of `clab describe ops`
+and the forward runs on from the written value. The edits are the `edits` group of `nnspec describe ops`
 (`swap`, `add`, `scale`, `project_out`, …). Ops after the last edit shape what the entry binds, not what the
 model sees. Entries on one component and layer compose in the order written, whatever their site names. An operand
 (`with`, `factor`, `scale`) is a number or a named value, and broadcasts over any axis it leaves out. A root
@@ -184,7 +184,7 @@ model sees. Entries on one component and layer compose in the order written, wha
 
 `layers` is an int (no layers axis), a slice or list (`":"`, `"2:6"`, `[1, 0]`: a `layers` axis first), or a
 sweep (one point per layer); the model's own values take none. `select` narrows a feature axis and keeps it:
-`{"num_heads": [9, 6]}` is two heads, in that order. `clab describe components` lists every component.
+`{"num_heads": [9, 6]}` is two heads, in that order. `nnspec describe components` lists every component.
 
 ### Positions
 
@@ -200,7 +200,7 @@ sweep (one point per layer); the model's own values take none. `select` narrows 
 | every decode call of a generation | `{"frame": "1:"}` | one position per generated input |
 
 Leaving `pos` out reads every prompt token. A `frame` picks forward calls, a `scope` picks text, an `index`
-counts within it. `clab describe pos` has the grammar; [positions](references/positions.md) has the rest.
+counts within it. `nnspec describe pos` has the grammar; [positions](references/positions.md) has the rest.
 
 ### Ops
 
@@ -216,7 +216,7 @@ counts within it. `clab describe pos` has the grammar; [positions](references/po
 An op runs as an `op` step or inside an entry, as the same function. An entry's op runs on each batch and a
 step's on the whole value. So an op whose bits depend on the value's shape (`readout`, `encode`, a long sum)
 can differ in its last bits between the two, on the CPU too. Inside an entry an op sees one batch, so an op
-over rows belongs in a step. `clab describe ops` lists every op, and [ops](references/ops.md) says which to
+over rows belongs in a step. `nnspec describe ops` lists every op, and [ops](references/ops.md) says which to
 use for what.
 
 ### Sweeps
@@ -247,14 +247,14 @@ will read: `patched.logits` is `[4, 1, 50257]` floats where `patched_ld` is `[4,
 ## Running
 
 ```text
-clab run DOC [--engine nnterp|hooks|ndif|vllm] [--out DIR] [--batch-size N] [--padding dataset|batch|sorted]
+nnspec run DOC [--engine nnterp|hooks|ndif|vllm] [--out DIR] [--batch-size N] [--padding dataset|batch|sorted]
              [--readout full|at-reads] [--device D] [-o KEY=VALUE ...]
 ```
 
 <!-- test: skip -->
 ```python
-import clab
-plan = clab.run("documents/ioi_patch.json", out="out/ioi_patch", batch_size=8)   # the filled plan
+import nnspec
+plan = nnspec.run("documents/ioi_patch.json", out="out/ioi_patch", batch_size=8)   # the filled plan
 plan.results["patched_ld"][:, 0]        # tensor([1.2577, 4.4744, 2.5320, 3.9496])
 ```
 
@@ -272,8 +272,8 @@ memory.
 
 ## Reading back
 
-- **`clab show OUT`** prints the run record, each step's cost, every entry's positions per row, and each saved value's layout and shape.
-- **`clab table OUT NAME ...`** prints saved values as rows, labelled with row, position, token and the columns their steps used; `--csv` prints every cell whole.
+- **`nnspec show OUT`** prints the run record, each step's cost, every entry's positions per row, and each saved value's layout and shape.
+- **`nnspec table OUT NAME ...`** prints saved values as rows, labelled with row, position, token and the columns their steps used; `--csv` prints every cell whole.
 - **`Plan.load(OUT)`** gives `results` (tensors by name), `table(...)` (rows as dicts), `steps` (each entry's `positions`) and `run` (versions, sizes, tokens, costs).
 - **Each save is `<name>.safetensors`**, its tensor under the save's name (a swept one's keyed `layers=8`, a bundle's by its tensors), or `<name>.json` where it holds text.
 
@@ -281,12 +281,12 @@ memory.
 
 ## Which skill
 
-- **`clab-patching`**: which layer, position, head, neuron or path carries a behaviour; interchange, path and attribution patching.
-- **`clab-ablation`**: what a component contributes when removed: zero, mean, resample, constant, neuron and expert ablation.
-- **`clab-lenses-and-attention`**: what each layer predicts (logit and tuned lens) and where a head looks.
-- **`clab-steering-and-generation`**: steering with a direction, and scoring what a generation says.
-- **`clab-trained-featurizers`**: DAS, DBM, head masks, SAEs, probes, LoRA, cached harvests and bundles.
-- **`clab-debugging`**: a refusal, numbers that look wrong, runs that differ, out of memory.
+- **`nnspec-patching`**: which layer, position, head, neuron or path carries a behaviour; interchange, path and attribution patching.
+- **`nnspec-ablation`**: what a component contributes when removed: zero, mean, resample, constant, neuron and expert ablation.
+- **`nnspec-lenses-and-attention`**: what each layer predicts (logit and tuned lens) and where a head looks.
+- **`nnspec-steering-and-generation`**: steering with a direction, and scoring what a generation says.
+- **`nnspec-trained-featurizers`**: DAS, DBM, head masks, SAEs, probes, LoRA, cached harvests and bundles.
+- **`nnspec-debugging`**: a refusal, numbers that look wrong, runs that differ, out of memory.
 
-Depth, and extending clab with a new op, kind, component or engine, are in the docs:
-`https://github.com/JadenFiotto-Kaufman/clab/tree/master/docs`.
+Depth, and extending nnspec with a new op, kind, component or engine, are in the docs:
+`https://github.com/JadenFiotto-Kaufman/nnspec/tree/master/docs`.

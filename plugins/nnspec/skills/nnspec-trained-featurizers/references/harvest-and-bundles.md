@@ -2,20 +2,20 @@
 
 A bundle is a safetensors file holding one featurizer's tensors and a header naming what made them. A cached
 harvest is a saved read that a `load` step brings into another document. Both resolve against the corpus
-root, and both are checked against the loading document before the model loads. Output directories, `clab
-show` and `Plan.load` are the `clab` skill's [output reference](../../clab/references/output.md); `--out` and
-the corpus root are its [running reference](../../clab/references/running-and-engines.md).
+root, and both are checked against the loading document before the model loads. Output directories, `nnspec
+show` and `Plan.load` are the `nnspec` skill's [output reference](../../nnspec/references/output.md); `--out` and
+the corpus root are its [running reference](../../nnspec/references/running-and-engines.md).
 
 ## What breaks here
 
 - **`file_path` and `from` resolve against the corpus root**
-  ([which folder that is](../../clab/references/running-and-engines.md#where-output-goes)). `clab run` writes
+  ([which folder that is](../../nnspec/references/running-and-engines.md#where-output-goes)). `nnspec run` writes
   `out/<document>/` under the working directory, so run, show and table from the root; from elsewhere a bundle
   is refused (`out/das/fit.rot.safetensors does not exist under the corpus root; run the document that writes
   it first`).
 - **Two runs agree to the bit at one batch size and thread count**, a fit's body at its own `batch_size`;
-  what moves bits is the `clab-debugging` skill's
-  [reproducibility](../../clab-debugging/SKILL.md#reproducing-a-number).
+  what moves bits is the `nnspec-debugging` skill's
+  [reproducibility](../../nnspec-debugging/SKILL.md#reproducing-a-number).
 - **A cache is the run that made it.** Change a row, a `take` or a `shuffle`, and every load of the old cache is
   refused until the harvest runs again. Only names in the harvesting run's `saves` have files.
 
@@ -34,7 +34,7 @@ A saved `fit.<name>`, and a saved `pca` op step, is a bundle: `out/<document>/<n
 | `affine` | `W` `[768, 768]`, `b` `[768]`; over layers, `[layers, 768, 768]` and `[layers, 768]` | over layers, `over`, and `layer` lists them (`[4, 5]`) |
 | `constant` | `vector` `[768]` | nothing more |
 
-Every header also records `format` (`clab/1`), `kind`, `model.key`, `model.revision`, `model.dtype`,
+Every header also records `format` (`nnspec/1`), `kind`, `model.key`, `model.revision`, `model.dtype`,
 `component`, `layer`, `width` and `document`, each as a string. To read one, from the corpus root:
 
 <!-- test: skip -->
@@ -46,12 +46,12 @@ with safe_open("out/das/fit.rot.safetensors", "pt") as f:
 ```
 
 ```text
-{'component': 'layer_output', 'document': 'das', 'format': 'clab/1', 'k': '4', 'kind': 'subspace', 'layer': '5', 'model.dtype': 'float32', 'model.key': 'openai-community/gpt2', 'model.revision': '607a30d783dfa663caf39e06633721c8d4cfcd7e', 'parametrization': 'cayley', 'width': '768'} {'basis': [768, 4]}
+{'component': 'layer_output', 'document': 'das', 'format': 'nnspec/1', 'k': '4', 'kind': 'subspace', 'layer': '5', 'model.dtype': 'float32', 'model.key': 'openai-community/gpt2', 'model.revision': '607a30d783dfa663caf39e06633721c8d4cfcd7e', 'parametrization': 'cayley', 'width': '768'} {'basis': [768, 4]}
 ```
 
 A swept fit writes one file whose keys carry each point's coordinate (`mask.mask=1.0/theta`). No featurizer
 loads it; rerun the document unswept at the point you keep. A hand-made bundle loads if it has the tensors
-and the header a clab one has, as a multi-class probe's span saved as a `subspace` does
+and the header an nnspec one has, as a multi-class probe's span saved as a `subspace` does
 ([probes-and-lora.md](probes-and-lora.md#use-a-probe-causally)). A file with no header is a published one, and
 only an `sae` reads it ([sae.md](sae.md#splice-in-a-published-dictionary)).
 
@@ -97,7 +97,7 @@ read's site), so every step after it treats it as the value it was.
 ```
 
 ```text
-clab run documents/harvest.json
+nnspec run documents/harvest.json
 harvest on nnterp (batch size 8, device cpu, tp 1) -> out/harvest
   harvest.acts.safetensors  harvest  [7,6,768]
 ```
@@ -130,7 +130,7 @@ place of the forward:
 ```
 
 - **The step's value is named by the step**, `harvest`, as an op step's is.
-- **No forward runs.** `clab show out/sae_cached` lists 0 forwards for both steps and `served: float32 on
+- **No forward runs.** `nnspec show out/sae_cached` lists 0 forwards for both steps and `served: float32 on
   meta`: a document of loads and op steps loads no weights.
 - **The fit equals one on the harvest made in-document.** The same document with `harvest` a forward of
   `days.input` at layer 5 from position 1 trains a dictionary equal to the bit, at one batch size.
@@ -139,7 +139,7 @@ place of the forward:
 
 A loaded read feeds any step a read does, and no fit is needed. These steps, in a document with
 `harvest.json`'s model and `days` and the sites `target` (layer 5's `layer_output`) and `head`
-(`lm_head_output`), mean-ablate the last token with the harvest's mean (the `clab-ablation` skill's recipe):
+(`lm_head_output`), mean-ablate the last token with the harvest's mean (the `nnspec-ablation` skill's recipe):
 
 ```json
 {
@@ -153,7 +153,7 @@ A loaded read feeds any step a read does, and no fit is needed. These steps, in 
 }
 ```
 
-`clab show` lists 0 forwards for `harvest` and `average`, and `kl` equals the same document's with the
+`nnspec show` lists 0 forwards for `harvest` and `average`, and `kl` equals the same document's with the
 harvest's forward in place of the load to the bit.
 
 A load is refused before any model loads when it does not match its source:

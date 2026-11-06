@@ -3,7 +3,7 @@
 Attribution patching estimates what patching would measure, to first order: the metric's gradient at a site
 on the base run, times the counterfactual's value there less the base's, summed over the site's features. One
 backward gives the gradient at every site of a forward, so a map over every head costs two forwards where
-patching costs one per head. In clab the gradient is a read: an entry whose first op is `grad`. Rank with
+patching costs one per head. In nnspec the gradient is a read: an entry whose first op is `grad`. Rank with
 attribution, then confirm what you report with real patching ([the top points](#confirm-the-top-points)).
 
 ## What breaks
@@ -16,7 +16,7 @@ attribution, then confirm what you report with real patching ([the top points](#
 - **`scale` 0 is not the null.** It is an edit, so after a metric it is refused:
 
   ```text
-  clab: steps.base.interventions.zero.ops[1]: 'scale' is an edit, which writes back, and it follows 'logit_diff', which turned the value into ['rows', 'pos']: there is no live value to write; an edit comes before it, or put the transform in a later entry at this site
+  nnspec: steps.base.interventions.zero.ops[1]: 'scale' is an edit, which writes back, and it follows 'logit_diff', which turned the value into ['rows', 'pos']: there is no live value to write; an edit comes before it, or put the transform in a later entry at this site
   ```
 
   `mul` writes nothing, so the null can stand anywhere in the forward.
@@ -34,7 +34,7 @@ attribution, then confirm what you report with real patching ([the top points](#
 - **`of` names an entry of the same forward, bare, at a site the forward reaches later.** `grad` is refused in
   a `generate`, in a fit's body and under `tp`.
 - **A bfloat16 model's gradient is bfloat16.** Recompute the components you report in float32 (the
-  `clab-debugging` skill has the rule).
+  `nnspec-debugging` skill has the rule).
 
 ## Every head from one backward
 
@@ -98,11 +98,11 @@ them in op steps after it. This runs on the IOI rows of `documents/head_patching
   `base.z` must be exactly zero, which checks that the two reads are one selection.
 
 ```text
-$ clab table out/attribution_heads g0_max self_max
+$ nnspec table out/attribution_heads g0_max self_max
 g0_max  self_max
 0.0     0.0
 
-$ clab table out/attribution_heads map
+$ nnspec table out/attribution_heads map
 layer  num_heads  value
 7      3          0.6353127360343933
 7      9          0.8699591755867004
@@ -177,11 +177,11 @@ division zip. This fragment is the `sites`, `interventions` and `steps` of `docu
 ```
 
 ```text
-$ clab table out/gradient_check h_max ones_max
+$ nnspec table out/gradient_check h_max ones_max
 h_max                ones_max
 0.24178534746170044  7.152557373046875e-07
 
-$ clab table out/gradient_check gap_max
+$ nnspec table out/gradient_check gap_max
 at             value
 {"step":1.0}   0.004122670739889145
 {"step":0.3}   0.0005037952214479446
@@ -225,7 +225,7 @@ from the same one backward. This fragment is the `sites` and `steps` of `documen
 }
 ```
 
-`map` is `[layers, pos]`; `clab table out/attribution_map map` prints a row per layer and position. Its `pos`
+`map` is `[layers, pos]`; `nnspec table out/attribution_map map` prints a row per layer and position. Its `pos`
 counts within the read's `0:7` window, here the position itself; in a `-3:` window, 0 is the third token from
 the end. Beside the patching map's effect (its `ld_mean` less `clean_mean`) at the day's token and the last token:
 
@@ -281,7 +281,7 @@ patches two top points of the map above, the day at layer 2 and the last token a
 ```
 
 ```text
-$ clab table out/top_points clean_mean null_mean l2_p3_mean l10_p6_mean
+$ nnspec table out/top_points clean_mean null_mean l2_p3_mean l10_p6_mean
 clean_mean           null_mean            l2_p3_mean          l10_p6_mean
 -1.6586096286773682  -1.6586096286773682  1.7238038778305054  1.6707872152328491
 ```
@@ -329,8 +329,8 @@ most. It is attribution with zero as the counterfactual, from one prompt and one
 ```
 
 ```text
-$ clab run documents/rank_neurons.json
-$ clab table --csv out/rank_neurons top.ids top.values
+$ nnspec run documents/rank_neurons.json
+$ nnspec table --csv out/rank_neurons top.ids top.values
 example_id,row,pos,pos_token,input,top.ids,top.values
 eiffel,0,9,Ġof,The Eiffel Tower is in the city of,"{""intermediate_size"":[483,1931,1434,1437,1793],""layers"":[6,7,8,5,10]}","[0.01716592349112034,0.016079207882285118,0.010278166271746159,0.00914700049906969,0.008967471309006214]"
 ```
@@ -369,7 +369,7 @@ as its site's `select` list. This fragment is the `sites` and `steps` of `docume
 ```
 
 ```text
-$ clab table out/zero_top zeroed.p
+$ nnspec table out/zero_top zeroed.p
 at            ...  value
 {"keep":0.0}  ...  0.027501443400979042
 {"keep":1.0}  ...  0.06997019797563553
@@ -378,5 +378,5 @@ at            ...  value
 - **The null equals the clean probability to the bit**, and zeroing the five takes it from 0.0700 to 0.0275.
 - **The first-order drops sum to 0.0617 against a real drop of 0.0425**: the estimate ranks, and overshoots.
 - **Neurons drawn at random, the same count per layer, are the control** that says the top set is special; it
-  is the `clab-ablation` skill's. When the sets span several layers, write one document per random draw: a
+  is the `nnspec-ablation` skill's. When the sets span several layers, write one document per random draw: a
   shared sweep label needs identical values, so per-layer sites of different sets cannot be one sweep.

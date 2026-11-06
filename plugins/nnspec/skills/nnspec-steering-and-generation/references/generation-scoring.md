@@ -37,7 +37,7 @@ the reasoning in tokens:
 }
 ```
 
-`clab table out/after_marker marked said said_final steps_len`:
+`nnspec table out/after_marker marked said said_final steps_len`:
 
 ```text
 example_id  row  chat                                              marked  answer     said  said_final  steps_len
@@ -116,7 +116,7 @@ forced input:
 }
 ```
 
-`clab table out/forced_capitals seq_gold seq_other prefers_gold exact exact_other seq_first said`:
+`nnspec table out/forced_capitals seq_gold seq_other prefers_gold exact exact_other seq_first said`:
 
 ```text
 example_id  row  input                                             gold           seq_gold             other      seq_other           prefers_gold  exact  exact_other  seq_first            said
@@ -128,7 +128,7 @@ argentina   4    Is the capital of Argentina Cordoba or Buenos A…   Buenos Air
 zealand     5    Is the capital of New Zealand Auckland or Welli…   Wellington    1.7330877780914307    Auckland  0.6762439608573914  0.0           0.0    1.0           0.5200220942497253    Auckland.\n
 ```
 
-`clab show out/forced_capitals` prints where each read landed:
+`nnspec show out/forced_capitals` prints where each read landed:
 
 ```text
   entry         at  positions
@@ -146,7 +146,7 @@ zealand     5    Is the capital of New Zealand Auckland or Welli…   Wellington
   row's negative log-likelihood is then 1.757 instead of 0.348.
 - **The sequence score of a forced answer is `cross_entropy` summed over `pos`**, its negative
   log-likelihood (`seq_gold`). `token_prob` and `cross_entropy` give one value per token: ` Ankara`,
-  ` Brasilia` and ` Buenos Aires` are two tokens, and `clab table out/forced_capitals nll_gold` prints two
+  ` Brasilia` and ` Buenos Aires` are two tokens, and `nnspec table out/forced_capitals nll_gold` prints two
   lines on those rows.
 - **The appended answer needs its leading space** (` Canberra`), since a list input joins with nothing
   between. Without it the answer joins the prompt's last word: `isCanberra`, tokens `Can`, `berra`. That is
@@ -155,7 +155,7 @@ zealand     5    Is the capital of New Zealand Auckland or Welli…   Wellington
 - **A list input takes text columns and `{"text": ...}` texts only.** A chat column there is refused:
 
 ```text
-clab: steps.f.input[0]: 'qa.chat' is not text on row 0 of 'qa'; a list input joins text
+nnspec: steps.f.input[0]: 'qa.chat' is not text on row 0 of 'qa'; a list input joins text
 ```
 
 ### Forcing an assistant reply
@@ -193,7 +193,7 @@ refuses a chat column. Append the reply to that text, and check that the text an
 }
 ```
 
-`clab table out/forced_reply agree` prints `1.0`; `clab table out/forced_reply seq`:
+`nnspec table out/forced_reply agree` prints `1.0`; `nnspec table out/forced_reply seq`:
 
 ```text
 example_id  row  text                                              reply                            value
@@ -216,14 +216,14 @@ bare        2    <|im_start|>system\nYou are a helpful AI assist…  Paris      
   answer is its tokens: bare `Tokyo` is `To`, `kyo` where ` Tokyo` is one. A one-position read of it is
   refused without naming the space: `'Tokyo' is 2 tokens; the read has 1 position on that row`.
 - **The text holds the template's default system message**, which the chat never states. Render it outside
-  clab with the tokenizer's `apply_chat_template(messages, tokenize=False, add_generation_prompt=True)`,
+  nnspec with the tokenizer's `apply_chat_template(messages, tokenize=False, add_generation_prompt=True)`,
   which gives this row's `text` exactly, never from memory of the template.
 
 ## Scoring a reply to a chat
 
-A chat column, `template`, `add_generation_prompt` and the system message a template writes are the `clab`
-skill's [data reference](../../clab/references/data.md#chats), and the `turn` scope its
-[positions reference](../../clab/references/positions.md#chat-turns). This document scores the reply to a
+A chat column, `template`, `add_generation_prompt` and the system message a template writes are the `nnspec`
+skill's [data reference](../../nnspec/references/data.md#chats), and the `turn` scope its
+[positions reference](../../nnspec/references/positions.md#chat-turns). This document scores the reply to a
 follow-up question, with and without the assistant's header:
 
 ```json
@@ -255,7 +255,7 @@ follow-up question, with and without the assistant's header:
 }
 ```
 
-`clab table out/chat_turns text said`, then `closed_text closed_said`, then `clab show out/chat_turns`:
+`nnspec table out/chat_turns text said`, then `closed_text closed_said`, then `nnspec show out/chat_turns`:
 
 ```text
 example_id  row  chat                                              text                                       answer   said
@@ -270,7 +270,7 @@ japan       0    [{"role":"user","content":"What is the capital …  <|im_start|
 
 - **Without the header the model writes it**: 4 of `closed`'s 10 tokens are `<|im_start|>`, `ass`, `istant`
   and `Ċ`, and `detokenize` keeps them, so a read at a fixed decode call lands in the header.
-- **Check a turn's positions in `clab show`**: `follow_up` lands at 52, the `?` of "And of Japan?", and `reply`
+- **Check a turn's positions in `nnspec show`**: `follow_up` lands at 52, the `?` of "And of Japan?", and `reply`
   at 58, the header's newline.
 - **A table joins one dataset's values.** Tabling `said` beside `closed_said` is refused: `'said' has a row
   per example of 'asked' and 'closed_said' of 'closed'; a table joins the values of one dataset`. Table them
@@ -279,8 +279,8 @@ japan       0    [{"role":"user","content":"What is the capital …  <|im_start|
 ## Counting missing rows per sweep point
 
 A read at generated text is `alignment_missing` on a row that never says the text. How that passes through
-ops and tables, and the count inside a document, are the `clab` skill's
-[positions reference](../../clab/references/positions.md#rows-a-scope-never-reached). In a sweep, count each
+ops and tables, and the count inside a document, are the `nnspec` skill's
+[positions reference](../../nnspec/references/positions.md#rows-a-scope-never-reached). In a sweep, count each
 point: a steered generation reaches fewer rows as the dose rises. A read added to the `steered` step of the
 skill's `steer_generation.json` (a fragment of its `interventions`):
 
@@ -292,7 +292,7 @@ Saved as `steer_said.json`, each point's record lists the rows that read missed:
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 
 plan = Plan.load("out/steer_said")
 for point in plan.steps["steered"]:

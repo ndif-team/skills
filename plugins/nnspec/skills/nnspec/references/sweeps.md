@@ -6,21 +6,21 @@ labels make a grid.
 
 ## Sweep one value
 
-The clab skill's worked document, `ioi_patch.json`, swept over every layer is one changed site:
+The nnspec skill's worked document, `ioi_patch.json`, swept over every layer is one changed site:
 
 ```json
 {"resid": {"component": "layer_output", "layers": {"sweep": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]}}}
 ```
 
 with `{"kind": "op", "op": "mean", "of": "null_ld"}` and the same over `patched_ld` as `mean_null` and
-`mean_patched`. The run prints `12 points, each []` for each mean, and `clab table out/ioi_layer_sweep mean_null
-mean_patched` one row per point, keyed in `at` (the full table is in the clab skill).
+`mean_patched`. The run prints `12 points, each []` for each mean, and `nnspec table out/ioi_layer_sweep mean_null
+mean_patched` one row per point, keyed in `at` (the full table is in the nnspec skill).
 
 - **A step that references a swept value inherits its points.** The read `counterfactual.v_cf`, the writes and both metrics all have twelve points.
 - **One swept site used by several entries is one axis**, so the read at layer L pairs with the write at layer L.
 - **A step that uses nothing swept runs once and serves every point.**
 - **A swept write against an unswept read writes the read's one value at every point.** A write `pos` swept alone moves where the counterfactual's value lands, not where it was read.
-- **To patch each position from the same position, sweep the read's `pos` with the write's.** Both default to the label `pos`, so they pair; a layer-by-position map is the `clab-patching` skill's.
+- **To patch each position from the same position, sweep the read's `pos` with the write's.** Both default to the label `pos`, so they pair; a layer-by-position map is the `nnspec-patching` skill's.
 
 ## What may sweep
 
@@ -80,13 +80,13 @@ apart so they cross:
 ```
 
 ```text
-$ clab table out/src_dst_cross mean_ld
+$ nnspec table out/src_dst_cross mean_ld
 at                 value
 {"src":6,"dst":6}  -2.7089176177978516
 {"src":6,"dst":8}  -0.3985748291015625
 {"src":8,"dst":6}  -0.7093219757080078
 {"src":8,"dst":8}  3.053426742553711
-$ clab show out/src_dst_cross
+$ nnspec show out/src_dst_cross
   ...
   step            at           serves        seconds  memory  forwards  tokens  real
   counterfactual  src=6        all 2 points  …        —       1         56      56
@@ -99,7 +99,7 @@ $ clab show out/src_dst_cross
 The same document with both `label`s removed zips into the diagonal, two points:
 
 ```text
-$ clab table out/src_dst_zip mean_ld
+$ nnspec table out/src_dst_zip mean_ld
 at            value
 {"layers":6}  -2.7089176177978516
 {"layers":8}  3.053426742553711
@@ -115,7 +115,7 @@ at            value
 | one label in two ops of one entry, or in two entries of a step | one | zipped; a forward per point where any of them writes |
 | one label over different values | — | refused |
 
-- **Check the `axes` column of `clab show` before trusting a grid**: a grid that zipped has one axis where you expected two.
+- **Check the `axes` column of `nnspec show` before trusting a grid**: a grid that zipped has one axis where you expected two.
 - **One label over different values is refused**: `sites.head2.layers: label 'layers' is also the sweep at sites.resid.layers, over [0, 1]; one label is one axis, …; give one of them its own label to cross them`.
 - **A label is letters, digits and underscores**, since a coordinate is written `<label>=<value>`.
 - **Scattered points are not one axis.** Five chosen (layer, head) pairs under one label are refused as one label over different values. Cross the layers and heads they use and read the cells you want, or write one site per pair.
@@ -126,7 +126,7 @@ at            value
 - **Points that differ only in what they read share one forward**: `counterfactual` above runs once for both `src` points (`serves all 2 points`).
 - **Each point that changes a write, an operand or an option runs its own forward**: `patched` runs four. An edit and a later read op of one entry on one sweep run a forward per point too.
 - **The layer sweep above runs 26 forwards**: one `clean` and one `counterfactual` forward serve all twelve points, and `null` and `patched` run twelve each.
-- **A value is made once per point on the axes it depends on** (its `axes` in `clab show`); a read that depends on none is one value.
+- **A value is made once per point on the axes it depends on** (its `axes` in `nnspec show`); a read that depends on none is one value.
 - **A large grid grows the manifest and compile time** faster than the points; split it into documents by layer range.
 
 ## Widen the read instead
@@ -150,13 +150,13 @@ A swept save holds one value per point, keyed by its coordinate, its value on ea
 
 | where | key | example |
 |---|---|---|
-| `clab table`, `plan.table`: column `at` | an object | `{"src":6,"dst":8}` |
+| `nnspec table`, `plan.table`: column `at` | an object | `{"src":6,"dst":8}` |
 | `plan.results[name]` | a plain dict: the value for one axis, a tuple in axis order for several | `8`, `(6, 8)` |
-| output files, `clab show`, `plan.run.costs`, `plan.run.tokens` | `label=value` joined by commas | `src=6,dst=8` |
+| output files, `nnspec show`, `plan.run.costs`, `plan.run.tokens` | `label=value` joined by commas | `src=6,dst=8` |
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 
 plan = Plan.load("out/src_dst_cross")
 plan.sweeps                              # {'src': Axis(values=[6, 8]), 'dst': Axis(values=[6, 8])}
@@ -167,4 +167,4 @@ Plan.load("out/ioi_layer_sweep").results["mean_patched"][8]   # tensor(3.0534)
 
 - **Axes follow the format's root keys** (`data`, `sites`, `interventions`, `featurizers`, `steps`), then document order inside each; a coordinate tuple follows `plan.sweeps`.
 - **A swept `pos`'s coordinate is not the table's `pos` column**: `at` holds the swept value, `pos` the position the tabled read landed on.
-- **Values swept over different axes cross in a table**, a row per example at every pair of points; an unswept value repeats beside every point ([output](output.md#clab-table)).
+- **Values swept over different axes cross in a table**, a row per example at every pair of points; an unswept value repeats beside every point ([output](output.md#nnspec-table)).

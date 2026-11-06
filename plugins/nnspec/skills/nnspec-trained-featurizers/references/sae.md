@@ -3,8 +3,8 @@
 An `sae` featurizer is a dictionary at one site. `encode` reads its latents, laid out `[rows, pos, features]`.
 An `encode`, edits, `decode` bracket changes latents and keeps the error term (what the dictionary does not
 explain) exactly. `apply` replaces the value with the reconstruction, the error term dropped. Each kind's
-fields are the `clab` skill's [featurizers-and-fit reference](../../clab/references/featurizers-and-fit.md);
-`top_k` and the reductions are its [ops reference](../../clab/references/ops.md).
+fields are the `nnspec` skill's [featurizers-and-fit reference](../../nnspec/references/featurizers-and-fit.md);
+`top_k` and the reductions are its [ops reference](../../nnspec/references/ops.md).
 
 Every document here runs on GPT-2's layer 5 output. The dictionary is the one `sae_train.json` trains below,
 on 16 sentences: its latents show the mechanics on a real model, from a training set far too small to name
@@ -27,7 +27,7 @@ features by.
 
 ## Splice in a published dictionary
 
-SAELens and Gemma Scope publish a dictionary as a safetensors file with no clab header. For a 768-wide site
+SAELens and Gemma Scope publish a dictionary as a safetensors file with no nnspec header. For a 768-wide site
 and `d_sae` latents it holds:
 
 | tensor | shape | in |
@@ -44,7 +44,7 @@ The document states the three fields the file cannot: `activation`, `centered` a
 <!-- test: skip -->
 ```json
 {
-  "description": "Splice a published JumpReLU SAE into GPT-2. The file holds W_enc, W_dec, b_enc, b_dec and threshold and no clab header. The document states what the release says: its activation, whether its encoder subtracts b_dec (centered), and its layer, inline. mean_l0 over every token after the first is the number to compare with the release's; kl is KL(clean || spliced) at the last token.",
+  "description": "Splice a published JumpReLU SAE into GPT-2. The file holds W_enc, W_dec, b_enc, b_dec and threshold and no nnspec header. The document states what the release says: its activation, whether its encoder subtracts b_dec (centered), and its layer, inline. mean_l0 over every token after the first is the number to compare with the release's; kl is KL(clean || spliced) at the last token.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"text": {"rows": [
     {"input": "The cat sat on the mat and looked out of the window."},
@@ -95,14 +95,14 @@ Refused once the weights load:
 
 - a use at another layer than `site` (`featurizer 'dictionary' was trained at layer_output layer 5 (its
   site); this use is layer_output layer 6`);
-- a file whose width is not the site's (`has no clab header and is 700 wide; this document uses 'dictionary'
+- a file whose width is not the site's (`has no nnspec header and is 700 wide; this document uses 'dictionary'
   at layer_output, whose width is 768`).
 
 Run, and give wrong numbers:
 
 - **A wrong `centered`.** `sae_train.json`'s dictionary, resaved with `save_file` and no metadata plus a
   zero `threshold`, loads as this document's file. It gives mean L0 21.7 stated `centered: false` and 24.625
-  stated `true`, as it was trained; the `true` run equals the clab bundle's on the same rows to the bit.
+  stated `true`, as it was trained; the `true` run equals the nnspec bundle's on the same rows to the bit.
 - **A TopK file stated as `relu`.** It keeps every positive pre-activation. The TopK dictionary below, resaved
   with no metadata, gives mean L0 15.0 stated `relu` and 14.6 stated `topk` over this document's four
   sentences. An L0 at or below `k` does not prove the activation right: read it from the release.
@@ -162,11 +162,11 @@ draw:
 ```
 
 ```text
-clab run documents/sae_train.json
-clab table out/sae_train fit.train.mse
+nnspec run documents/sae_train.json
+nnspec table out/sae_train fit.train.mse
 value
 173.5391845703125
-clab table out/sae_train fit.train.mean_l0
+nnspec table out/sae_train fit.train.mean_l0
 value
 18.985916137695312
 ```
@@ -220,8 +220,8 @@ An `encode`'s or an `apply`'s `featurizer` may be a sweep over featurizer names.
 ```
 
 ```text
-clab run documents/sae_compare.json
-clab table out/sae_compare mean_l0 mean_kl
+nnspec run documents/sae_compare.json
+nnspec table out/sae_compare mean_l0 mean_kl
 at              mean_l0             mean_kl
 {"sae":"relu"}  24.625              0.07636677473783493
 {"sae":"topk"}  14.574999809265137  0.06824039667844772
@@ -265,14 +265,14 @@ Rank the latents where the variable is, here at the day token of the seven weekd
 ```
 
 ```text
-clab table out/sae_rank top
+nnspec table out/sae_rank top
 row  pos  pos_token   input                               value
 0    3    ĠMonday     If today is Monday, tomorrow is     {"ids":[497,376,195],"values":[64.8859558105468…
 2    3    ĠWednesday  If today is Wednesday, tomorrow is  {"ids":[497,376,54],"values":[63.70417785644531…
 6    3    ĠSunday     If today is Sunday, tomorrow is     {"ids":[497,408,38],"values":[63.27565383911133…
 ```
 
-`clab table out/sae_rank fires` lists each latent's count of rows: 15 of the 512 fire at the day token,
+`nnspec table out/sae_rank fires` lists each latent's count of rows: 15 of the 512 fire at the day token,
 latents 497 and 376 on all seven rows, and latent 0 on none. A `top_k` over a value with no rows axis does not
 table (`has no rows to table: it is laid out ['k'] ...; read it from plan.results`).
 
@@ -322,11 +322,11 @@ answer column needed, the whole distribution:
 ```
 
 ```text
-clab run documents/sae_ablation.json
-clab table out/sae_ablation mean_clean
+nnspec run documents/sae_ablation.json
+nnspec table out/sae_ablation mean_clean
 value
 0.22559413313865662
-clab table out/sae_ablation mean_delta mean_kl max_shift
+nnspec table out/sae_ablation mean_delta mean_kl max_shift
 at                mean_delta            mean_kl              max_shift
 {"features":497}  0.0915023684501648    0.4922812581062317   33.44483947753906
 {"features":376}  -0.13322243094444275  0.20359280705451965  4.266571044921875
@@ -384,8 +384,8 @@ after the first:
 ```
 
 ```text
-clab run documents/sae_maxact.json
-clab table out/sae_maxact top
+nnspec run documents/sae_maxact.json
+nnspec table out/sae_maxact top
 features  k  row  pos  pos_token   input                                         value
 0         0  4    5    Ġtomorrow   If today is Friday, tomorrow is Saturday.     74.52745056152344
 0         1  5    5    Ġtomorrow   If today is Saturday, tomorrow is Sunday.     74.2275161743164

@@ -1,35 +1,35 @@
 ---
 name: nnspec-lenses-and-attention
-description: "Find the layer where a model's prediction forms, and where its attention heads look, with clab documents. The logit lens: readout at every layer in one forward, its wiring check, top-k tokens and KL per layer. The tuned lens: one `affine` translator per layer, trained in the run. What the model says at a position, and a different correct next token at each position. Attention patterns under eager attention: previous-token and induction heads, sinks, head entropy, the weight on a subject, queries after RoPE. Knocking out a head or a key is clab-ablation. Patching a pattern, or testing which layer causally carries an answer, is clab-patching. Probes, SAEs, DAS and reusing a trained lens elsewhere are clab-trained-featurizers. Generating, scoring what a generation said, and steering are clab-steering-and-generation. A refusal or wrong numbers is clab-debugging; the format is the clab skill."
+description: "Find the layer where a model's prediction forms, and where its attention heads look, with nnspec documents. The logit lens: readout at every layer in one forward, its wiring check, top-k tokens and KL per layer. The tuned lens: one `affine` translator per layer, trained in the run. What the model says at a position, and a different correct next token at each position. Attention patterns under eager attention: previous-token and induction heads, sinks, head entropy, the weight on a subject, queries after RoPE. Knocking out a head or a key is nnspec-ablation. Patching a pattern, or testing which layer causally carries an answer, is nnspec-patching. Probes, SAEs, DAS and reusing a trained lens elsewhere are nnspec-trained-featurizers. Generating, scoring what a generation said, and steering are nnspec-steering-and-generation. A refusal or wrong numbers is nnspec-debugging; the format is the nnspec skill."
 ---
 
 # Lenses and attention patterns
 
-Verified on clab `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on the
+Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on the
 CPU in seconds on `openai-community/gpt2` (12 layers of 12 heads, no BOS), one on
 `HuggingFaceTB/SmolLM2-135M-Instruct`.
 
 Everything here reads; nothing writes into the forward. The format (sites, `pos`, ops, sweeps, running,
-`clab table`) is the `clab` skill's ([SKILL.md](../clab/SKILL.md)); this skill gives the recipes.
+`nnspec table`) is the `nnspec` skill's ([SKILL.md](../nnspec/SKILL.md)); this skill gives the recipes.
 
 ## What breaks
 
 - **A lens read without its wiring check.** Every layer looks plausible whether or not `readout` is the model's
   own computation. Write the check as op steps: `kl` of a `readout` step against `logits` read at the same `pos` is
   0.0 at the last layer, or the lens is wrong. In an entry `readout` runs per batch and can differ from the step in
-  the last bits ([the `clab-debugging` skill](../clab-debugging/SKILL.md#reproducing-a-number)).
+  the last bits ([the `nnspec-debugging` skill](../nnspec-debugging/SKILL.md#reproducing-a-number)).
 - **Reading only the output's top token.** On "The Colosseum is in the city of", ` Rome` is 0.84 at layer 9 and
   0.014 at the output, whose top token is ` P`. Score the answer at every layer.
 - **An early layer's lens is not what the layer knows.** The final norm and head were trained on the last layer's
   stream. Compare layers with each other and with `to_final`, or train a [tuned lens](references/tuned-lens.md).
-- **An answer without its leading space is another token** (the `clab` skill's list); `Ġ` in a decoded token is
+- **An answer without its leading space is another token** (the `nnspec` skill's list); `Ġ` in a decoded token is
   GPT-2's leading space.
 - **An attention component needs eager attention**: add `"attn_implementation": "eager"` to the `model` block, or it
-  is refused ([which components](../clab/references/sites-and-interventions.md#attention-needs-eager)).
+  is refused ([which components](../nnspec/references/sites-and-interventions.md#attention-needs-eager)).
 - **A key counted from the start for a score relative to the query.** `select: {"key": 1}` is the same token at
   every query. A previous-token or induction score is `{"key": {"offset": -1}}`, the key at a fixed distance
   from each query. A key counted from the end (`-1`) is refused, and so is an offset in a write.
-- **A `top_k` or `argmax` id along a narrowed axis counts within it** (the `clab` skill's list): under
+- **A `top_k` or `argmax` id along a narrowed axis counts within it** (the `nnspec` skill's list): under
   `"layers": "4:"`, add 4.
 
 ## The logit lens
@@ -70,7 +70,7 @@ own final norm and head, as if that layer were the last; `"layers": ":"` reads e
 ```
 
 - `run.h` is laid out `layers, rows, pos, hidden_size`; `lens` replaces `hidden_size` with `vocab_size`.
-- `readout` takes a component `clab describe components` marks `stream`, such as `layer_output` or `mlp_output`.
+- `readout` takes a component `nnspec describe components` marks `stream`, such as `layer_output` or `mlp_output`.
   Another component, or a site that selects part of `hidden_size`, is refused before the model loads.
 - `to_final` is KL(lens ‖ final) in nats. `run.final` has no `layers` axis, so every layer compares with the one
   final distribution.
@@ -78,8 +78,8 @@ own final norm and head, as if that layer were the last; `"layers": ":"` reads e
   named, saved and tabled on their own. A `top_k` inside an entry holds no tokens, and no step can name its members.
 
 ```bash
-clab run documents/logit_lens.json
-clab table out/logit_lens p_answer to_final top3.tokens
+nnspec run documents/logit_lens.json
+nnspec table out/logit_lens p_answer to_final top3.tokens
 ```
 
 ```text
@@ -143,7 +143,7 @@ The readout of the model itself: `top_k` of `logits` as a step, and `token_prob`
 }
 ```
 
-After `clab run documents/readout.json`, `clab table --csv out/readout top5 p_answer` prints each `top_k` cell
+After `nnspec run documents/readout.json`, `nnspec table --csv out/readout top5 p_answer` prints each `top_k` cell
 whole (an aligned table cuts cells at 48 characters):
 
 ```text
@@ -156,7 +156,7 @@ eiffel,2,9,Ġof,The Eiffel Tower is in the city of,"{""ids"":[6342,3576,968,2437
 - `probs` is a float32 softmax over the whole vocabulary, so it equals `token_prob` of the same id.
 - Each token is the tokenizer's piece, spelled as `pos_token` is: `ĠThursday` and `Thursday` are ids 3635 and 25381.
 - At the last layer the logit lens lists the same tokens as this readout (` Paris`, ` London`, ` New` above).
-- `detokenize` turns a `generate` step's ids into text (the `clab-steering-and-generation` skill), not logits.
+- `detokenize` turns a `generate` step's ids into text (the `nnspec-steering-and-generation` skill), not logits.
 - **A different answer at each position**, such as each next token of a repeat, is a shifted column read at a `pos`
   slice: [the recipe](references/attention.md#the-correct-next-token-at-each-position).
 
@@ -223,14 +223,14 @@ token's earlier copy. On 20 random words repeated once, that is key p − 19 at 
 - An offset read is NaN where p + k is no key of the row, before key 0 or past a shorter row's last; the
   reductions skip it. A key ahead of the query holds the causal mask's 0.
 - The rows are random words that are one GPT-2 token each, space included, so each row is 40 tokens.
-  `clab show` prints where each read landed (`[20,21,22,…,39] on all 3 rows`); check it on a new sequence.
+  `nnspec show` prints where each read landed (`[20,21,22,…,39] on all 3 rows`); check it on a new sequence.
 
-Run it with `clab run documents/attention_stripes.json`. A `top_k` over `["layers", "num_heads"]` ranks every
+Run it with `nnspec run documents/attention_stripes.json`. A `top_k` over `["layers", "num_heads"]` ranks every
 head together; it has no rows, so read it from Python, which names each head `layer.head`:
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 
 plan = Plan.load("out/attention_stripes")
 for name in ["top_induction", "top_prev"]:
@@ -244,7 +244,7 @@ top_induction ['6.9 0.922', '5.5 0.916', '5.1 0.897', '7.10 0.892', '7.2 0.741']
 top_prev ['4.11 0.994', '3.7 0.541', '2.2 0.521', '5.6 0.472', '6.8 0.452']
 ```
 
-`clab table out/attention_stripes induction_score control_score prev_score sink_score` prints one line per
+`nnspec table out/attention_stripes induction_score control_score prev_score sink_score` prints one line per
 head; those heads:
 
 ```text
@@ -268,7 +268,7 @@ layer  num_heads  induction_score         control_score           prev_score    
   scores negated. Added to this document, it ranks 4.11, 2.2, 3.3, 3.7 and 3.2 lowest, each under 2e-6.
 - **A stripe says where a head looks, not what it does.** The model's copying is the
   [next token at each position](references/attention.md#the-correct-next-token-at-each-position); test a candidate
-  head with the `clab-ablation` or `clab-patching` skill.
+  head with the `nnspec-ablation` or `nnspec-patching` skill.
 
 ## The tuned lens
 
@@ -288,13 +288,13 @@ after RoPE, on SmolLM2.
 
 | task | where |
 |---|---|
-| zero a head's pattern, knock out keys, mean-ablate a head | the `clab-ablation` skill |
-| patch a pattern or a query from another prompt, patch a head's output | the `clab-patching` skill |
-| the fit step's fields, `epochs: 0`, bundles | the `clab` skill's [featurizers-and-fit.md](../clab/references/featurizers-and-fit.md) |
-| reuse a trained lens in another document; probes, SAEs, DAS | the `clab-trained-featurizers` skill |
-| generate, score what a generation said, steer | the `clab-steering-and-generation` skill |
-| `select`, components and their layouts | the `clab` skill's [sites-and-interventions.md](../clab/references/sites-and-interventions.md) |
-| `top_k` members, `kl` direction, reductions over `over` | the `clab` skill's [ops.md](../clab/references/ops.md) |
-| a refusal, or numbers wrong with nothing refused | the `clab-debugging` skill |
+| zero a head's pattern, knock out keys, mean-ablate a head | the `nnspec-ablation` skill |
+| patch a pattern or a query from another prompt, patch a head's output | the `nnspec-patching` skill |
+| the fit step's fields, `epochs: 0`, bundles | the `nnspec` skill's [featurizers-and-fit.md](../nnspec/references/featurizers-and-fit.md) |
+| reuse a trained lens in another document; probes, SAEs, DAS | the `nnspec-trained-featurizers` skill |
+| generate, score what a generation said, steer | the `nnspec-steering-and-generation` skill |
+| `select`, components and their layouts | the `nnspec` skill's [sites-and-interventions.md](../nnspec/references/sites-and-interventions.md) |
+| `top_k` members, `kl` direction, reductions over `over` | the `nnspec` skill's [ops.md](../nnspec/references/ops.md) |
+| a refusal, or numbers wrong with nothing refused | the `nnspec-debugging` skill |
 
-`clab describe ops` lists every op; `clab describe components` every component with its layout.
+`nnspec describe ops` lists every op; `nnspec describe components` every component with its layout.

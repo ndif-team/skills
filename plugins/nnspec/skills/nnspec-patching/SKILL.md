@@ -1,22 +1,22 @@
 ---
 name: nnspec-patching
-description: Find which layer, position, attention head, MLP neuron, path or attention pattern carries a behaviour, with a clab document that swaps a counterfactual prompt's value into a base prompt. Covers interchange (activation) patching, denoising and noising, corrupt-and-restore (causal tracing), the layer-by-position map, head, head-set and neuron patching, path patching, attention-pattern patching and patching into a generation. Attribution patching ranks every head, position or neuron with one backward, with or without a counterfactual. Includes the self-swap null, the gradient checks, scoped pairs, windows, IIA (`match`), logit difference, `token_prob`, `kl`, `js`, `cosine` and IOI name pairs. Removing a component is `clab-ablation`; DAS is `clab-trained-featurizers`; a lens or an attention pattern is `clab-lenses-and-attention`; steering is `clab-steering-and-generation`; the format is `clab`; a refusal or failing null is `clab-debugging`.
+description: Find which layer, position, attention head, MLP neuron, path or attention pattern carries a behaviour, with an nnspec document that swaps a counterfactual prompt's value into a base prompt. Covers interchange (activation) patching, denoising and noising, corrupt-and-restore (causal tracing), the layer-by-position map, head, head-set and neuron patching, path patching, attention-pattern patching and patching into a generation. Attribution patching ranks every head, position or neuron with one backward, with or without a counterfactual. Includes the self-swap null, the gradient checks, scoped pairs, windows, IIA (`match`), logit difference, `token_prob`, `kl`, `js`, `cosine` and IOI name pairs. Removing a component is `nnspec-ablation`; DAS is `nnspec-trained-featurizers`; a lens or an attention pattern is `nnspec-lenses-and-attention`; steering is `nnspec-steering-and-generation`; the format is `nnspec`; a refusal or failing null is `nnspec-debugging`.
 ---
 
-# Patching with clab
+# Patching with nnspec
 
-Verified on clab `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
+Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `openai-community/gpt2` (float32, 12 layers of 12 heads), each in seconds to under a minute.
 
 Patching asks whether a value carries what decides the answer. Read it on a counterfactual prompt, swap it into
-the base prompt at the same place, and score the base run. In clab that is a forward that reads, a forward
+the base prompt at the same place, and score the base run. In nnspec that is a forward that reads, a forward
 whose entry writes with `swap`, and metric steps after them; every recipe here carries the null that proves
 the wiring. Clean values into a corrupted base (denoising) ask what restores the answer, and corrupted values
 into a clean base (noising) what breaks it: one document, with the two inputs exchanged.
 
 ## What breaks
 
-- **An entry without an edit in `ops` only reads** (the `clab` skill's list).
+- **An entry without an edit in `ops` only reads** (the `nnspec` skill's list).
 - **A patch without its null proves nothing.** Read the base's own value at the patch's site and `pos`, swap it
   back in a forward of its own, and check its scores equal the clean run's to the bit. A gap means the read and
   the write are not the same selection: fix the document before reading any effect.
@@ -31,7 +31,7 @@ into a clean base (noising) what breaks it: one document, with the two inputs ex
   layer per point.
 - **A swept write `pos` against an unswept read writes the one read value at every point.** Sweep the read's
   `pos` over the same values under the same `label`.
-- **Two sweeps of one field zip unless each has its own `label`** (the `clab` skill's list).
+- **Two sweeps of one field zip unless each has its own `label`** (the `nnspec` skill's list).
 - **A swept `pos`'s coordinate is not the table's `pos` column.** `at` holds the swept value; `pos` is where
   the tabled read landed. Label the patch's sweep (`"label": "patch_pos"`) to keep the two apart.
 - **`match` alone hides a graded effect.** It stays 0 until the top token flips: at layer 7, the last position
@@ -45,7 +45,7 @@ into a clean base (noising) what breaks it: one document, with the two inputs ex
   central difference at one point does ([check the gradient](references/attribution.md#check-the-gradient)),
   and real patching of the top points does for the ranking.
 - **An answer column is the token the model continues with, leading space included** (`" Tuesday"`); the
-  `clab` skill's [data reference](../clab/references/data.md) has the rule.
+  `nnspec` skill's [data reference](../nnspec/references/data.md) has the rule.
 
 ## The interchange
 
@@ -101,8 +101,8 @@ counterfactual forward runs on its own column, so its values keep the base's row
 ```
 
 ```text
-clab run documents/interchange.json
-clab table out/interchange clean_ld null_ld ld iia
+nnspec run documents/interchange.json
+nnspec table out/interchange clean_ld null_ld ld iia
 ```
 
 ```text
@@ -123,11 +123,11 @@ sun-wed     6    6    Ġis        If today is Sunday, tomorrow is      Thursday 
 - **`layer_output` at layer 4** is the residual stream leaving block 4. At a position it holds everything
   computed there so far, so the patch moves the whole state; the references narrow it to a head or neurons.
 - **`index: -1` inside the scope** takes the word's last token, one position on every row whatever the word's
-  length. `clab show out/interchange` prints where each entry landed (`[3] on all 7 rows` here).
+  length. `nnspec show out/interchange` prints where each entry landed (`[3] on all 7 rows` here).
 
-How a scope finds its word, and how to check it, is the `clab` skill's
-[positions reference](../clab/references/positions.md); entries and operands are its
-[sites and interventions reference](../clab/references/sites-and-interventions.md).
+How a scope finds its word, and how to check it, is the `nnspec` skill's
+[positions reference](../nnspec/references/positions.md); entries and operands are its
+[sites and interventions reference](../nnspec/references/sites-and-interventions.md).
 
 ## Choosing the metric
 
@@ -140,7 +140,7 @@ How a scope finds its word, and how to check it, is the `clab` skill's
 | `cosine` | cosine similarity over `hidden_size` | how far the residual stream moved, per layer and position |
 
 `kl`, `js` and `cosine` are recipes in [pairs, scopes and maps](references/pairs-scopes-and-maps.md).
-`clab describe ops` lists every metric.
+`nnspec describe ops` lists every metric.
 
 ## A layer-by-position map
 
@@ -202,14 +202,14 @@ and written at p. The `layers` sweep on the shared site crosses them, giving 12 
 }
 ```
 
-`clean` and `counterfactual` only read, so one forward of each serves all 84 points (`clab show` prints `all
+`clean` and `counterfactual` only read, so one forward of each serves all 84 points (`nnspec show` prints `all
 84 points` beside them); `null` and `patched` run one forward per point. Every mean over rows is one number per
-point, and `clab table` keys it by the point's coordinate in `at`:
+point, and `nnspec table` keys it by the point's coordinate in `at`:
 
 ```text
-clab run documents/layer_pos_map.json
-clab table out/layer_pos_map clean_mean cf_mean
-clab table out/layer_pos_map ld_mean null_mean iia_mean
+nnspec run documents/layer_pos_map.json
+nnspec table out/layer_pos_map clean_mean cf_mean
+nnspec table out/layer_pos_map ld_mean null_mean iia_mean
 ```
 
 ```text
@@ -225,13 +225,13 @@ at                           ld_mean              null_mean            iia_mean
 {"layers":11,"patch_pos":6}  1.7260316610336304   -1.6586096286773682  1.0
 ```
 
-`clab table out/layer_pos_map ld` prints the per-row values with the same `at` beside each row, and `pos` 6,
+`nnspec table out/layer_pos_map ld` prints the per-row values with the same `at` beside each row, and `pos` 6,
 the logits read. In Python a swept result is a dict keyed by the coordinate, a tuple in the order of
 `plan.sweeps` (here `layers`, then `patch_pos`):
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 
 plan = Plan.load("out/layer_pos_map")
 ld = plan.results["ld_mean"]                        # {(layer, patch_pos): tensor}
@@ -270,10 +270,10 @@ Read the corners and the nulls before the middle:
 The map counts positions, which pairs one word with the same word only because both prompts come from one
 template and tokenize to 7 tokens. On pairs of different lengths, sweep negative indices inside the ending the
 prompts share, or map by scope ([pairs, scopes and maps](references/pairs-scopes-and-maps.md)). Check that each
-point's write landed where its reads did: `clab show` groups a swept entry's points by where they landed,
-without their coordinates, and `Plan.load` gives each point's positions beside its `at` (the `clab` skill's
-[output reference](../clab/references/output.md#in-python)). Labels, a point's cost and reading by coordinate
-are its [sweeps reference](../clab/references/sweeps.md).
+point's write landed where its reads did: `nnspec show` groups a swept entry's points by where they landed,
+without their coordinates, and `Plan.load` gives each point's positions beside its `at` (the `nnspec` skill's
+[output reference](../nnspec/references/output.md#in-python)). Labels, a point's cost and reading by coordinate
+are its [sweeps reference](../nnspec/references/sweeps.md).
 
 ## The other recipes
 
@@ -294,7 +294,7 @@ are its [sweeps reference](../clab/references/sweeps.md).
 | patch the top points of a map, or chosen heads at several layers | one entry per point, one site per head | [attribution](references/attribution.md#confirm-the-top-points) |
 
 Neighbouring tasks live elsewhere. Removing a component (zero, mean or resample ablation, head knockout, a
-random-neuron control) is `clab-ablation`. A trained rotation or mask of a subspace (DAS, DBM) is
-`clab-trained-featurizers`. Reading an attention pattern or a logit lens is `clab-lenses-and-attention`. Adding a
-direction, and scoring what a generation says, is `clab-steering-and-generation`. A refusal, or a null that does
-not equal the clean run, is `clab-debugging`. The lists are `clab describe components`, `ops` and `pos`.
+random-neuron control) is `nnspec-ablation`. A trained rotation or mask of a subspace (DAS, DBM) is
+`nnspec-trained-featurizers`. Reading an attention pattern or a logit lens is `nnspec-lenses-and-attention`. Adding a
+direction, and scoring what a generation says, is `nnspec-steering-and-generation`. A refusal, or a null that does
+not equal the clean run, is `nnspec-debugging`. The lists are `nnspec describe components`, `ops` and `pos`.

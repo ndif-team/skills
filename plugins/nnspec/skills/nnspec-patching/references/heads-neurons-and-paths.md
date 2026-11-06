@@ -13,13 +13,13 @@ John gave a drink to" answers ` Mary`, and the counterfactual ("…, Mary gave a
 - **An operand from a narrowed site must hold the write's heads in the write's order.** Declare one site and
   name it in both the read and the write, and the two agree by construction.
 - **`attention_probabilities` and `attention_queries` need eager attention**
-  ([sites and interventions](../../clab/references/sites-and-interventions.md#attention-needs-eager));
+  ([sites and interventions](../../nnspec/references/sites-and-interventions.md#attention-needs-eager));
   compare runs under one implementation, since eager moves the last bits.
 - **A pattern swapped between prompts of different lengths is refused**, since key k must be the same token on
   both sides:
 
   ```text
-  clab: patched.look_there at layers=9,num_heads=0: operand 'counterfactual.their_pattern' was read on pairs.counterfactual, row 0 of which is 9 tokens; pairs.input has 10 there, so their key axes do not line up
+  nnspec: patched.look_there at layers=9,num_heads=0: operand 'counterfactual.their_pattern' was read on pairs.counterfactual, row 0 of which is 9 tokens; pairs.input has 10 there, so their key axes do not line up
   ```
 
 - **On a gated MLP, `mlp_activation` (`act(gate x)`) and `mlp_neurons` (what the down projection sums) differ**,
@@ -87,7 +87,7 @@ The clean run puts the indirect object on top on all 8 rows (`clean_top` 1.0; `c
 −2.9367809295654297). The null's operand is an earlier entry of its own forward.
 
 ```text
-$ clab table out/head_patching ld_mean null_mean
+$ nnspec table out/head_patching ld_mean null_mean
 at                            ld_mean              null_mean
 {"layers":0,"num_heads":0}    -2.936856269836426   -2.9367809295654297
 {"layers":8,"num_heads":10}   -1.7821941375732422  -2.9367809295654297
@@ -101,7 +101,7 @@ from the result keyed `(layer, head)`:
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 
 plan = Plan.load("out/head_patching")
 clean = plan.results["clean_mean"].item()
@@ -129,7 +129,7 @@ two; sort by `abs(e)` for the heads that matter most either way, 10.7 first.
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 for point in Plan.load("out/head_sets").steps["set9"]:
     print(point.at, point.interventions["patch"].site)
 ```
@@ -167,13 +167,13 @@ and its mean (`set9_mean`, `across_mean`), as there.
 ```
 
 ```text
-$ clab table out/head_sets set9_mean
+$ nnspec table out/head_sets set9_mean
 at                   value
 {"num_heads":[6]}    -3.3835153579711914
 {"num_heads":[9]}    -1.9188365936279297
 {"num_heads":[6,9]}  -2.1071090698242188
 
-$ clab table out/head_sets across_mean
+$ nnspec table out/head_sets across_mean
 value
 1.9949283599853516
 ```
@@ -217,11 +217,11 @@ quarter at a time, then all of them, and `mlp_output` beside them:
 ```
 
 ```text
-$ clab table out/neuron_patching clean_mean mlp_mean
+$ nnspec table out/neuron_patching clean_mean mlp_mean
 clean_mean           mlp_mean
 -1.6586096286773682  -0.7121614813804626
 
-$ clab table out/neuron_patching ld_mean null_mean
+$ nnspec table out/neuron_patching ld_mean null_mean
 at                                 ld_mean              null_mean
 {"intermediate_size":"0:768"}      -1.4736175537109375  -1.6586096286773682
 {"intermediate_size":"768:1536"}   -1.248659372329712   -1.6586096286773682
@@ -288,11 +288,11 @@ Each forward's `ld` is averaged in a `mean` step named for it (`clean_mean`, `fr
 `every_layer`, and each point of the patch takes the slice labelled with its layer.
 
 ```text
-$ clab table out/path_patching clean_mean frozen_mean
+$ nnspec table out/path_patching clean_mean frozen_mean
 clean_mean           frozen_mean
 -2.9367809295654297  -2.9367809295654297
 
-$ clab table out/path_patching path_mean plain_mean path_null_mean wrong_mean
+$ nnspec table out/path_patching path_mean plain_mean path_null_mean wrong_mean
 at                            path_mean            plain_mean           path_null_mean       wrong_mean
 {"layers":8,"num_heads":6}    -2.948061943054199   -2.1201019287109375  -2.9367809295654297  -2.9367809295654297
 {"layers":8,"num_heads":10}   -2.169589042663574   -1.7821941375732422  -2.9367809295654297  -2.9367809295654297
@@ -344,7 +344,7 @@ its steps after `own` but `clean_mean`; its saves are `clean_mean`, `received_me
 ```
 
 ```text
-$ clab table out/path_to_query received_mean null_mean
+$ nnspec table out/path_to_query received_mean null_mean
 at                           received_mean        null_mean
 {"layers":7,"num_heads":3}   -2.865382194519043   -2.936779022216797
 {"layers":7,"num_heads":9}   -2.7898406982421875  -2.936779022216797
@@ -386,7 +386,7 @@ fragment is the `sites` and forwards of `documents/pattern_patching.json`. Its m
 ```
 
 ```text
-$ clab table out/pattern_patching ld_mean null_mean
+$ nnspec table out/pattern_patching ld_mean null_mean
 at                            ld_mean              null_mean
 {"layers":9,"num_heads":6}    -3.3977251052856445  -2.936779022216797
 {"layers":9,"num_heads":9}    -1.8761281967163086  -2.936779022216797

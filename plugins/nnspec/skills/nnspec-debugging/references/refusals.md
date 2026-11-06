@@ -1,11 +1,11 @@
 # Refusals by first clause
 
-Find the first clause of the `<what>` you saw, after its `clab: <where>: `. Every message below was printed by
-clab on `openai-community/gpt2`, provoked by a small broken document; `<x>`-style names in your message are
+Find the first clause of the `<what>` you saw, after its `nnspec: <where>: `. Every message below was printed by
+nnspec on `openai-community/gpt2`, provoked by a small broken document; `<x>`-style names in your message are
 your document's. The **refused** column says when:
 
 - **before load**: before any weight loads. A document path in `<where>` (`steps.…`, `sites.…`), and
-  `clab compile` catches it without a model, unless the row says "as the engine loads".
+  `nnspec compile` catches it without a model, unless the row says "as the engine loads".
 - **after load**: the model and tokenizer are loaded, no forward has run; `<where>` is `<step>.<entry>` or
   `<step>`, and the message names the row or the sweep point.
 - **at run**: the step was running; the steps before it ran, and nothing is written.
@@ -20,22 +20,22 @@ wrong numbers is [symptoms.md](symptoms.md).
 | `unknown field 'position'; valid: site, pos, ops` | before load | a misspelled key, or a key on the wrong record | take the spelling from the `valid:` list |
 | `Field required` (at `model.revision`) | before load | a required key left out: `model`'s `key` and `revision`, `steps` | add it |
 | `unknown step kind 'forwards'; valid: forward, generate, op, fit, load` | before load | `kind` names no step kind | one of the listed kinds |
-| `unknown op 'logitdiff'; valid: swap, add, …` | before load | `op` names no op | the spelling from the list; `clab describe ops` says what each takes |
+| `unknown op 'logitdiff'; valid: swap, add, …` | before load | `op` names no op | the spelling from the list; `nnspec describe ops` says what each takes |
 | `'logit_diff' takes no 'token'; its arguments: a, b` | before load | an argument of another op | the listed arguments |
 | `'logit_diff' needs 'b'` | before load | a required argument left out | add it |
-| `'batch_size' is a derived field, which compile writes; a step sets none` | before load | a field clab fills (a forward's `batch_size`, an entry's `positions`) | delete it; `--batch-size` sets the batch size |
+| `'batch_size' is a derived field, which compile writes; a step sets none` | before load | a field nnspec fills (a forward's `batch_size`, an entry's `positions`) | delete it; `--batch-size` sets the batch size |
 | `'positions' is no argument a document gives: the run supplies it` | before load | an op argument the run supplies | delete it |
 | `'reads': a step's reads and writes are one 'interventions' value` | before load | reads and writes in separate keys | one `interventions` dict; an entry with an edit writes |
-| `num_beams 2; it stays 1: beams change the rows each forward call sees` | before load | a generate option clab holds at one value | leave it out |
+| `num_beams 2; it stays 1: beams change the rows each forward call sees` | before load | a generate option nnspec holds at one value | leave it out |
 
-Several field errors print one per line, the first prefixed `clab:`: `clab: model.revision: Field required`,
+Several field errors print one per line, the first prefixed `nnspec:`: `nnspec: model.revision: Field required`,
 then `steps.clean: unknown step kind 'forwards'; …`.
 
 ## Sites, positions and sweeps as written
 
 | first clause | refused | cause | fix |
 |---|---|---|---|
-| `unknown component 'residual'; the components clab addresses …` | before load | a component nnterp has no name for | one from the list; `clab describe components` says what each holds |
+| `unknown component 'residual'; the components nnspec addresses …` | before load | a component nnterp has no name for | one from the list; `nnspec describe components` says what each holds |
 | `layer_output is a block's value and needs 'layers'` | before load | a block's component without `layers` | give `layers` |
 | `lm_head_output is the model's own value and takes no layers` | before load | `layers` on `lm_head_output` or `logits` | delete `layers` |
 | `'-1' is a string, which is not read as a number` | before load | a `pos` written as a string | an int (`-1`), or a slice inside an object (`{"index": "-2:"}`) |
@@ -59,7 +59,7 @@ At a sweep point the path gains the point: `steps.patched.interventions.logits.p
 | `no site 'heads'; declared: target, head` | before load | a site name `sites` does not declare | a declared site, or a site written inline |
 | `'patched.logit' names no step's value; a save is a step or a step's member` | before load | a `saves` entry no step makes | a step's name or `<step>.<entry>` |
 | `'ld' is saved twice` | before load | a name listed twice in `saves` | list it once |
-| `no file data/cities/train.json under the corpus root` | before load | a `path` the corpus root does not hold ([the rule](../../clab/references/running-and-engines.md#where-output-goes)) | inline `rows`, or the file under the corpus root's `data/` |
+| `no file data/cities/train.json under the corpus root` | before load | a `path` the corpus root does not hold ([the rule](../../nnspec/references/running-and-engines.md#where-output-goes)) | inline `rows`, or the file under the corpus root's `data/` |
 | `'facts' is also a dataset or a featurizer` | before load | a step named as a dataset or a featurizer: the three share one namespace | another name for the step |
 
 ## Operands
@@ -107,16 +107,16 @@ by position; it holds every layer the write acts at; it is one dataset's rows. T
 
 ## Featurizers, fits, bundles and loads
 
-`file_path` and a `load`'s `from` resolve against the corpus root, whose rule is the `clab` skill's
-[running reference](../../clab/references/running-and-engines.md#where-output-goes); run, show and table from it.
-The fields and header checks are its [featurizers reference](../../clab/references/featurizers-and-fit.md); a
-published SAE's fields are the `clab-trained-featurizers` skill's
-[sae reference](../../clab-trained-featurizers/references/sae.md#splice-in-a-published-dictionary). `<file>` is
+`file_path` and a `load`'s `from` resolve against the corpus root, whose rule is the `nnspec` skill's
+[running reference](../../nnspec/references/running-and-engines.md#where-output-goes); run, show and table from it.
+The fields and header checks are its [featurizers reference](../../nnspec/references/featurizers-and-fit.md); a
+published SAE's fields are the `nnspec-trained-featurizers` skill's
+[sae reference](../../nnspec-trained-featurizers/references/sae.md#splice-in-a-published-dictionary). `<file>` is
 the bundle's path.
 
 | first clause | refused | cause | fix |
 |---|---|---|---|
-| `'linear' takes no 'seed'; its arguments: classes, file_path` | before load | a field the kind does not take | the listed fields; `clab describe featurizers` |
+| `'linear' takes no 'seed'; its arguments: classes, file_path` | before load | a field the kind does not take | the listed fields; `nnspec describe featurizers` |
 | `'probe' is a 'linear' featurizer, which has no decode: it serves encode` | before load | an op the kind does not serve | an op it serves, as listed |
 | `the entry writes back here with the encode of 'rot' (ops[0]) still open` | before load | an edit after an `encode` and no `decode` | `{"op": "decode", "featurizer": "rot"}` after the edits |
 | `decode of 'rot', and the open encode is of 'pc' (ops[0])`, at a point (`at space="pc"`) | before load | a `decode` without its swept `encode`'s sweep, or brackets closed out of order | the `encode`'s sweep, label and names, on the `decode` |
@@ -129,7 +129,7 @@ the bundle's path.
 | `header 'model.dtype' is 'float32'; this document expects 'bfloat16'` | before load | another model `key`, `revision` or `dtype` than the bundle's | the bundle's model |
 | `<file> holds one bundle per point of a sweep (epochs=0, epochs=8)` | before load | a swept fit's file | rerun the fit unswept at the point you keep |
 | `'rot' is loaded from a bundle, which fixes it; a fit trains a featurizer it draws` | before load | a loaded featurizer in a fit's `train` | train a drawn one |
-| `<file> is a published sae, which says neither how it encodes nor where it was trained` | before load | a file with no clab header, without `activation`, `centered` and `site` | the three, as its release names them |
+| `<file> is a published sae, which says neither how it encodes nor where it was trained` | before load | a file with no nnspec header, without `activation`, `centered` and `site` | the three, as its release names them |
 | `<file> holds a JumpReLU threshold; its activation is 'jumprelu', not 'relu'` | before load | `relu` on a file with a `threshold`, or `jumprelu` on one without | the activation the file holds |
 | `<file> is not a safetensors file, which a file_path is read as` | before load | a `.npz` | `numpy.load` it, then `safetensors.torch.save_file` |
 | `featurizer 'sae' was trained at layer_output layer 6 (its site); this use is layer_output layer 5` | after load | a published SAE used at another layer than its `site` | use it at its `site` |
@@ -210,20 +210,20 @@ A read is never refused for a row it misses; a write whose operand is missing on
 
 | first clause | refused | cause | fix |
 |---|---|---|---|
-| `no document at 'documents/nope.json'` | before load | the path given to `clab run` | the document's path |
+| `no document at 'documents/nope.json'` | before load | the path given to `nnspec run` | the document's path |
 | `batch_size 0: a batch holds one row or more` | before load | `--batch-size` below 1 | 1 or more |
-| `padding 'left': one of 'dataset', 'batch', 'sorted'` | before load | a `--padding` clab does not have | a listed value |
+| `padding 'left': one of 'dataset', 'batch', 'sorted'` | before load | a `--padding` nnspec does not have | a listed value |
 | `device 'gpu': not a torch device ('cpu', 'cuda:0') or a device map transformers computes` | before load | an unknown device | `cpu`, `cuda:0` or `auto` |
 | `device 'cuda:0': no CUDA device is visible` | before load | a GPU where none is visible | `--device cpu`, or a visible GPU |
 | `unknown engine 'hook'; valid: nnterp, hooks, ndif, vllm` | before load | `--engine` names no engine | a listed engine |
-| `the nnterp engine takes no 'remote'; its options: tp` | before load | an `-o` option of another engine | the engine's options, in `clab describe engines` |
+| `the nnterp engine takes no 'remote'; its options: tp` | before load | an `-o` option of another engine | the engine's options, in `nnspec describe engines` |
 | `-o 'tp': an option is KEY=VALUE` | before load | an `-o` without `=` | `-o tp=2` |
 | `tp 2 shards the model over 2 processes, one per rank, that torchrun starts` | before load | `-o tp` outside torchrun | the `torchrun` command the message prints |
 | ``answer: generate rejected 'max_new_tokns': The following `model_kwargs` are not used by the model`` | at run | an option the model's `generate` does not take | the option's spelling in transformers |
-| `'patched.logits' was not saved; add it to saves` | `clab table` | a name not in `saves`, or a run whose `--out` a later run reused | add it to `saves` and rerun, each run to its own `--out` |
-| `no run at 'out/nowhere' (no manifest.json); run the document first` | `clab show`, `clab table` | a directory no run wrote | the run's `--out` |
-| `'clean_ld' has a pos column counting positions of pairs.input, and 'cf_ld' one counting positions of pairs.cf_input` | `clab table` | values read on two inputs in one table | table them one at a time |
-| `'f.first' and 'f.last' share no row and pos together: on no row do they hold the same pos, so they join to no row` | `clab table` | reads of one input at positions no row holds for both (`pos: 0` and `pos: -1`) | table them one at a time, or read at a `pos` both hold |
-| `'m4' and 'm5' share no layer` | `clab table` | values at layers neither holds (a mean of a read at layer 4 and one at layer 5) | table them one at a time |
+| `'patched.logits' was not saved; add it to saves` | `nnspec table` | a name not in `saves`, or a run whose `--out` a later run reused | add it to `saves` and rerun, each run to its own `--out` |
+| `no run at 'out/nowhere' (no manifest.json); run the document first` | `nnspec show`, `nnspec table` | a directory no run wrote | the run's `--out` |
+| `'clean_ld' has a pos column counting positions of pairs.input, and 'cf_ld' one counting positions of pairs.cf_input` | `nnspec table` | values read on two inputs in one table | table them one at a time |
+| `'f.first' and 'f.last' share no row and pos together: on no row do they hold the same pos, so they join to no row` | `nnspec table` | reads of one input at positions no row holds for both (`pos: 0` and `pos: -1`) | table them one at a time, or read at a `pos` both hold |
+| `'m4' and 'm5' share no layer` | `nnspec table` | values at layers neither holds (a mean of a read at layer 4 and one at layer 5) | table them one at a time |
 
 A step that runs out of CUDA memory is the one refusal that writes output ([SKILL.md](../SKILL.md#out-of-memory)).

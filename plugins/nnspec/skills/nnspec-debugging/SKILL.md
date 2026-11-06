@@ -1,20 +1,20 @@
 ---
 name: nnspec-debugging
-description: "Fix a clab document that was refused or gave wrong numbers. Use for a `clab: <where>: <what>` line or a PlanError, and to tell which stage refused it. Common ones: unknown fields, ops or components, a name no earlier step made, an operand of another layout or width, text not in a row, a multi-token answer, eager attention, a bundle or load that does not match. Use when nothing was refused but the numbers look wrong: a null that differs from the clean run, a scope on the wrong occurrence, rows missing from a mean. So too sweeps zipped into a diagonal and a patch equal to the clean run. Use when two runs differ (batch size, padding, threads, device, bfloat16), to cross-check engines, or after running out of memory. Writing a document is the `clab` skill; recipes are clab-patching, clab-ablation, clab-lenses-and-attention, clab-steering-and-generation and clab-trained-featurizers."
+description: "Fix an nnspec document that was refused or gave wrong numbers. Use for an `nnspec: <where>: <what>` line or a PlanError, and to tell which stage refused it. Common ones: unknown fields, ops or components, a name no earlier step made, an operand of another layout or width, text not in a row, a multi-token answer, eager attention, a bundle or load that does not match. Use when nothing was refused but the numbers look wrong: a null that differs from the clean run, a scope on the wrong occurrence, rows missing from a mean. So too sweeps zipped into a diagonal and a patch equal to the clean run. Use when two runs differ (batch size, padding, threads, device, bfloat16), to cross-check engines, or after running out of memory. Writing a document is the `nnspec` skill; recipes are nnspec-patching, nnspec-ablation, nnspec-lenses-and-attention, nnspec-steering-and-generation and nnspec-trained-featurizers."
 ---
 
-# Debugging clab documents
+# Debugging nnspec documents
 
-Verified on clab `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run
+Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run
 on the CPU on `openai-community/gpt2` (float32, 12 layers of 12 heads, no BOS token), in seconds each.
 
-A run either refuses, printing one `clab:` line and writing nothing, or finishes. This skill reads a refusal,
-finds what is wrong when nothing was refused, and makes two runs agree; writing the document is the `clab` skill.
+A run either refuses, printing one `nnspec:` line and writing nothing, or finishes. This skill reads a refusal,
+finds what is wrong when nothing was refused, and makes two runs agree; writing the document is the `nnspec` skill.
 
 ## What breaks first
 
 - **A refused run leaves the previous output in place.** A refusal writes nothing, so `out/<name>` holds the
-  last finished run: after a fix, check that `clab show`'s first line has a new `started` time.
+  last finished run: after a fix, check that `nnspec show`'s first line has a new `started` time.
 - **A patch that equals the clean run to the bit is a mistake, not a result.** A write whose `ops` lost its edit
   only reads, and a freeze listed after its patch puts the clean value back. Read the entry's `ops` and their
   order at the site ([references/symptoms.md](references/symptoms.md)).
@@ -23,7 +23,7 @@ finds what is wrong when nothing was refused, and makes two runs agree; writing 
 - **Comparing two runs made at different settings.** Another batch size, padding, readout, thread count or
   device can move the last bits. Compare only runs whose run records agree ([below](#reproducing-a-number)).
 - **Trusting a scoped read without looking.** `occurrence` defaults to the first match in the whole row.
-  Read the entry's positions in `clab show` on a row of each kind.
+  Read the entry's positions in `nnspec show` on a row of each kind.
 - **Reading a mean over rows a read never reached.** Those rows are NaN, every reduction skips them, and the
   number does not say so. Count the rows before reading the mean.
 - **Reading small effects from a bfloat16 run.** A bfloat16 null that equals the clean run certifies the
@@ -32,10 +32,10 @@ finds what is wrong when nothing was refused, and makes two runs agree; writing 
 ## How a refusal reads
 
 ```text
-clab: <where>: <what>
+nnspec: <where>: <what>
 ```
 
-`clab run` prints this line, exits with status 1 and writes no output. `<where>` names the stage, and the
+`nnspec run` prints this line, exits with status 1 and writes no output. `<where>` names the stage, and the
 first clause of `<what>` is the key to [references/refusals.md](references/refusals.md).
 
 | `<where>` | refused | as GPT-2 printed it |
@@ -45,8 +45,8 @@ first clause of `<what>` is the key to [references/refusals.md](references/refus
 | a step's name without `steps.`: `<step>.<entry>` | after the model loads, before any forward | `counterfactual.v_cf: layer 12; the model has 12 layers` |
 | `<step>: generate rejected …` | at run: earlier steps ran, nothing is written | `answer: generate rejected 'max_new_tokns': …` |
 
-- **Check before you run.** `clab compile documents/x.json` needs no model: it prints what would run and exits
-  0, or prints `clab: <where>: <what>`, the line `clab run` would print, and exits 1.
+- **Check before you run.** `nnspec compile documents/x.json` needs no model: it prints what would run and exits
+  0, or prints `nnspec: <where>: <what>`, the line `nnspec run` would print, and exits 1.
 - **Compiling misses what only the load knows**: a `revision` the cache lacks compiles, and offline the load
   refuses it. A `model` key naming a run option (`device`, `torch_dtype`, `tp_size`) is refused at compile.
 - **A refusal names its row and sweep point** (`base.r: row 1: …`, `counterfactual.v_cf at layers=12: …`),
@@ -62,7 +62,7 @@ never broadcasts, a `select` list pairs by position, and it holds a slice for ev
 A value read at the head and swapped into the residual stream, refused before the model loads:
 
 ```text
-clab: steps.patched.interventions.patch.ops[0].with: 'counterfactual.v_cf' is laid out ['rows', 'pos', 'vocab_size']; 'swap' acts on a value laid out ['rows', 'pos', 'hidden_size'], and an operand's axes are among the value's, in its order (those it leaves out it broadcasts over)
+nnspec: steps.patched.interventions.patch.ops[0].with: 'counterfactual.v_cf' is laid out ['rows', 'pos', 'vocab_size']; 'swap' acts on a value laid out ['rows', 'pos', 'hidden_size'], and an operand's axes are among the value's, in its order (those it leaves out it broadcasts over)
 ```
 
 A scope pairs with another forward only where every row's scope holds as many tokens, counted after the model
@@ -77,7 +77,7 @@ loads and before any forward, and a row that lacks the text, the occurrence or a
 number. GPT-2 adds no BOS, so position 0 is the prompt's first word and nothing comes before it:
 
 ```text
-clab: base.r: row 0: text 'When' begins the row, at position 0, which no position comes before
+nnspec: base.r: row 0: text 'When' begins the row, at position 0, which no position comes before
 ```
 
 A refused row cannot be skipped: change the data (`take`, `skip`, or a dataset of the rows that fit). An index
@@ -89,25 +89,25 @@ A metric tokenizes each row's answer as written, without special tokens, and sco
 read's position i. Checked against every row after the model loads:
 
 ```text
-clab: ld: pairs.cf_answer row 0: ' Colosseum' is 4 tokens; the read has 1 position on that row; token i of an answer scores the read's position i, so the read carries one per token (a scope with "before": true reads the positions that predict the answer's tokens)
+nnspec: ld: pairs.cf_answer row 0: ' Colosseum' is 4 tokens; the read has 1 position on that row; token i of an answer scores the read's position i, so the read carries one per token (a scope with "before": true reads the positions that predict the answer's tokens)
 ```
 
 A missing leading space is refused only where the bare word splits. On GPT-2 `Rome` is 2 tokens and is
 refused; `Paris` is one token, another id, and scores 1.0e-06 ([symptoms](references/symptoms.md#answers-and-metrics)).
 Sets and teacher forcing have their own messages ([refusals](references/refusals.md#answers)); writing answer
-columns is the `clab` skill's [data reference](../clab/references/data.md).
+columns is the `nnspec` skill's [data reference](../nnspec/references/data.md).
 
 ### Rows a read did not reach
 
 A read at a position a row lacks is not refused: an open-ended index past a short row, or a decode call a row
-never made. That row is `alignment_missing`: NaN, skipped by every reduction, `—` in `clab show`, flagged in
-`clab table`, so a mean over rows covers the rows reached and does not say so. A write whose operand is missing
+never made. That row is `alignment_missing`: NaN, skipped by every reduction, `—` in `nnspec show`, flagged in
+`nnspec table`, so a mean over rows covers the rows reached and does not say so. A write whose operand is missing
 on a row it lands on is refused at run (`operand 'g.r' holds no value on row 2 (alignment_missing): …`). Count
-the rows reached as the `clab` skill's [positions reference](../clab/references/positions.md#rows-a-scope-never-reached) says.
+the rows reached as the `nnspec` skill's [positions reference](../nnspec/references/positions.md#rows-a-scope-never-reached) says.
 
 ## Wrong numbers, nothing refused
 
-Open `clab show OUT` first. Each part answers one question:
+Open `nnspec show OUT` first. Each part answers one question:
 
 - **The first line and `served:`**: is this the run you mean (document, engine, batch size, padding, readout,
   `started`), and what dtype did the model run in?
@@ -129,7 +129,7 @@ document ([symptoms](references/symptoms.md#nulls)) and give the clean run's log
 | scale 1 | `scale` with `"factor": 1.0` | the clean run, to the bit | something else writes at the site |
 | identity permutation | a `permute` step with `"seed": null`, swapped in | the clean run, to the bit | the permuted read is not the one the write replaces |
 | gradient null | the metric's ops with `{"op": "mul", "with": 0}` appended, and a `grad` of that entry | exactly 0 | the gradient is not of the zeroed entry alone |
-| `epochs: 0` | the same fit, training nothing | the draw, which the trained featurizer must beat | the fit learned nothing (`clab-trained-featurizers`) |
+| `epochs: 0` | the same fit, training nothing | the draw, which the trained featurizer must beat | the fit learned nothing (`nnspec-trained-featurizers`) |
 
 `documents/null_patch.json`, the self-swap null beside a patch of layer 6's residual stream at the last token:
 
@@ -161,14 +161,14 @@ document ([symptoms](references/symptoms.md#nulls)) and give the clean run's log
 ```
 
 ```text
-$ clab run documents/null_patch.json
-$ clab table out/null_patch clean_ld null_ld patched_ld
+$ nnspec run documents/null_patch.json
+$ nnspec table out/null_patch clean_ld null_ld patched_ld
 row  pos  pos_token  input                                   cf_answer  base_answer  clean_ld             null_ld              patched_ld
 0    9    Ġof        The Eiffel Tower is in the city of       Rome       Paris       -2.4247055053710938  -2.4247055053710938  -2.0760040283203125
 2    6    Ġof        Big Ben is in the city of                Berlin     London      -1.9296493530273438  -1.9296493530273438  -0.9876708984375
 ```
 
-`clab table` prints each float in full, so equal printed values are equal bits. The effect is `patched_ld`
+`nnspec table` prints each float in full, so equal printed values are equal bits. The effect is `patched_ld`
 minus `null_ld`. With the patch's `ops` deleted, `patched_ld` prints `-2.4247055053710938` on row 0 too.
 
 The gradient null sits in the gradient's own forward, beside the metric. A fragment, that forward's
@@ -184,7 +184,7 @@ The gradient null sits in the gradient's own forward, beside the metric. A fragm
 ```
 
 ```text
-$ clab table out/grad_check taken.metric taken.g taken.g0
+$ nnspec table out/grad_check taken.metric taken.g taken.g0
 row  pos  pos_token  input                                   cf_answer  base_answer  taken.metric         taken.g             taken.g0
 0    9    Ġof        The Eiffel Tower is in the city of       Rome       Paris       -2.4247055053710938  0.4240272641181946  0.0
 3    8    Ġof        The Brandenburg Gate is in the city of   London     Berlin      -5.286407470703125   0.4044497311115265  0.0
@@ -194,7 +194,7 @@ row  pos  pos_token  input                                   cf_answer  base_ans
 and listed before `metric` it zeroes the logits: `taken.metric`, `taken.g` and `taken.g0` all print `0.0`.
 **The null proves the wiring, not the metric.** Exactly 0 proves the gradient is of the entry you zeroed, wired
 exactly; it cannot tell you that entry is the metric you meant. A central difference at one point does ([check
-the gradient](../clab-patching/references/attribution.md#check-the-gradient)), and real patching of the top points
+the gradient](../nnspec-patching/references/attribution.md#check-the-gradient)), and real patching of the top points
 does for the ranking.
 
 ### Where a scope landed
@@ -210,13 +210,13 @@ entries of one forward at layer 6 ([complete document](references/symptoms.md#po
 ```
 
 ```text
-$ clab show out/scope_occurrence
+$ nnspec show out/scope_occurrence
   entry        at  positions
   base.first   —   [3] on all 2 rows
   base.repeat  —   [9] on all 2 rows
 ```
 
-Position 3 is the first mention and 9 the repeat, `ĠJohn` in `clab table`'s `pos_token`. On a dataset that mixes
+Position 3 is the first mention and 9 the repeat, `ĠJohn` in `nnspec table`'s `pos_token`. On a dataset that mixes
 kinds, `occurrence: -1` is the query's copy only on rows whose query repeats that name: check a row of each kind.
 
 Every silent mistake, the check that catches it and its fix: [references/symptoms.md](references/symptoms.md).
@@ -235,15 +235,15 @@ files.** Change any of them and a row can move in its last bits:
 | thread count (`OMP_NUM_THREADS`) | the CPU splits a matmul's sum by thread |
 | device, machine | other kernels; a bfloat16 `model.dtype` rounds more ([below](#the-float32-rule)) |
 
-The run record holds each setting; `clab show` prints all but the threads, `run.threads` in `manifest.json`,
-which follow the `OMP_NUM_THREADS` the `clab` process inherits (a wrapper that sets its own wins).
+The run record holds each setting; `nnspec show` prints all but the threads, `run.threads` in `manifest.json`,
+which follow the `OMP_NUM_THREADS` the `nnspec` process inherits (a wrapper that sets its own wins).
 
 **To see a difference, change a row's padded width.** `documents/null_patch.json` ([the nulls](#the-nulls)) has
 rows of 10, 10, 7 and 9 tokens. Under `--padding batch`, batch size 1 pads no row and 4 pads rows 2 and 3 to 10:
 
 ```text
-$ clab run documents/null_patch.json --padding batch --batch-size 1 --out out/bs1
-$ clab run documents/null_patch.json --padding batch --batch-size 4 --out out/bs4
+$ nnspec run documents/null_patch.json --padding batch --batch-size 1 --out out/bs1
+$ nnspec run documents/null_patch.json --padding batch --batch-size 4 --out out/bs4
 $ for f in out/bs1/*; do [ "${f##*/}" = manifest.json ] || cmp "$f" "out/bs4/${f##*/}"; done
 out/bs1/clean_ld.safetensors out/bs4/clean_ld.safetensors differ: byte 85, line 1
 out/bs1/null_ld.safetensors out/bs4/null_ld.safetensors differ: byte 85, line 1
@@ -258,7 +258,7 @@ compare two runs, never infer it.
 **To the bit** holds for a rerun at one setting on one machine, for a null against its clean run, and for nnterp
 against hooks or local ndif on the CPU in float32. Across settings, machines, `tp` or vLLM expect rounding, and a
 fit's trained values can move further, since Adam scales a rounding-sized gradient up to its step size. The
-settings themselves are the `clab` skill's [running reference](../clab/references/running-and-engines.md).
+settings themselves are the `nnspec` skill's [running reference](../nnspec/references/running-and-engines.md).
 
 ### The float32 rule
 
@@ -282,9 +282,9 @@ the ndif engine's trip in this process with no server. Where both agree with nnt
 on how the model was reached:
 
 ```text
-$ clab run documents/null_patch.json --out out/x_nnterp
-$ clab run documents/null_patch.json --engine hooks --out out/x_hooks
-$ clab run documents/null_patch.json --engine ndif -o remote=local --out out/x_ndif
+$ nnspec run documents/null_patch.json --out out/x_nnterp
+$ nnspec run documents/null_patch.json --engine hooks --out out/x_hooks
+$ nnspec run documents/null_patch.json --engine ndif -o remote=local --out out/x_ndif
 $ for e in hooks ndif; do for f in out/x_nnterp/*; do [ "${f##*/}" = manifest.json ] || cmp "$f" "out/x_$e/${f##*/}"; done; done
 $
 ```
@@ -296,5 +296,5 @@ attention_probabilities: nnterp reads it inside a module's forward …`). Compar
 ## Out of memory
 
 A step that runs out of CUDA memory stops the run, and is the one refusal that writes output: the steps before
-it are saved and `clab show` prints a `stopped:` line. Rerun with a smaller `--batch-size`, or name and save
+it are saved and `nnspec show` prints a `stopped:` line. Rerun with a smaller `--batch-size`, or name and save
 fewer values, since every value a step binds stays on the device until the run ends.

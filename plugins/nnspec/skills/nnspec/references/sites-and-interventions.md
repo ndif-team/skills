@@ -7,7 +7,7 @@ inline (`"site": {"component": "lm_head_output"}`). Which tokens is the entry's 
 
 ## Components
 
-Names are nnterp's, the same on every model family. `clab describe components` lists every one with the axes
+Names are nnterp's, the same on every model family. `nnspec describe components` lists every one with the axes
 it can be narrowed by; these are the ones an experiment reaches for:
 
 | component | layout | holds, and when to use it |
@@ -30,7 +30,7 @@ On GPT-2 these hold to the bit: `layer_input` + `attention_output` is `layer_mid
 is `layer_output`, block 2's `layer_output` is block 3's `layer_input`, and `lm_head_output` is `logits`.
 Check them on another architecture before relying on one. A mixture of experts adds routing and expert
 components (`router_logits`, `expert_outputs`, …), each with its when-to-read line and recipes in the
-`clab-ablation` skill ([experts](../../clab-ablation/references/keys-experts-and-hydra.md#expert-knockout)).
+`nnspec-ablation` skill ([experts](../../nnspec-ablation/references/keys-experts-and-hydra.md#expert-knockout)).
 
 ### Attention needs eager
 
@@ -39,7 +39,7 @@ components (`router_logits`, `expert_outputs`, …), each with its when-to-read 
 GPT-2 is by default, they are refused after the model loads:
 
 ```text
-clab: f.p: the nnterp engine does not serve attention_probabilities: read inside the eager attention forward, but this model runs 'sdpa'; load with attn_implementation='eager'
+nnspec: f.p: the nnterp engine does not serve attention_probabilities: read inside the eager attention forward, but this model runs 'sdpa'; load with attn_implementation='eager'
 ```
 
 Add `"attn_implementation": "eager"` to the `model` block. `attention_premix` needs no eager. The hooks engine
@@ -83,11 +83,11 @@ refuses the interior under either implementation ([running and engines](running-
 ```
 
 ```text
-$ clab table out/heads_select f.size
+$ nnspec table out/heads_select f.size
 example_id  row  pos  pos_token  input                                             value
 mary        0    13   Ġto        When Mary and John went to the store, John gave…  [4.627506256103516,5.233008861541748]
 tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave a…  [9.225279808044434,5.838878154754639]
-$ clab table out/heads_select biggest
+$ nnspec table out/heads_select biggest
 example_id  row  pos  pos_token  input                                             value
 mary        0    13   Ġto        When Mary and John went to the store, John gave…  1
 tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave a…  0
@@ -99,14 +99,14 @@ tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave 
 - **A write selects on one axis**; a read may select heads and dimensions together.
 - **A `select` applies at every layer of its site**: `{"component": "mlp_activation", "layers": [3, 5], "select": {"intermediate_size": [1, 2]}}` is neurons 1 and 2 at both layers. Other picks at each layer are one site per layer, each with its own `select`.
 - **A pick outside the axis, or an axis the component lacks, is refused**: `select num_heads [12] outside the model's 12`; `layer_output has no axis 'num_heads' to select; its axes: hidden_size`.
-- **`{"key": {"offset": -1}}` is each query's previous token** on an attention pattern, a read only; the `clab-lenses-and-attention` skill has its recipes.
+- **`{"key": {"offset": -1}}` is each query's previous token** on an attention pattern, a read only; the `nnspec-lenses-and-attention` skill has its recipes.
 - **`readout` needs the whole stream, and a metric the whole vocabulary**: select after them, in a second read, never before.
 
 ## Read or write
 
 An entry is `{"site": ..., "pos": ..., "ops": [...]}`, binding `<step>.<entry>` to its value after its ops.
 
-- **An entry with an edit in its ops writes; one without only reads.** The edits are the `edits` group of `clab describe ops`: `swap`, `add`, `scale`, `noise`, `project_out` and the rest, with a featurizer's `decode` and `apply`.
+- **An entry with an edit in its ops writes; one without only reads.** The edits are the `edits` group of `nnspec describe ops`: `swap`, `add`, `scale`, `noise`, `project_out` and the rest, with a featurizer's `decode` and `apply`.
 - **The arithmetic ops never write.** `mul` by 0 reads a zero and leaves the forward as it was; `scale` with `factor` 0 writes the zero.
 - **A write binds what it wrote**: `patched.patch` is the value left at its selection.
 - **A read leaves the model only when something names it** (`saves`, a later step or entry); an entry nothing names costs nothing.
@@ -152,11 +152,11 @@ a write, and writes three layers two ways, every step pulling in one bundle that
 ```
 
 ```text
-$ clab table out/entry_order halved.before halved.halve halved.after
+$ nnspec table out/entry_order halved.before halved.halve halved.after
 example_id  row  pos  pos_token  input                                             halved.before      halved.halve        halved.after
 mary        0    13   Ġto        When Mary and John went to the store, John gave…  80.34696960449219  40.173484802246094  40.173484802246094
 tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave a…  80.8749771118164   40.4374885559082    40.4374885559082
-$ clab table out/entry_order clean.ld halved.ld read_only.ld three.ld three_apart.ld
+$ nnspec table out/entry_order clean.ld halved.ld read_only.ld three.ld three_apart.ld
 example_id  row  pos  pos_token  input                                             io     s      clean.ld            halved.ld           read_only.ld        three.ld             three_apart.ld
 mary        0    13   Ġto        When Mary and John went to the store, John gave…   Mary   John  2.0063934326171875  2.271759033203125   2.0063934326171875  1.5288887023925781   1.5288887023925781
 tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave a…   Tom    Anna  2.5811233520507812  2.2960662841796875  2.5811233520507812  0.16963958740234375  0.16963958740234375
@@ -235,24 +235,24 @@ and its null:
 ```
 
 ```text
-$ clab table out/grad_null f.g f.g_null f.metric
+$ nnspec table out/grad_null f.g f.g_null f.metric
 example_id  row  pos  pos_token  input                                             f.g                 f.g_null  io     s      f.metric
 mary        0    13   Ġto        When Mary and John went to the store, John gave…  0.3912978768348694  0.0        Mary   John  2.0063934326171875
 tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave a…  0.5705670714378357  0.0        Tom    Anna  2.5811233520507812
 ```
 
-- **The null must be exactly 0**: a `grad` of the metric's entry with `{"op": "mul", "with": 0}` appended. It proves the gradient is of the entry you zeroed and the wiring exact, not that the entry is the metric you report. A central difference at one point checks that, and real patching of the top points the ranking ([check the gradient](../../clab-patching/references/attribution.md#check-the-gradient)).
+- **The null must be exactly 0**: a `grad` of the metric's entry with `{"op": "mul", "with": 0}` appended. It proves the gradient is of the entry you zeroed and the wiring exact, not that the entry is the metric you report. A central difference at one point checks that, and real patching of the top points the ranking ([check the gradient](../../nnspec-patching/references/attribution.md#check-the-gradient)).
 - **Not `scale` 0 for the null**: after a metric it is refused as an edit, and alone at the head it zeroes the logits every later entry reads.
 - **Rows do not mix in a forward**, so each row gets its own gradient.
 - **At one site a `grad` reads as a read does**: listed after a write it differentiates the written value.
 - **No gradient reaches the model's weights**, and one backward runs per distinct `of`.
 - **`grad` is refused in a `generate`, in a fit's body, under `tp` and on the vllm engine.**
 
-Attribution patching built on `grad` is the `clab-patching` skill's.
+Attribution patching built on `grad` is the `nnspec-patching` skill's.
 
 ## The null control
 
 Write back what was read, on the same input, at the same place: its scores must equal the clean run's, as
-`null_ld` equals `clean_ld` in the clab skill's worked document. The other edits have nulls of the same kind:
+`null_ld` equals `clean_ld` in the nnspec skill's worked document. The other edits have nulls of the same kind:
 `add` at `"scale": 0.0`, `scale` at `"factor": 1.0`, a permutation that is the identity. Using the nulls to
-diagnose a run is the `clab-debugging` skill's.
+diagnose a run is the `nnspec-debugging` skill's.

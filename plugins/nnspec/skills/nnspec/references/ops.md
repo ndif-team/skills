@@ -4,7 +4,7 @@ An op is one function that runs in two places: as an `op` step over a value an e
 (`{"kind": "op", "op": "mean", "of": "patched_ld"}`), or inside an entry's `ops` on the entry's selection. An
 entry's op runs on each batch and a step's on the whole value. So an op whose bits depend on the value's shape
 (a matmul, as in `readout` and `encode`, or a long sum) can differ in its last bits between the two forms, on the
-CPU too. A step holds one op; a chain is one step per op. `clab describe ops` lists every op's arguments and what
+CPU too. A step holds one op; a chain is one step per op. `nnspec describe ops` lists every op's arguments and what
 it does to the axes.
 
 ## A step or an entry
@@ -51,16 +51,16 @@ a rate, and reduces a per-layer readout:
 ```
 
 ```text
-$ clab table out/ops_tour ld clean.ld_entry kl damped.kl_entry
+$ nnspec table out/ops_tour ld clean.ld_entry kl damped.kl_entry
 example_id  row  pos  pos_token  input                                             io      s       ld                  clean.ld_entry      kl                    damped.kl_entry
 mary        0    13   Ġto        When Mary and John went to the store, John gave…   Mary    John   2.0063934326171875  2.0063934326171875  0.03818587213754654   0.03818587213754654
 tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave a…   Tom     Anna   2.5811233520507812  2.5811233520507812  0.1748969703912735    0.1748969703912735
 sarah       2    13   Ġto        When Sarah and James went to the office, James …   Sarah   James  2.4727325439453125  2.4727325439453125  0.11409776657819748   0.11409776657819748
 paul        3    13   Ġto        When Paul and Lisa went to the school, Lisa gav…   Paul    Lisa   4.1465301513671875  4.1465301513671875  0.055061765015125275  0.055061765015125275
-$ clab table out/ops_tour rate spread
+$ nnspec table out/ops_tour rate spread
 rate  spread
 1.0   0.9305830001831055
-$ clab table out/ops_tour lens_by_layer
+$ nnspec table out/ops_tour lens_by_layer
 layer  value
 0      1.1615198900472024e-06
 ...
@@ -135,7 +135,7 @@ space, sets, `strip`, `lower`, literals) is [data](data.md#answer-columns).
 
 ## Transform
 
-- **`readout` projects a stream value through the final norm and the head**: the logit lens. It takes a component `clab describe components` marks `stream` (`layer_output`, `layer_mid`, …), whole along `hidden_size`. The lens recipes are the `clab-lenses-and-attention` skill's.
+- **`readout` projects a stream value through the final norm and the head**: the logit lens. It takes a component `nnspec describe components` marks `stream` (`layer_output`, `layer_mid`, …), whole along `hidden_size`. The lens recipes are the `nnspec-lenses-and-attention` skill's.
 - **`argmax` gives the top index along `over`**, by default the token id; `eq` of two runs' `argmax` is whether they pick one token. An index along a selected axis counts within the select list.
 - **`top_k` gives the `k` best `ids` with their float32 `probs`** over a vocabulary, or their `values` over another axis (`key`, `features`).
 - **A `top_k` step has members**: `top.ids`, `top.probs` (or `top.values`) and, over logits, `top.tokens`, decoded. `first_pick` above, `eq` of `top.ids` with `best`, is `[1.0, 0.0, 0.0]` on every row.
@@ -146,7 +146,7 @@ space, sets, `strip`, `lower`, literals) is [data](data.md#answer-columns).
 - **`encode` gives a featurizer's coordinates** ([featurizers and fit](featurizers-and-fit.md)); **`grad` is an entry's first op** ([sites and interventions](sites-and-interventions.md#a-gradient-at-a-site)).
 - **`permute` reorders a value's rows**, row i holding row π(i)'s, π drawn from `seed` alone; with `"derangement": true` no row stays. It is an op step only.
 - **`select` narrows a value along an axis a read cannot narrow**, with a read's `{<axis>: <selector>}`: a class of a probe's `W`, a latent's row of an sae's `W_dec` (`{"kind": "op", "op": "select", "of": "fit.probe.W", "select": {"classes": 1}}`). It is an op step only.
-- **An int keeps its axis at size 1**, labelled with the index it kept, so it pairs only with that index; a `sum` over the axis drops it, exactly. A two-class probe's direction is two selects, each summed, then a `sub` (the `clab-trained-featurizers` skill's [probes reference](../../clab-trained-featurizers/references/probes-and-lora.md#use-a-probe-causally)).
+- **An int keeps its axis at size 1**, labelled with the index it kept, so it pairs only with that index; a `sum` over the axis drops it, exactly. A two-class probe's direction is two selects, each summed, then a `sub` (the `nnspec-trained-featurizers` skill's [probes reference](../../nnspec-trained-featurizers/references/probes-and-lora.md#use-a-probe-causally)).
 - **`rows`, `pos` and `key` are not a select's to narrow**: `select 'rows': a select step narrows a value's other axes, and its rows are a dataset's (take, skip) to narrow`.
 
 `documents/head_rank.json` ranks all 144 heads of GPT-2 by the size of their result at the last token:
@@ -173,7 +173,7 @@ space, sets, `strip`, `lower`, literals) is [data](data.md#answer-columns).
 ```
 
 - **`ids` holds one index per ranked axis**, counted along the value's own axes: here layer 10, head 7 first, at 7.827009201049805. Over a `"6:12"` selection the same head is `layers` 4.
-- **A ranking with no rows does not table**: `clab table out/head_rank top` is refused with `… read it from plan.results`; [output](output.md#in-python) has the loop that prints it.
+- **A ranking with no rows does not table**: `nnspec table out/head_rank top` is refused with `… read it from plan.results`; [output](output.md#in-python) has the loop that prints it.
 
 ## Edit
 
@@ -194,7 +194,7 @@ they compute the same value without a model.
 | restore the norm the site had before this step's writes (`original`'s) | `{"op": "renormalize"}`, after the write it corrects; `"norm": "sum"` on a pattern |
 | through a featurizer | `decode`, `apply` ([featurizers and fit](featurizers-and-fit.md)) |
 
-The recipes that use them are the `clab-ablation`, `clab-patching` and `clab-steering-and-generation` skills'.
+The recipes that use them are the `nnspec-ablation`, `nnspec-patching` and `nnspec-steering-and-generation` skills'.
 
 ## Arithmetic and comparisons
 
@@ -231,4 +231,4 @@ over the values present, NaN only where none is. Where missing rows come from is
 ## Dtypes
 
 Metrics, reductions and arithmetic compute in float32 and cannot remove the model's own rounding; the rule and
-when to recompute in float32 are the `clab-debugging` skill's ([the float32 rule](../../clab-debugging/SKILL.md#the-float32-rule)).
+when to recompute in float32 are the `nnspec-debugging` skill's ([the float32 rule](../../nnspec-debugging/SKILL.md#the-float32-rule)).

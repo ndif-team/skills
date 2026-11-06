@@ -59,12 +59,12 @@ need `"attn_implementation": "eager"`.
 ```
 
 ```text
-$ clab run documents/key_knockout.json
-$ clab table out/key_knockout clean_ld scores_ld pattern_ld worst_gap
+$ nnspec run documents/key_knockout.json
+$ nnspec table out/key_knockout clean_ld scores_ld pattern_ld worst_gap
 at              clean_ld            scores_ld           pattern_ld          worst_gap
 {"keys":[1,3]}  2.7463226318359375  0.2475382536649704  0.2475382536649704  4.172325134277344e-07
 {"keys":[6]}    2.7463226318359375  2.7452316284179688  2.745234251022339   5.364418029785156e-07
-$ clab table out/key_knockout head_pattern.ld head_premix.ld
+$ nnspec table out/key_knockout head_pattern.ld head_premix.ld
 row  pos  pos_token  input                                             answer  other   head_pattern.ld     head_premix.ld
 0    13   Ġto        When Mary and John went to the store, John gave…   Mary    John   2.6998443603515625  2.6998443603515625
 1    14   Ġto        When Tom and James went to the train station, T…   James   Tom    3.6678543090820312  3.6678543090820312
@@ -84,10 +84,10 @@ row  pos  pos_token  input                                             answer  o
 - **Zeroing a head's whole pattern removes what it moves there**: `head_pattern` and `head_premix` agree to
   the bit on every row. Under eager the numbers differ from an sdpa run in the last bits (clean 2.7463226
   here, 2.7463291 under sdpa); compare runs under one implementation.
-- **Under sdpa these components are refused** before any forward ([eager](../../clab/references/sites-and-interventions.md#attention-needs-eager)).
+- **Under sdpa these components are refused** before any forward ([eager](../../nnspec/references/sites-and-interventions.md#attention-needs-eager)).
 
-Reading a pattern, stripes and induction heads are the `clab-lenses-and-attention` skill; swapping in another
-prompt's pattern is the `clab-patching` skill. Components and their axes: `clab describe components`.
+Reading a pattern, stripes and induction heads are the `nnspec-lenses-and-attention` skill; swapping in another
+prompt's pattern is the `nnspec-patching` skill. Components and their axes: `nnspec describe components`.
 
 ## The hydra effect
 
@@ -139,8 +139,8 @@ residual stream.
 ```
 
 ```text
-$ clab run documents/hydra.json
-$ clab table out/hydra clean_ld ablated_ld de_c de_a
+$ nnspec run documents/hydra.json
+$ nnspec table out/hydra clean_ld ablated_ld de_c de_a
 at                              clean_ld            ablated_ld          de_c                  de_a
 {"fill":"mean9","layer":9}      2.7463290691375732  2.6409759521484375  2.6578826904296875    0.48196282982826233
 {"fill":"mean9","layer":10}     2.7463290691375732  2.6409759521484375  -0.24392573535442352  1.8836288452148438
@@ -222,14 +222,14 @@ add nothing, and nothing renormalizes the others.
 ```
 
 ```text
-$ clab run documents/expert_knockout.json
-$ clab table out/expert_knockout usage rerouted knockout_kl forced_kl
+$ nnspec run documents/expert_knockout.json
+$ nnspec table out/expert_knockout usage rerouted knockout_kl forced_kl
 at            usage  rerouted  knockout_kl             forced_kl
 {"expert":0}  28.0   1.0       3.5498294892022386e-05  6.340032268781215e-05
 {"expert":1}  22.0   0.0       2.191085059166653e-06   2.7261874038231326e-06
 {"expert":2}  43.0   3.0       2.9413055017357692e-05  5.630953091895208e-05
 {"expert":3}  27.0   3.0       1.7466069266447448e-06  3.5173716241843067e-06
-$ clab table out/expert_knockout null_kl entropy
+$ nnspec table out/expert_knockout null_kl entropy
 null_kl  entropy
 0.0      1.3772038221359253
 ```
@@ -265,6 +265,6 @@ null_kl  entropy
   expert, for what the routed experts add together. `shared_expert_output` is the shared expert's own, to
   split the MLP's write between the two; on a mixture with none, as here, it is refused by name.
 
-Run expert ablations on the nnterp engine, the default; which values each engine serves is the `clab` skill's
-[running and engines](../../clab/references/running-and-engines.md) reference. Components: `clab describe
+Run expert ablations on the nnterp engine, the default; which values each engine serves is the `nnspec` skill's
+[running and engines](../../nnspec/references/running-and-engines.md) reference. Components: `nnspec describe
 components`.

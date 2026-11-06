@@ -21,16 +21,16 @@ selector := int | "<start>:<stop>:<step>" | [int, ...]   # one, a half-open slic
 - **A selector that picks nothing on any row** (`"0:0"`, `"5:2"`) is refused at compile.
 - **`index`, `frame` and a scope's `occurrence` may sweep**; the `pos` object itself may not ([sweeps](sweeps.md#what-may-sweep)).
 
-`clab describe pos` prints the whole grammar and its rules.
+`nnspec describe pos` prints the whole grammar and its rules.
 
 ## Where each form lands
 
-`documents/positions_tour.json` reads block 0's output at eleven `pos` forms and saves nothing; `clab show`
+`documents/positions_tour.json` reads block 0's output at eleven `pos` forms and saves nothing; `nnspec show`
 prints each entry's positions per row.
 
 ```json
 {
-  "description": "Where each pos form lands on GPT-2, which adds no BOS: reads of the residual stream leaving block 0 on the indirect-object prompts. Nothing is saved; clab show prints each entry's positions per row.",
+  "description": "Where each pos form lands on GPT-2, which adds no BOS: reads of the residual stream leaving block 0 on the indirect-object prompts. Nothing is saved; nnspec show prints each entry's positions per row.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"pairs": {"rows": [
     {"example_id": "mary", "input": "When Mary and John went to the store, John gave a drink to", "io": " Mary", "s": " John"},
@@ -57,7 +57,7 @@ prints each entry's positions per row.
 ```
 
 ```text
-$ clab show out/positions_tour
+$ nnspec show out/positions_tour
   ...
   entry         at  positions
   f.last        —   [13] on all 2 rows
@@ -128,7 +128,7 @@ row's own. `documents/ragged_scope.json` reads every token of a landmark one, th
 ```
 
 ```text
-$ clab table out/ragged_scope f.landmark
+$ nnspec table out/ragged_scope f.landmark
 example_id  row  pos  pos_token  input                                   value
 eiffel      0    1    ĠE         The Eiffel Tower is in the city of      51.706668853759766
 eiffel      0    2    iff        The Eiffel Tower is in the city of      54.16061782836914
@@ -138,15 +138,15 @@ gate        1    1    ĠBrand     The Brandenburg Gate is in the city of  59.771
 gate        1    2    enburg     The Brandenburg Gate is in the city of  65.51815032958984
 gate        1    3    ĠGate      The Brandenburg Gate is in the city of  59.88993835449219
 kremlin     2    1    ĠKremlin   The Kremlin is in the city of           67.14871215820312
-$ clab table out/ragged_scope count per_row
+$ nnspec table out/ragged_scope count per_row
 example_id  row  input                                   count  per_row
 eiffel      0    The Eiffel Tower is in the city of      4.0    54.941749572753906
 gate        1    The Brandenburg Gate is in the city of  3.0    61.726497650146484
 kremlin     2    The Kremlin is in the city of           1.0    67.14871215820312
 ```
 
-- **The saved tensor is `[3, 4]`**, NaN past each row's own positions; `clab table` leaves those out rather than printing NaN rows.
-- **Index j along `pos` is the read's j-th position on that row**, not position j: `clab show` prints `[1,2,3,4], [1,2,3], [1]` for `f.landmark`.
+- **The saved tensor is `[3, 4]`**, NaN past each row's own positions; `nnspec table` leaves those out rather than printing NaN rows.
+- **Index j along `pos` is the read's j-th position on that row**, not position j: `nnspec show` prints `[1,2,3,4], [1,2,3], [1]` for `f.landmark`.
 - **A value without rows keeps that index as its `pos`**: a `{"index": "-3:"}` read averaged `"over": ["rows"]` tables `pos` 0, 1, 2, where the rows' positions are 11, 12, 13. The rows' own are in the entry's `positions`.
 - **`index: -1` makes it static**: `f.landmark_last` is one position per row, `[4], [3], [1]`.
 - **`count` over `pos` is each row's own number of positions**, and a `mean` over a ragged read weighs positions, not rows.
@@ -185,13 +185,13 @@ beyond the prefill, an `until` scope, several occurrences), …`.
 
 Every read and write records its positions on every row, saved or not. Look before trusting a number:
 
-- **`clab show OUT`** prints one line per entry: `[13] on all 4 rows` where rows agree, else each row's list, and `—` for a row the entry never reached.
-- **`clab table OUT NAME`** prints the `pos` and `pos_token` columns for a saved value with rows, and `call` in a generation.
+- **`nnspec show OUT`** prints one line per entry: `[13] on all 4 rows` where rows agree, else each row's list, and `—` for a row the entry never reached.
+- **`nnspec table OUT NAME`** prints the `pos` and `pos_token` columns for a saved value with rows, and `call` in a generation.
 - **In Python**, the positions and the tokens they index:
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 
 plan = Plan.load("out/positions_tour")
 tokens = plan.run.tokens["pairs.input"]
@@ -202,7 +202,7 @@ for row, where in enumerate(plan.steps["f"].interventions["s2"].positions["pairs
 A position past the prompt indexes the generated tokens: `tokens[<input>][row] + plan.run.tokens[<step>][row]`.
 Prompts of different lengths put `-1` at different absolute positions per row, so compare tokens, not numbers.
 
-On a swept document `clab show` lists the points unlabelled; [output](output.md#in-python) has the loop that
+On a swept document `nnspec show` lists the points unlabelled; [output](output.md#in-python) has the loop that
 checks a read's and a write's positions point by point.
 
 ## Chat turns
@@ -233,7 +233,7 @@ are refused before any forward, naming the row, except an open index that picks 
 row's expected word; GPT-2 says Sochi, not Moscow, on row 2:
 
 ```text
-$ clab table out/generate_reads g.conf
+$ nnspec table out/generate_reads g.conf
 example_id  row  pos  pos_token  call  input                                     said            value               alignment_missing
 eiffel      0    9    Ġof        0     The Eiffel Tower is in the city of         Paris          0.0699695572257042
 golden      1    8    Ġof        0     The Golden Gate Bridge is in the city of   San Francisco  0.5367915630340576
@@ -247,4 +247,4 @@ kremlin     2                          The Kremlin is in the city of            
 - **Or check the record after the run**: a row the entry never reached holds `"alignment_missing"` in place of its list in `plan.steps[<step>].interventions[<entry>].positions`.
 - **Teacher forcing moves the question into the prefill**, where every miss is a refusal ([data](data.md#inputs)).
 
-What to do when a row is missing, and why, is the `clab-debugging` skill's.
+What to do when a row is missing, and why, is the `nnspec-debugging` skill's.

@@ -1,17 +1,17 @@
 ---
 name: nnspec-trained-featurizers
-description: Find which subspace, units or heads carry a variable by training them inside a clab run, or test what a trained or published featurizer encodes. Use it for distributed alignment search (DAS), the trained-subspace form of an interchange, and boundless masking (DBM), each beside PCA and random subspaces of matched rank. Use it for head masking with a gate per head, and for sparse autoencoders: splicing in a SAELens or Gemma Scope file, L0, latent ablation, max-activating examples, training one. Also for a linear probe per layer and projecting its direction out, a LoRA trained through the frozen model, and a harvest or bundle saved once and loaded elsewhere. Plain activation patching and interchange are clab-patching; the tuned lens clab-lenses-and-attention; the optimal constant clab-ablation; a refused bundle or load, or numbers that look wrong, clab-debugging; the fit step's fields the clab skill.
+description: Find which subspace, units or heads carry a variable by training them inside an nnspec run, or test what a trained or published featurizer encodes. Use it for distributed alignment search (DAS), the trained-subspace form of an interchange, and boundless masking (DBM), each beside PCA and random subspaces of matched rank. Use it for head masking with a gate per head, and for sparse autoencoders: splicing in a SAELens or Gemma Scope file, L0, latent ablation, max-activating examples, training one. Also for a linear probe per layer and projecting its direction out, a LoRA trained through the frozen model, and a harvest or bundle saved once and loaded elsewhere. Plain activation patching and interchange are nnspec-patching; the tuned lens nnspec-lenses-and-attention; the optimal constant nnspec-ablation; a refused bundle or load, or numbers that look wrong, nnspec-debugging; the fit step's fields the nnspec skill.
 ---
 
 # Trained featurizers
 
-Verified on clab `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
+Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `openai-community/gpt2` (12 layers of 12 heads, 768 wide), each in seconds to a minute.
 
 A featurizer is a space or a function declared under `featurizers` and used from an entry's `ops` with
 `encode`, `decode` and `apply`. A `fit` step trains it through the frozen model; saved, it is a bundle that a
 second document loads with `file_path`. Each kind's fields, the fit step's fields and members, and the bundle
-format are the `clab` skill's [featurizers-and-fit reference](../clab/references/featurizers-and-fit.md). This
+format are the `nnspec` skill's [featurizers-and-fit reference](../nnspec/references/featurizers-and-fit.md). This
 skill is the recipes, each with its null.
 
 ## What breaks
@@ -43,7 +43,7 @@ These are refused, and the fix is not obvious from the message:
 
 - **`does not exist under the corpus root`.** `file_path` and a load's `from` resolve against the nearest
   folder holding `data/`, from the document's own folder up, else the folder above the document's own
-  ([the rule](../clab/references/running-and-engines.md#where-output-goes)); run, show and table from it.
+  ([the rule](../nnspec/references/running-and-engines.md#where-output-goes)); run, show and table from it.
 - **Two training runs into one output directory keep only the last manifest.** The first run's values then
   table as `'held_acc' was not saved; add it to saves`. Leave each training run its own `out/<document>/` and
   point `file_path` there, as every document in this skill does.
@@ -154,21 +154,21 @@ rank-4 subspace to do the same swap with 4 of the 768 dimensions.
 ```
 
 - **`pos: -4` is the day token on every row**, since every prompt is the same 7 tokens and each day one
-  token. `clab show out/das` lists `[3] on all 21 rows` for `counterfactual.h`; check it on rows of each kind.
+  token. `nnspec show out/das` lists `[3] on all 21 rows` for `counterfactual.h`; check it on rows of each kind.
 - **`v_cf` encodes the harvest** in the subspace being trained, and the bracket swaps those 4 coordinates into
   the base prompt's. `decode` writes back only the change, so the other 764 dimensions stay the base's.
 - **`ce` is the objective; `acc`**, the interchange intervention accuracy, **is reported**.
 - **`rot` carries `"seed": 0`**, so its draw, the fit's starting point, can be declared again in another document.
 
 ```text
-clab run documents/das.json
-clab table out/das held_acc
+nnspec run documents/das.json
+nnspec table out/das held_acc
 value
 1.0
-clab table out/das ctl_acc
+nnspec table out/das ctl_acc
 value
 0.0
-clab table out/das fit.history.acc
+nnspec table out/das fit.history.acc
 epochs  value
 0       0.0476190485060215
 3       0.3333333432674408
@@ -219,8 +219,8 @@ document loads it; `k` comes from the header:
 ```
 
 ```text
-clab run documents/das_apply.json
-clab table out/das_apply ce
+nnspec run documents/das_apply.json
+nnspec table out/das_apply ce
 row  pos  pos_token  input                               cf_answer  value
 0    6    Ġis        If today is Sunday, tomorrow is      Saturday  1.1828811168670654
 1    6    Ġis        If today is Wednesday, tomorrow is   Monday    0.8661616444587708
@@ -229,7 +229,7 @@ row  pos  pos_token  input                               cf_answer  value
 
 `ce` equals `das.json`'s `held_ce` to the bit, row for row, and `acc` is 1.0: the same rows through the same
 rotation. That holds at one batch size and one thread count; at another the last bits move (the
-`clab-debugging` skill's [reproducibility](../clab-debugging/SKILL.md#reproducing-a-number)). A header that
+`nnspec-debugging` skill's [reproducibility](../nnspec-debugging/SKILL.md#reproducing-a-number)). A header that
 disagrees with the loading document is refused before the model loads, naming the key (`header 'layer' is
 '5'; this document uses 'rot' at layer_output layer 6`). The checks and the file layouts of every kind are
 [harvest-and-bundles.md](references/harvest-and-bundles.md).
@@ -247,11 +247,11 @@ disagrees with the loading document is refused before the model loads, naming th
 | project out a probe's direction | `fit.probe.W`, two `select`s and a `sub` | [probes](references/probes-and-lora.md#use-a-probe-causally) |
 | what a low-rank weight change learns, on in some steps | `lora` | [LoRA](references/probes-and-lora.md#lora-train-an-adapter) |
 | reuse a harvest, fit with no forward | a `load` step | [cached harvests](references/harvest-and-bundles.md#cached-harvests) |
-| a full linear map per layer (tuned lens) | `affine` | the `clab-lenses-and-attention` skill |
-| one vector in place of a value (optimal constant) | `constant` | the `clab-ablation` skill |
+| a full linear map per layer (tuned lens) | `affine` | the `nnspec-lenses-and-attention` skill |
+| one vector in place of a value (optimal constant) | `constant` | the `nnspec-ablation` skill |
 
-Every kind's fields and ops are in `clab describe featurizers`; the fit and load steps are in
-`clab describe steps`.
+Every kind's fields and ops are in `nnspec describe featurizers`; the fit and load steps are in
+`nnspec describe steps`.
 
 ## References
 

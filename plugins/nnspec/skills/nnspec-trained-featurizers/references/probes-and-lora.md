@@ -2,7 +2,7 @@
 
 A `linear` featurizer is a probe, `h W + b`, one score per class; it only encodes. A `lora` is a low-rank
 adapter at one site; it only applies. Both train in a fit through the frozen model. Each kind's fields are the
-`clab` skill's [featurizers-and-fit reference](../../clab/references/featurizers-and-fit.md).
+`nnspec` skill's [featurizers-and-fit reference](../../nnspec/references/featurizers-and-fit.md).
 
 ## What breaks here
 
@@ -77,8 +77,8 @@ which is the city's last token, and trains on 24 cities of four countries:
 ```
 
 ```text
-clab run documents/probe.json
-clab table out/probe fit.held_out.acc fit.held_out.mce
+nnspec run documents/probe.json
+nnspec table out/probe fit.held_out.acc fit.held_out.mce
 at                         fit.held_out.acc    fit.held_out.mce
 {"layers":0,"epochs":0}    0.25                1.3862943649291992
 {"layers":0,"epochs":30}   0.5                 2.3142340183258057
@@ -141,7 +141,7 @@ one body op and ends the fit for every probe at once, so leave it out.
 
 A trained probe's tensors are values: `fit.probe.W`, `[hidden_size, classes]`, and `fit.probe.b`, `[classes]`,
 as the fit left them. A two-class probe's direction is `W[:, 1] - W[:, 0]`: two `select`s of `classes`, each
-summed over it, then a `sub`. `project_out` takes it in the same document (the `clab-ablation` skill sends a
+summed over it, then a `sub`. `project_out` takes it in the same document (the `nnspec-ablation` skill sends a
 probe here). This one trains a sentiment probe on GPT-2's layer 10 output at the last token of 12 reviews and
 projects its direction out of 8 held-out ones:
 
@@ -209,11 +209,11 @@ projects its direction out of 8 held-out ones:
 ```
 
 ```text
-clab run documents/probe_direction.json
-clab table out/probe_direction held_acc clean_margin
+nnspec run documents/probe_direction.json
+nnspec table out/probe_direction held_acc clean_margin
 held_acc  clean_margin
 1.0       1.0175151824951172
-clab table out/probe_direction margin
+nnspec table out/probe_direction margin
 at                    value
 {"fill":"direction"}  0.4754676818847656
 {"fill":"random"}     1.0189380645751953
@@ -233,7 +233,7 @@ at                    value
   'fit.probe', which this fit trains: …`), and the bare `probe.W` after it is the draw, all zeros.
 - **A probe of more than two classes has a span, not one direction.** Take the class differences the question
   needs, a `select` pair and a `sub` each. To patch along the whole span, save its orthonormal basis as a
-  `subspace` bundle with a clab header ([harvest-and-bundles.md](harvest-and-bundles.md#what-a-run-writes)).
+  `subspace` bundle with an nnspec header ([harvest-and-bundles.md](harvest-and-bundles.md#what-a-run-writes)).
 
 ## LoRA: train an adapter
 
@@ -284,8 +284,8 @@ phrasing and scored on another:
 ```
 
 ```text
-clab run documents/lora_train.json
-clab table out/lora_train clean_mce fit.held_out.mce fit.held_out.acc
+nnspec run documents/lora_train.json
+nnspec table out/lora_train clean_mce fit.held_out.mce fit.held_out.acc
 clean_mce          fit.held_out.mce    fit.held_out.acc
 4.160462856292725  0.1650763601064682  1.0
 ```
@@ -331,8 +331,8 @@ A step that names the bundle runs the adapted model; one that does not runs the 
 ```
 
 ```text
-clab run documents/lora_apply.json
-clab table out/lora_apply said
+nnspec run documents/lora_apply.json
+nnspec table out/lora_apply said
 row  input                                    value
 1    Today is Tuesday, so tomorrow will be     Thursday.\n\n
 2    Today is Wednesday, so tomorrow will be   Friday.\n\n

@@ -2,7 +2,7 @@
 
 The `data` block names a document's datasets. Each is a list of rows, each row a JSON object. A step's `input`
 names the column it runs over, one row per example. Other fields name columns as answers to score or as text to
-find. `clab describe records` prints every field of `data.<name>`.
+find. `nnspec describe records` prints every field of `data.<name>`.
 
 ## Where rows come from
 
@@ -21,7 +21,7 @@ A fragment of a `data` block with the two other sources:
  "glue": {"hf": "nyu-mll/glue", "revision": "bcdcba79d07bc864c1c254ccfcedcce55bcc9a8c", "config": "wnli", "split": "validation", "take": 3}}
 ```
 
-- **A file is read again when you table the run**, from `data/` under the working directory, and rows that changed since the run are refused. Run `clab table` from the corpus root.
+- **A file is read again when you table the run**, from `data/` under the working directory, and rows that changed since the run are refused. Run `nnspec table` from the corpus root.
 - **A document whose `path` has no `data/` above it is refused**: `data.pairs.path: no file data/… under the corpus root`.
 - **A hub dataset's rows never enter the plan**; the run records their digest and refuses rows whose digest differs.
 - **A hub dataset with several splits and no `split` is refused**, listing the splits.
@@ -69,7 +69,7 @@ the second subject out of the prompt as a column, then scopes a read to it:
 ```
 
 ```text
-$ clab table out/columns f.at_giver
+$ nnspec table out/columns f.at_giver
 example_id  row  pos  pos_token  prompt                                            value
 paul        0    9    ĠLisa      When Paul and Lisa went to the school, Lisa gav…  63.120601654052734
 sarah       1    9    ĠJames     When Sarah and James went to the office, James …  58.88503646850586
@@ -139,11 +139,11 @@ write `"<dataset>.<column>"`, a reference with flags, or a literal:
 ```
 
 ```text
-$ clab table out/answers p_first p_bare p_set p_loose p_the
+$ nnspec table out/answers p_first p_bare p_set p_loose p_the
 example_id  row  pos  pos_token  input                                     first   p_first              first_bare  p_bare                  cities                p_set                p_loose             p_the
 eiffel      0    9    Ġof        The Eiffel Tower is in the city of         Paris  0.06997019797563553  Paris       1.0362419970988412e-06  [" Paris"," London"]  0.12832464277744293  0.1283280849456787  0.00387186580337584
 golden      1    8    Ġof        The Golden Gate Bridge is in the city of   San    0.5367922186851501   San         4.941660336044151e-06   [" San"," Los"]       0.6203228831291199   0.6203514337539673  0.001582340570166707
-$ clab table out/answers nll
+$ nnspec table out/answers nll
 example_id  row  pos  pos_token  input                                     answer          value
 eiffel      0    9    Ġof        The Eiffel Tower is in the city of         Paris          2.6596858501434326
 golden      1    8    Ġof        The Golden Gate Bridge is in the city of   San Francisco  0.6221428513526917
@@ -162,7 +162,7 @@ golden      1    9    ĠSan       The Golden Gate Bridge is in the city of   San
 
 ## Chats
 
-A column whose value on each row is a list of `{"role", "content"}` messages is a chat. clab renders it
+A column whose value on each row is a list of `{"role", "content"}` messages is a chat. nnspec renders it
 through the checkpoint's own chat template and tokenizes the result without adding special tokens. GPT-2 has
 no chat template; the fragment below is a `data` block for a checkpoint that has one, such as
 `HuggingFaceTB/SmolLM2-135M-Instruct`:
@@ -184,4 +184,4 @@ no chat template; the fragment below is a `data` block for a checkpoint that has
 - **Nothing in a document turns a text column into a chat.** Write the messages inline from a script, and record the source in `description`.
 
 Positions inside a turn are [positions](positions.md#chat-turns); generating from chats is the
-`clab-steering-and-generation` skill's.
+`nnspec-steering-and-generation` skill's.

@@ -3,8 +3,8 @@
 A featurizer is a space or a map declared once under the root key `featurizers`, by name, and reached from an
 entry's ops with `encode`, `decode` and `apply`. It is drawn, trained by a `fit` step inside the run, or loaded
 from a bundle file. The recipes (DAS, DBM, head masks, SAEs, probes, LoRA, cached harvests) are the
-`clab-trained-featurizers` skill's, the tuned lens the `clab-lenses-and-attention` skill's, and the optimal
-constant the `clab-ablation` skill's. This page is the fields and the mechanics.
+`nnspec-trained-featurizers` skill's, the tuned lens the `nnspec-lenses-and-attention` skill's, and the optimal
+constant the `nnspec-ablation` skill's. This page is the fields and the mechanics.
 
 ## Kinds
 
@@ -20,7 +20,7 @@ constant the `clab-ablation` skill's. This page is the fields and the mechanics.
 | `constant` | replace a value by one vector, set or learned | `init` | apply | `init`: a number, or a one-vector value such as a `mean` |
 
 Every kind takes `file_path` to load a bundle. A field a kind does not take is refused with its list:
-`featurizers.probe: 'linear' takes no 'seed'; its arguments: classes, file_path`. `clab describe featurizers`
+`featurizers.probe: 'linear' takes no 'seed'; its arguments: classes, file_path`. `nnspec describe featurizers`
 prints each kind's fields and the math of its ops.
 
 ## In an entry
@@ -41,11 +41,11 @@ prints each kind's fields and the math of its ops.
 
 An `encode`'s, `decode`'s or `apply`'s `featurizer` may be a sweep over featurizer names, declared or a fit's
 trained ones: `{"op": "encode", "featurizer": {"sweep": ["sae_a", "sae_b"], "label": "sae"}}`. Each point is
-that featurizer's use, as if the document named it alone. The `clab-trained-featurizers` skill compares a
+that featurizer's use, as if the document named it alone. The `nnspec-trained-featurizers` skill compares a
 trained rotation with a PCA and a draw this way, and two dictionaries.
 
 - **A `decode` carries its `encode`'s sweep**, the same label and names. A `decode` of one name is refused at the point: `… at space="pc": decode of 'rot', and the open encode is of 'pc' (ops[0])`.
-- **The coordinates are the names**: a swept save's `at` in `clab table` is `{"sae":"sae_a"}`.
+- **The coordinates are the names**: a swept save's `at` in `nnspec table` is `{"sae":"sae_a"}`.
 - **A read that only encodes shares one forward**; a write runs one per point.
 - **After a fit, `{"sweep": ["rot", "fit.rot"]}` scores the draw beside the trained featurizer.** In the body the two names are one featurizer, refused at compile: `label 'r' sweeps 'fit.rot' twice ('rot' and 'fit.rot' in the body of fit 'fit' are one featurizer, …)`.
 - **A sweep in the body over the featurizers the fit trains is refused once the model loads**, since each point would train every one and use one: `fit at r="fit.rot": 'rot2' is trained but used at no site at this point, …`.
@@ -63,7 +63,7 @@ fields the file cannot carry, `activation`, `centered` and the `site` it was tra
 ```
 
 A wrong `centered`, `activation` or layer runs unrefused; what each field means, what is refused and the mean-L0
-check are the `clab-trained-featurizers` skill's ([published dictionaries](../../clab-trained-featurizers/references/sae.md#splice-in-a-published-dictionary)).
+check are the `nnspec-trained-featurizers` skill's ([published dictionaries](../../nnspec-trained-featurizers/references/sae.md#splice-in-a-published-dictionary)).
 
 ## The fit step
 
@@ -133,18 +133,18 @@ check are the `clab-trained-featurizers` skill's ([published dictionaries](../..
 ```
 
 ```text
-$ clab run documents/fit_probe.json
+$ nnspec run documents/fit_probe.json
 fit_probe on nnterp (batch size 8, device cpu, tp 1) -> out/fit_probe
   fit.history.ce.safetensors  fit            2 points, each [0] or [8]
   fit.train.hit.safetensors   fit.train.hit  2 points, each [6,1]
   held_acc.safetensors        held_acc       2 points, each []
   fit.probe.safetensors       fit            2 points, each {"W":[768,2],"b":[2]}
   out/fit_probe/manifest.json
-$ clab table out/fit_probe held_acc
+$ nnspec table out/fit_probe held_acc
 at            value
 {"epochs":0}  0.5
 {"epochs":8}  1.0
-$ clab table out/fit_probe fit.history.ce
+$ nnspec table out/fit_probe fit.history.ce
 at            epochs  value
 {"epochs":8}  0       0.6077650189399719
 {"epochs":8}  1       0.5312594771385193
@@ -193,7 +193,7 @@ What the run does:
 
 A featurizer's tensors are its bundle's, by name, each a value laid out on axis names: a probe's `W`
 `[hidden_size, classes]` and `b` `[classes]`, an sae's `W_dec` `[features, hidden_size]`, a subspace's `basis`
-`[hidden_size, features]`. The `clab-trained-featurizers` skill's [bundle table](../../clab-trained-featurizers/references/harvest-and-bundles.md#what-a-run-writes)
+`[hidden_size, features]`. The `nnspec-trained-featurizers` skill's [bundle table](../../nnspec-trained-featurizers/references/harvest-and-bundles.md#what-a-run-writes)
 lists every kind's.
 
 - **`hidden_size` is the last axis of the first site a step before the name uses the featurizer at.** A name before any such step is refused: `'probe.W' is a tensor of 'probe', laid out on the last axis of the site it is used at, and no step before this one encodes or applies 'probe' at a site; …`.
@@ -228,7 +228,7 @@ for every saved `<fit>.<featurizer>` and every saved `pca` op step. `fit_probe.j
 directory the loading document names:
 
 ```text
-$ clab run documents/probe_train.json --out artifacts/probe
+$ nnspec run documents/probe_train.json --out artifacts/probe
 probe_train on nnterp (batch size 8, device cpu, tp 1) -> artifacts/probe
   held_acc.safetensors   held_acc  []
   fit.probe.safetensors  fit       {"W":[768,2],"b":[2]}
@@ -272,7 +272,7 @@ project/
 Its `held_acc` is 1.0, the trained run's. The header, read with `safetensors.safe_open(path, "pt").metadata()`:
 
 ```text
-{'classes': '["person", "place"]', 'component': 'layer_output', 'document': 'probe_train', 'format': 'clab/1', 'kind': 'linear', 'layer': '6', 'model.dtype': 'float32', 'model.key': 'openai-community/gpt2', 'model.revision': '607a30d783dfa663caf39e06633721c8d4cfcd7e', 'width': '768'}
+{'classes': '["person", "place"]', 'component': 'layer_output', 'document': 'probe_train', 'format': 'nnspec/1', 'kind': 'linear', 'layer': '6', 'model.dtype': 'float32', 'model.key': 'openai-community/gpt2', 'model.revision': '607a30d783dfa663caf39e06633721c8d4cfcd7e', 'width': '768'}
 ```
 
 - **`file_path` resolves against the corpus root** ([where output goes](running-and-engines.md#where-output-goes)): `project/` in the layout above, which needs no `data/`.
@@ -282,6 +282,6 @@ Its `held_acc` is 1.0, the trained run's. The header, read with `safetensors.saf
 - **A swept run's bundle is refused**: `out/fit_probe/fit.probe.safetensors holds one bundle per point of a sweep (epochs=0, epochs=8); a featurizer loads one bundle, so run the document that writes it unswept`.
 - **A loaded featurizer is fixed**: a fit refuses to train one with a `file_path`.
 - **Give each training run its own `--out`**: a second run into one directory replaces its manifest and leaves the first run unreadable.
-- **`clab show` and `clab table` read a loaded bundle again** from its `file_path`, so run them from the corpus root with the bundle in place.
+- **`nnspec show` and `nnspec table` read a loaded bundle again** from its `file_path`, so run them from the corpus root with the bundle in place.
 - **A `pca` op step's value is a bundle**, `basis` `[width, k]` and `mean`, which a `{"kind": "pca", "k": 4, "file_path": ...}` featurizer loads; a `pca` needs more vectors than its `k`.
-- **A value that is not a bundle loads with a `load` step** (`{"kind": "load", "from": "out/x", "value": "harvest.h"}`), which the `clab-trained-featurizers` skill uses for cached harvests.
+- **A value that is not a bundle loads with a `load` step** (`{"kind": "load", "from": "out/x", "value": "harvest.h"}`), which the `nnspec-trained-featurizers` skill uses for cached harvests.

@@ -14,12 +14,12 @@ Each runs on the CPU in seconds, on `openai-community/gpt2` except the generatio
   `-7` is refused, naming the two tokens:
 
   ```text
-  clab: patched.patch: operand 'counterfactual.v_cf' was read on pairs.counterfactual, row 0 of which is 9 tokens; pairs.input has 10, so pairs.counterfactual's position 2 ('enburg') pairs with pairs.input's position 3 ('el'); use a scope to name the token in each row
+  nnspec: patched.patch: operand 'counterfactual.v_cf' was read on pairs.counterfactual, row 0 of which is 9 tokens; pairs.input has 10, so pairs.counterfactual's position 2 ('enburg') pairs with pairs.input's position 3 ('el'); use a scope to name the token in each row
   ```
 
   Prompts of one length are never checked, whatever tokens share an index. Past the boundary, scope each side.
 - **A whole-word scope pairs only where every row's word is the same number of tokens**, and is refused
-  naming each row's count ([positions](../../clab/references/positions.md#pairing-with-another-forward)).
+  naming each row's count ([positions](../../nnspec/references/positions.md#pairing-with-another-forward)).
 - **An open `{"index": ":"}` from another forward pairs only on prompts of one length.** On 7-token prompts it
   patches as `{"index": "0:7"}` does, to the bit. Where the lengths differ it is refused before any forward,
   naming a span every row holds: `… read a static span every row holds ('index': '0:7', or '-7:'), or reduce it`.
@@ -74,7 +74,7 @@ all four rows.
 }
 ```
 
-`clab show out/entity_scope` prints where the reads and the write landed, a different position on each row:
+`nnspec show out/entity_scope` prints where the reads and the write landed, a different position on each row:
 
 ```text
   clean.v_self         all 3 points  [4], [3], [1], [3]
@@ -82,7 +82,7 @@ all four rows.
   patched.patch        all 3 points  [4], [3], [1], [3]
 ```
 
-`clab table out/entity_scope null_ld ld iia`, trimmed to its value columns:
+`nnspec table out/entity_scope null_ld ld iia`, trimmed to its value columns:
 
 ```text
 at            example_id           null_ld              ld                   iia
@@ -139,7 +139,7 @@ as a window of static width:
 ```
 
 ```text
-$ clab table out/window gap_max whole_max window_mean
+$ nnspec table out/window gap_max whole_max window_mean
 gap_max  whole_max  window_mean
 0.0      0.0        1.7342965602874756
 ```
@@ -196,11 +196,11 @@ residual stream at one layer at a time, at the landmark's last token and at the 
 ```
 
 ```text
-$ clab table out/corrupt_restore p_clean p_corrupted
+$ nnspec table out/corrupt_restore p_clean p_corrupted
 p_clean              p_corrupted
 0.16293950378894806  0.008386699482798576
 
-$ clab table out/corrupt_restore p_entity p_last
+$ nnspec table out/corrupt_restore p_entity p_last
 at             p_entity              p_last
 {"layers":0}   0.06097676604986191   0.009248701855540276
 {"layers":4}   0.08421291410923004   0.008264116011559963
@@ -257,13 +257,13 @@ at             p_entity              p_last
 ```
 
 ```text
-$ clab table out/distribution kl js kl_null
+$ nnspec table out/distribution kl js kl_null
 example_id  row  pos  pos_token  input                               kl                   js                   kl_null
 mon-thu     0    6    Ġis        If today is Monday, tomorrow is     0.24973368644714355  0.06207166612148285  0.0
 ...
 sat-tue     5    6    Ġis        If today is Saturday, tomorrow is   0.9206199049949646   0.19037958979606628  0.0
 
-$ clab table out/distribution cos_mean cos_null_mean
+$ nnspec table out/distribution cos_mean cos_null_mean
 layer  pos  cos_mean            cos_null_mean
 2      1    1.0000001192092896  1.0000001192092896
 6      0    0.9999998807907104  0.9999998807907104
@@ -283,7 +283,7 @@ layer  pos  cos_mean            cos_null_mean
 Declare each experiment as a bundle at the root and run each in its own step, its metric named apart, against
 one clean run. This fragment is the `interventions` and `steps` of `documents/two_experiments.json`, whose
 `model`, `data` and `sites` are those of `documents/interchange.json`; the second experiment is a mean ablation
-(the `clab-ablation` skill owns it).
+(the `nnspec-ablation` skill owns it).
 
 ```json
 {
@@ -314,7 +314,7 @@ one clean run. This fragment is the `interventions` and `steps` of `documents/tw
 ```
 
 ```text
-$ clab table out/two_experiments clean_ld patching_ld ablation_ld ablation_top
+$ nnspec table out/two_experiments clean_ld patching_ld ablation_ld ablation_top
 example_id  ...  clean_ld             patching_ld         ablation_ld           ablation_top
 mon-thu     ...  -1.043609619140625   1.0651702880859375  0.0742034912109375    0.0
 tue-fri     ...  -1.4108200073242188  2.1431808471679688  0.6134719848632812    0.0
@@ -331,9 +331,9 @@ sun-wed     ...  -1.568878173828125   1.0600814819335938  -0.46514892578125     
 
 Use it when the answer is several tokens, or to see what the patched model goes on to say. Read the
 counterfactual's value in a forward and write it in the base's `generate` step at `"frame": 0`, the prefill;
-every later token follows from the patched state through the cache. Frames are the `clab` skill's
-[generation reference](../../clab/references/generate.md#frames); scoring what a generation says is the
-`clab-steering-and-generation` skill's.
+every later token follows from the patched state through the cache. Frames are the `nnspec` skill's
+[generation reference](../../nnspec/references/generate.md#frames); scoring what a generation says is the
+`nnspec-steering-and-generation` skill's.
 
 ```json
 {
@@ -383,8 +383,8 @@ every later token follows from the patched state through the cache. Frames are t
 ```
 
 ```text
-$ clab run documents/generation_patch.json
-$ clab table out/generation_patch plain_text patched_text says_cf
+$ nnspec run documents/generation_patch.json
+$ nnspec table out/generation_patch plain_text patched_text says_cf
 example_id         row  ...  plain_text                   patched_text                 cf_answer       says_cf
 eiffel-colosseum   0    ...  Paris, France.\n\n           Paris, France.\n\n           Rome           0.0
 colosseum-liberty  1    ...  Rome, Italy. It is           New York.\n\nThe             New York       1.0
@@ -392,7 +392,7 @@ liberty-kremlin    3    ...  New York.\n\nThe             Moscow, Russia.\n\n   
 sophia-eiffel      7    ...  Istanbul, Turkey.\n\n        Athens, Greece.\n\n          Paris          0.0
 ```
 
-- **`null_gap` is 0.0** (`clab table out/generation_patch null_gap`): the null generates the plain run's
+- **`null_gap` is 0.0** (`nnspec table out/generation_patch null_gap`): the null generates the plain run's
   tokens on every row, by `ne` of the two generations' ids summed over `rows` and `new`.
 - **Four rows of eight say the counterfactual's city, and its country comes with it.** The forward recipes
   score the next token alone.

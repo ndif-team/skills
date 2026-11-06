@@ -39,7 +39,7 @@ Read the site where the write lands, at the positions it lands on, and take the 
 }
 ```
 
-`clab table out/site_norms last_median generated_median prompt_median prompt_mean prompt_max`:
+`nnspec table out/site_norms last_median generated_median prompt_median prompt_mean prompt_max`:
 
 ```text
 last_median         generated_median    prompt_median      prompt_mean        prompt_max
@@ -129,7 +129,7 @@ unsteered distribution:
 }
 ```
 
-`clab table out/steer_forward typical difference_norm`, then `effect drift renorm_effect renorm_drift`, then
+`nnspec table out/steer_forward typical difference_norm`, then `effect drift renorm_effect renorm_drift`, then
 `random_effect random_drift`:
 
 ```text
@@ -165,7 +165,7 @@ at                      random_effect       random_drift
   0.5 and 1.46 at 1.0.
 - **Save `typical` and `difference_norm` beside the curve.** Here the difference is a fifth of the
   activation's length (17.8 against 88.0).
-- **Holding a direction's coordinate at a value** is the clamp recipe in the `clab-ablation` skill.
+- **Holding a direction's coordinate at a value** is the clamp recipe in the `nnspec-ablation` skill.
 
 ## A dose by layer grid
 
@@ -215,7 +215,7 @@ layer, so each layer steers along its own difference at its own `typical`:
 }
 ```
 
-`clab table out/steer_grid effect drift`, then `typical difference_norm`:
+`nnspec table out/steer_grid effect drift`, then `typical difference_norm`:
 
 ```text
 at                       effect              drift
@@ -242,9 +242,9 @@ at           typical             difference_norm
   layer.
 - **Compare layers at matched drift, not matched dose.** Near 0.15 to 0.19 nats, layer 9 at dose 0.25 moves the
   effect to 6.68 and layer 3 at dose 0.5 to 4.59.
-- **`clab show out/steer_grid` lists the axes `layer, dose`** for `effect` and `drift`, 12 points. Sweeps
+- **`nnspec show out/steer_grid` lists the axes `layer, dose`** for `effect` and `drift`, 12 points. Sweeps
   that share a label are one axis and pair their points instead
-  ([sweeps](../../clab/references/sweeps.md#labels-zip-or-cross)).
+  ([sweeps](../../nnspec/references/sweeps.md#labels-zip-or-cross)).
 
 ## Counts, whole words and a control at one dose
 
@@ -270,7 +270,7 @@ steps that replace `random` with a control at dose 1.0 alone and count:
 }
 ```
 
-Saved as `steer_counts.json` with the new steps and `cheer_row` added to `saves`, `clab table out/steer_counts
+Saved as `steer_counts.json` with the new steps and `cheer_row` added to `saves`, `nnspec table out/steer_counts
 cheer_count word_count random_cheer_count`, then `cheer_row word_row` at dose 1.0:
 
 ```text
@@ -321,7 +321,7 @@ prompt alone and compares it with the steer at every token:
 }
 ```
 
-Saved as `steer_prefill_only.json` with these steps added, `clab table out/steer_prefill_only cheer po_cheer
+Saved as `steer_prefill_only.json` with these steps added, `nnspec table out/steer_prefill_only cheer po_cheer
 changed_frac po_changed_frac` gives:
 
 ```text
@@ -338,5 +338,5 @@ at            cheer               po_cheer            changed_frac        po_cha
   ids that changed. The default removes `rows` and `pos` and leaves `[new]`.
 - **To steer every position, the prompt included**, write once at `{"frame": ":"}`. That includes position 0,
   whose norm is far above the dose ([above](#the-norm-a-dose-is-set-against)).
-- **A write's frames and the calls they land at** are the `clab` skill's
-  [generate reference](../../clab/references/generate.md).
+- **A write's frames and the calls they land at** are the `nnspec` skill's
+  [generate reference](../../nnspec/references/generate.md).

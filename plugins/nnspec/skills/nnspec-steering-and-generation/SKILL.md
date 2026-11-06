@@ -1,25 +1,25 @@
 ---
 name: nnspec-steering-and-generation
-description: Steer a model with a direction and score what it generates, as clab JSON documents. Use to push a behaviour with a steering vector (contrastive activation addition, a mean difference of two prompt sets). Covers the dose set from the activations' norms, a matched random-direction control, dose and layer sweeps, renormalize, and steering every generated token. Also use to score what a model generated: did it say the answer (contains, strip, a whole word), and how confident was it as it said it. Covers the text after a marker, a reasoning trace's length, teacher forcing a fixed answer or a chat reply, and chat prompts. The format and the generate step are the `clab` skill, and patching is `clab-patching`. Projecting a direction out and clamping are `clab-ablation`; SAE features and probe directions, `clab-trained-featurizers`; the logit lens and decoded top-k, `clab-lenses-and-attention`; refusals and wrong numbers, `clab-debugging`.
+description: Steer a model with a direction and score what it generates, as nnspec JSON documents. Use to push a behaviour with a steering vector (contrastive activation addition, a mean difference of two prompt sets). Covers the dose set from the activations' norms, a matched random-direction control, dose and layer sweeps, renormalize, and steering every generated token. Also use to score what a model generated: did it say the answer (contains, strip, a whole word), and how confident was it as it said it. Covers the text after a marker, a reasoning trace's length, teacher forcing a fixed answer or a chat reply, and chat prompts. The format and the generate step are the `nnspec` skill, and patching is `nnspec-patching`. Projecting a direction out and clamping are `nnspec-ablation`; SAE features and probe directions, `nnspec-trained-featurizers`; the logit lens and decoded top-k, `nnspec-lenses-and-attention`; refusals and wrong numbers, `nnspec-debugging`.
 ---
 
-# Steering and generation experiments in clab
+# Steering and generation experiments in nnspec
 
-Verified on clab `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
+Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `HuggingFaceTB/SmolLM2-135M-Instruct` (every generation and chat) and `openai-community/gpt2`
 (steering a forward), in seconds.
 
 A steering experiment adds a direction to the residual stream and measures what moves. A generation
-experiment scores the text a model writes. Both are documents in the format the `clab` skill teaches. The
+experiment scores the text a model writes. Both are documents in the format the `nnspec` skill teaches. The
 `generate` step's options, frames and rows that stop early are in that skill's
-[generate reference](../clab/references/generate.md), and `pos` in its
-[positions reference](../clab/references/positions.md). This skill holds the recipes and their controls.
+[generate reference](../nnspec/references/generate.md), and `pos` in its
+[positions reference](../nnspec/references/positions.md). This skill holds the recipes and their controls.
 
 ## What breaks
 
 Each of these runs without a refusal and costs a conclusion.
 
-- **A generate step without `do_sample: false`** may sample (the `clab` skill's list). Write it on every one.
+- **A generate step without `do_sample: false`** may sample (the `nnspec` skill's list). Write it on every one.
 - **A steering write at `pos: -1` in a generate step** lands in the prefill only; later tokens see it through
   the cache. Write two entries, `pos: -1` and `{"frame": "1:"}`. Steered at the prompt alone, the mood
   direction below changes 89% of the generated ids at dose 1.0 and makes no reply cheerful.
@@ -33,20 +33,20 @@ Each of these runs without a refusal and costs a conclusion.
   many. At dose 1.0 both change 12 to 16 of 16 ids per row. Score the behaviour you steer.
 - **`contains` on a chat reply without `strip`** misses an answer that has no space before it. A reply's first
   word follows the header's newline, a word may follow a quote mark (`"eight`), and a SentencePiece tokenizer
-  drops the first generated token's space (the `clab` skill's list). Give the answer column `strip: true`
+  drops the first generated token's space (the `nnspec` skill's list). Give the answer column `strip: true`
   wherever `contains` or a scope searches generated text.
 - **`contains` as a whole-word test** scores a substring: ` dark` scores 1 on a reply that says "darkness".
   Score a whole word with `count` of a scoped read over `pos` (`word` below).
 - **`contains` on the whole reply** also finds words the reply repeats from the question. "Is Paris or Lyon
   the capital of France?" gets "Paris and Lyon are …", and the wrong answer ` Lyon` scores 1. Score the text
   after a marker, or teacher-force both candidates ([generation scoring](references/generation-scoring.md)).
-- **A mean over a scoped read skips the rows it never reached** (the `clab` skill's list). Count them first
+- **A mean over a scoped read skips the rows it never reached** (the `nnspec` skill's list). Count them first
   (`reached` below) and quote the count beside the mean.
 - **An answer on the row's last generated token** is `alignment_missing` to a read scoped to the word without
   `before`, since no call is fed that token. Leave room after the answer in `max_new_tokens`.
 - **A teacher-forced answer scoped with the default `occurrence: 0`** lands on the prompt's copy when the
   prompt names it, with no refusal; so does an answer appended without its leading space. Write
-  `"occurrence": -1`, keep the space, and check the read's `positions` in `clab show`.
+  `"occurrence": -1`, keep the space, and check the read's `positions` in `nnspec show`.
 - **`min_new_tokens` left out when two generations are compared**: rows stop on EOS at different calls, and
   a read at a fixed call is missing on some. Set it equal to `max_new_tokens`.
 - **`renormalize` listed before the `add`** rescales the clean activation to its own norm, a no-op. The run
@@ -148,12 +148,12 @@ What each part does:
 - **`random_dose`** is one Gaussian draw from `seed` (`noise` on a value with no rows), made unit length and
   given the same length. The sweep over seeds is in [steering controls](references/steering-controls.md).
 - **Both writes sweep under one `label`**, so they move together and `steered` and `random` share the `dose`
-  axis ([sweeps](../clab/references/sweeps.md)).
+  axis ([sweeps](../nnspec/references/sweeps.md)).
 - **`changed`** compares ids, which are `[rows, new]`; a reduction of them names `new` in `over`.
 
 ```bash
-clab run documents/steer_generation.json
-clab table out/steer_generation cheer random_cheer correct random_correct
+nnspec run documents/steer_generation.json
+nnspec table out/steer_generation cheer random_cheer correct random_correct
 ```
 
 ```text
@@ -164,7 +164,7 @@ at            cheer               random_cheer        correct             random
 {"dose":2.0}  0.0                 0.0                 0.1666666716337204  0.0
 ```
 
-`clab table --csv out/steer_generation text` prints whole texts; the Japan row at each dose:
+`nnspec table --csv out/steer_generation text` prints whole texts; the Japan row at each dose:
 
 ```text
 "{""dose"":0.0}",japan,1,"[{""role"":""user"",""content"":""What is the capital of Japan?""}]",The capital of Japan is Tokyo. It is a city that has been a major
@@ -175,7 +175,7 @@ at            cheer               random_cheer        correct             random
 
 The same row of `random_text` at dose 1.0 reads `Japan's a beautiful and beautiful, but the "Hokaidai" is`.
 
-- **The null is dose 0.** `clab table out/steer_generation changed random_changed` gives 0.0 on every row of
+- **The null is dose 0.** `nnspec table out/steer_generation changed random_changed` gives 0.0 on every row of
   both at `{"dose":0.0}`: `h + 0 * d` is `h` in float32, so the ids equal the clean generation's.
 - **The band is dose 0.5.** Five of six replies call the city beautiful and all six still name it. At 1.0
   five replies turn into "I'm glad" and "I am delighted", and one names the capital.
@@ -186,7 +186,7 @@ The same row of `random_text` at dose 1.0 reads `Japan's a beautiful and beautif
   row at 1.0), so `changed` cannot tell the two apart.
 - **Check the difference's length**: `difference_norm` is 8.46 against a `typical` of 132.37. In bfloat16 an
   element rounds by about 2^-8 of its size, so a difference under about 1% of `typical` can be rounding.
-- **`clab show out/steer_generation`** prints where each write landed: `steered.prompt` at `[36]` and
+- **`nnspec show out/steer_generation`** prints where each write landed: `steered.prompt` at `[36]` and
   `steered.decode` at `[37,38,39,…,51]` on all 6 rows.
 - **A control at one dose takes its own label, or none**; under `dose` it is refused. A count of replies is
   `sum` where `mean` is the fraction. Both, and whole-word lists, are in
@@ -233,7 +233,7 @@ the answer's tokens as it chose them:
 }
 ```
 
-`clab table out/generated_capitals text said_spaced said said_decoy word`, then `p`, then
+`nnspec table out/generated_capitals text said_spaced said said_decoy word`, then `p`, then
 `accuracy reached mean_p`:
 
 ```text
@@ -280,12 +280,12 @@ as the template's rendered text, since a list input refuses a chat column; the r
 - [references/generation-scoring.md](references/generation-scoring.md): the text after a marker (`after`);
   a reasoning trace's length (`until`, `count`); teacher forcing an answer or a chat reply; a reply to a
   chat; missing rows per sweep point.
-- The `clab` skill: the format, `pos` and rows a scope never reached
-  ([positions](../clab/references/positions.md)), the generate step's mechanics
-  ([generate](../clab/references/generate.md)), answer columns and chats ([data](../clab/references/data.md)),
-  ops ([ops](../clab/references/ops.md)).
-- Patching a counterfactual's activation into a generation: the `clab-patching` skill.
-- Projecting a direction out, holding its coordinate at a value, or clamping: the `clab-ablation` skill.
-- Steering with an SAE feature, or using a trained probe's direction: the `clab-trained-featurizers` skill.
-- What the model predicts at a position, decoded (`top_k`, the logit lens): the `clab-lenses-and-attention` skill.
-- A refusal, or a null that does not equal the clean run: the `clab-debugging` skill.
+- The `nnspec` skill: the format, `pos` and rows a scope never reached
+  ([positions](../nnspec/references/positions.md)), the generate step's mechanics
+  ([generate](../nnspec/references/generate.md)), answer columns and chats ([data](../nnspec/references/data.md)),
+  ops ([ops](../nnspec/references/ops.md)).
+- Patching a counterfactual's activation into a generation: the `nnspec-patching` skill.
+- Projecting a direction out, holding its coordinate at a value, or clamping: the `nnspec-ablation` skill.
+- Steering with an SAE feature, or using a trained probe's direction: the `nnspec-trained-featurizers` skill.
+- What the model predicts at a position, decoded (`top_k`, the logit lens): the `nnspec-lenses-and-attention` skill.
+- A refusal, or a null that does not equal the clean run: the `nnspec-debugging` skill.

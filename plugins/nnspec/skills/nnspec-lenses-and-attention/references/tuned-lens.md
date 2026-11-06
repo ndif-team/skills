@@ -4,23 +4,23 @@ An early layer's logit lens reads that layer's stream in the last layer's basis.
 layer's stream with a translator of its own, `h + h W + b`, trained so the lens's next-token distribution matches
 the model's. The document below runs on the CPU in seconds on `openai-community/gpt2`. The fit step's
 fields (`train`, `objective`, `epochs`, `batch_size`, `seed`, `optimizer`, `eval`, `steps`) and its members are
-the `clab` skill's [featurizers-and-fit.md](../../clab/references/featurizers-and-fit.md); this page is the recipe.
+the `nnspec` skill's [featurizers-and-fit.md](../../nnspec/references/featurizers-and-fit.md); this page is the recipe.
 
 ## What breaks
 
 - **`apply` inside an entry writes.** Each translated layer is written back, and every later layer sees it. Write
   `apply` and `readout` as op steps over a plain read: the forward stays the model's own.
-- **The bare featurizer name after the fit** is the untrained draw; the trained lens is `fit.lens` (the `clab`
+- **The bare featurizer name after the fit** is the untrained draw; the trained lens is `fit.lens` (the `nnspec`
   skill's list).
 - **A fit without its `epochs: 0` point.** Every translator starts at zero, so at `epochs: 0` the tuned lens is the
   logit lens and `gain` is exactly 0.0 at every layer. A gain means something only beside that null.
 - **A null compared across forms or batch shapes.** `gain` is 0.0 to the bit where both lenses compute alike: the
   logit lens as a `readout` step, as the tuned lens's is, at `--batch-size` equal to the fit's `batch_size` (8 here,
-  the run's default). What moves bits is the `clab-debugging` skill's
-  [reproducing a number](../../clab-debugging/SKILL.md#reproducing-a-number).
-- **A step named like a featurizer.** Steps, datasets and featurizers share one namespace (the `clab` skill's
-  [steps and names](../../clab/SKILL.md#steps-and-names)): the logit lens's step `lens` added here is refused,
-  `clab: steps.lens: 'lens' is also a dataset or a featurizer`.
+  the run's default). What moves bits is the `nnspec-debugging` skill's
+  [reproducing a number](../../nnspec-debugging/SKILL.md#reproducing-a-number).
+- **A step named like a featurizer.** Steps, datasets and featurizers share one namespace (the `nnspec` skill's
+  [steps and names](../../nnspec/SKILL.md#steps-and-names)): the logit lens's step `lens` added here is refused,
+  `nnspec: steps.lens: 'lens' is also a dataset or a featurizer`.
 - **The direction of the KL.** The objective is KL(final ‖ lens): the lens is `of`, since an operand cannot carry
   a `layers` axis that `of` lacks, and `"reverse": true` sets the direction. The logit lens's `to_final`
   ([SKILL.md](../SKILL.md)) is the other direction, KL(lens ‖ final), and gives other numbers.
@@ -118,7 +118,7 @@ the `clab` skill's [featurizers-and-fit.md](../../clab/references/featurizers-an
 
 - **`{"kind": "affine", "over": ["layers"]}`** holds one map per layer of its site's selection: `W`
   `[11, 768, 768]` and `b` `[11, 768]`, both zero at the draw, so it starts as the identity exactly. `apply`
-  takes each layer's map by the layer's id. `clab describe featurizers` lists the kinds.
+  takes each layer's map by the layer's id. `nnspec describe featurizers` lists the kinds.
 - **The fit's site stops before the last layer** (`"0:11"` is layers 0 to 10). The last layer's lens is the model's
   own logits, which the wiring check proves.
 - **Two sites of one component share `lfw`:** `h` at the fit's layers, `wire` at every layer. `wiring` is the
@@ -136,9 +136,9 @@ the `clab` skill's [featurizers-and-fit.md](../../clab/references/featurizers-an
 ## Run it and read it back
 
 ```bash
-clab run documents/tuned_lens.json
-clab table out/tuned_lens wiring
-clab table out/tuned_lens ll_mkl fit.held_out.mkl fit.seen.mkl gain
+nnspec run documents/tuned_lens.json
+nnspec table out/tuned_lens wiring
+nnspec table out/tuned_lens ll_mkl fit.held_out.mkl fit.seen.mkl gain
 ```
 
 ```text
@@ -167,9 +167,9 @@ at            layer  ll_mkl              fit.held_out.mkl    fit.seen.mkl       
 - **The fit's own rows flatter it:** after four epochs `fit.seen.mkl` is 1.62 at layer 0, against 2.97 held out.
   `fit.seen` measures how well the lens fits; `gain` on held-out rows measures what it generalises.
 - **`at`** is the sweep point. In Python a swept result is keyed by it (`Plan.load(out).results["gain"]`); the
-  `clab` skill's [sweeps.md](../../clab/references/sweeps.md) has the forms.
+  `nnspec` skill's [sweeps.md](../../nnspec/references/sweeps.md) has the forms.
 
-`clab table out/tuned_lens fit.history.mkl` is the training rows' mean KL after each epoch, over every layer and
+`nnspec table out/tuned_lens fit.history.mkl` is the training rows' mean KL after each epoch, over every layer and
 position. The `epochs: 0` point has an empty history, so only the trained point prints:
 
 ```text
@@ -180,7 +180,7 @@ at            epochs  value
 {"epochs":4}  3       1.1246228218078613
 ```
 
-`clab table out/tuned_lens p_tuned top_tuned.tokens`, at layer 9:
+`nnspec table out/tuned_lens p_tuned top_tuned.tokens`, at layer 9:
 
 ```text
 at            example_id  layer  row  pos  pos_token  input                               answer  p_tuned                 top_tuned.tokens
@@ -200,8 +200,8 @@ at            example_id  layer  row  pos  pos_token  input                     
 
 A swept fit's bundle file holds one bundle per point, which no featurizer loads. To use the trained lens in
 another document, run the fit unswept (`"epochs": 4`) beside a separate `epochs: 0` run, and save `fit.lens`.
-Saving and loading a bundle is the `clab` skill's [featurizers-and-fit.md](../../clab/references/featurizers-and-fit.md);
-reusing one across documents is the `clab-trained-featurizers` skill's.
+Saving and loading a bundle is the `nnspec` skill's [featurizers-and-fit.md](../../nnspec/references/featurizers-and-fit.md);
+reusing one across documents is the `nnspec-trained-featurizers` skill's.
 
 ## Cost
 

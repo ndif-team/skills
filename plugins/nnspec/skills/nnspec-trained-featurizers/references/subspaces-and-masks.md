@@ -2,9 +2,9 @@
 
 Every document here builds on `das.json` in [SKILL.md](../SKILL.md): GPT-2, layer 5's output at the day token
 (`pos: -4`), 21 training pairs and 7 held-out pairs of "If today is X, tomorrow is". Numbers are held-out
-accuracy out of 7 unless a line says otherwise. The fit fields are the `clab` skill's
-[featurizers-and-fit reference](../../clab/references/featurizers-and-fit.md); sweeps and their labels are its
-[sweeps reference](../../clab/references/sweeps.md).
+accuracy out of 7 unless a line says otherwise. The fit fields are the `nnspec` skill's
+[featurizers-and-fit reference](../../nnspec/references/featurizers-and-fit.md); sweeps and their labels are its
+[sweeps reference](../../nnspec/references/sweeps.md).
 
 ## What breaks here
 
@@ -29,13 +29,13 @@ accuracy out of 7 unless a line says otherwise. The fit fields are the `clab` sk
 rotations; the bare `rot`, swept with it, is a draw at each rank:
 
 ```text
-clab table out/das_rank held_acc
+nnspec table out/das_rank held_acc
 at       value
 {"k":1}  0.1428571492433548
 {"k":2}  0.4285714328289032
 {"k":4}  1.0
 {"k":8}  1.0
-clab table out/das_rank ctl_acc
+nnspec table out/das_rank ctl_acc
 at       value
 {"k":1}  0.0
 {"k":2}  0.0
@@ -101,7 +101,7 @@ that a `pca` featurizer loads. This harvest reads the day token of the seven pro
 ```
 
 ```text
-clab run documents/pca_harvest.json
+nnspec run documents/pca_harvest.json
 pca_harvest on nnterp (batch size 8, device cpu, tp 1) -> out/pca_harvest
   basis.safetensors  basis  {"basis":[768,4],"mean":[768]}
 ```
@@ -158,8 +158,8 @@ every control by the same interchange. This one needs `out/das/fit.rot.safetenso
 ```
 
 ```text
-clab run documents/das_controls.json
-clab table out/das_controls acc mean_ce
+nnspec run documents/das_controls.json
+nnspec table out/das_controls acc mean_ce
 at                acc  mean_ce
 {"space":"rot"}   1.0  1.0930441617965698
 {"space":"pc"}    1.0  1.4620361328125
@@ -187,12 +187,12 @@ whenever it is scored. `dbm.json` is `das.json` with these changes, and nothing 
 
 `mask.mask` is the gate's own scalar, the mean of its soft mask: the pressure toward keeping few units. The
 temperature falls linearly over the epochs. The units a fit kept are where its saved `theta` is positive, read
-in Python: `clab table` refuses a bundle (`'fit.mask' is a trained featurizer's bundle, which has no rows to
+in Python: `nnspec table` refuses a bundle (`'fit.mask' is a trained featurizer's bundle, which has no rows to
 table; read it from plan.results`).
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 
 plan = Plan.load("out/dbm")
 for weight, gate in plan.results["fit.mask"].items():
@@ -269,11 +269,11 @@ the indirect object (IO) over the subject (S); a corrupt prompt replaces the sec
 - **`sq`, the squared change from the clean logit difference, is the objective**; `mean_ld` is reported.
 
 ```text
-clab run documents/head_gates.json
-clab table out/head_gates clean_mean
+nnspec run documents/head_gates.json
+nnspec table out/head_gates clean_mean
 value
 3.0798864364624023
-clab table out/head_gates fit.train.mean_ld
+nnspec table out/head_gates fit.train.mean_ld
 at                    value
 {"heads.mask":3.0}    3.1980886459350586
 {"heads.mask":10.0}   2.7434635162353516
@@ -286,7 +286,7 @@ the selection's order:
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 
 plan = Plan.load("out/head_gates")
 for weight, gate in plan.results["fit.heads"].items():

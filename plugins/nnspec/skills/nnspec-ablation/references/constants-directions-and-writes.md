@@ -8,8 +8,8 @@ prompts of the skill (clean logit difference 2.75), with its null and its number
 Use it to ask how much of a component's value is this input's own. One vector trained to stand in for the
 value at every row keeps whatever is not, and the score it still loses is what no constant can supply. A
 `constant` featurizer holds one vector of the site's width; `init` draws it, a fit trains it, and `apply`
-writes it in place of the value. The fit's fields are the `clab` skill's
-[featurizers and fit](../../clab/references/featurizers-and-fit.md) reference.
+writes it in place of the value. The fit's fields are the `nnspec` skill's
+[featurizers and fit](../../nnspec/references/featurizers-and-fit.md) reference.
 
 ```json
 {
@@ -67,12 +67,12 @@ writes it in place of the value. The fit's fields are the `clab` skill's
 ```
 
 ```text
-$ clab run documents/optimal_constant.json
-$ clab table out/optimal_constant clean_ld mean_ld c_ld mean_kl c_kl
+$ nnspec run documents/optimal_constant.json
+$ nnspec table out/optimal_constant clean_ld mean_ld c_ld mean_kl c_kl
 at             clean_ld            mean_ld             c_ld                mean_kl             c_kl
 {"epochs":0}   3.4645137786865234  0.2601795196533203  0.2601795196533203  0.6141049265861511  0.6141049265861511
 {"epochs":20}  3.4645137786865234  0.2601795196533203  0.6511878967285156  0.6141049265861511  0.8856005668640137
-$ clab table out/optimal_constant fit.history.sq
+$ nnspec table out/optimal_constant fit.history.sq
 at             epochs  value
 {"epochs":20}  0       3.4940803050994873
 ...
@@ -88,7 +88,7 @@ at             epochs  value
   featurizer's first use: a `mean` of a read at the site over every other axis. `"init": 0` is zero ablation
   the same way.
 - **`fit.c` is the trained constant, the bare `c` its draw.** Saved, `fit.c` is a bundle holding `vector`;
-  loading and saving bundles is the `clab-trained-featurizers` skill.
+  loading and saving bundles is the `nnspec-trained-featurizers` skill.
 - **Table `fit.history.sq` on its own.** Beside a per-row value its `epochs` axis crosses the rows, one
   line per row and epoch.
 - **The vector is shared across every axis but the last**, so a constant per head is a site per head,
@@ -100,7 +100,7 @@ at             epochs  value
 {"c_init": {"kind": "op", "op": "mean", "of": "clean.z", "over": ["rows", "pos", "num_heads"]}}
 ```
 
-The kind's fields: `clab describe featurizers`.
+The kind's fields: `nnspec describe featurizers`.
 
 ## Means over a ragged scope or another dataset
 
@@ -142,18 +142,18 @@ vector, which a write at the same ragged scope broadcasts over each row's own to
 ```
 
 ```text
-$ clab table out/ragged_mean clean_ld ablated_ld
+$ nnspec table out/ragged_mean clean_ld ablated_ld
 at                    clean_ld            ablated_ld
 {"mean":"per_token"}  2.7463290691375732  2.8072738647460938
 {"mean":"per_row"}    2.7463290691375732  2.7723872661590576
-$ clab table out/ragged_mean gap_norm
+$ nnspec table out/ragged_mean gap_norm
 value
 5.010769367218018
 ```
 
-- **Check where the scope landed** with `clab show out/ragged_mean`: `clean.acts` sits at `[7]` on the
-  one-token places and `[7,8]` on the two-token ones. The `clab` skill's
-  [positions](../../clab/references/positions.md) reference has the rest of `pos`.
+- **Check where the scope landed** with `nnspec show out/ragged_mean`: `clean.acts` sits at `[7]` on the
+  one-token places and `[7,8]` on the two-token ones. The `nnspec` skill's
+  [positions](../../nnspec/references/positions.md) reference has the rest of `pos`.
 - **A plain `mean` weighs tokens**, so a two-token place counts twice. To weigh rows equally, average over
   `pos` first, then over the rows; here the two means differ by a norm of 5.0.
 - **This is a part of the prompt the task does not read**: the logit difference moves by +0.06 and +0.03,
@@ -222,7 +222,7 @@ it second.
 ```
 
 ```text
-$ clab table out/direction clean_ld ablated_ld worst_cos
+$ nnspec table out/direction clean_ld ablated_ld worst_cos
 at                   clean_ld            ablated_ld          worst_cos
 {"fill":"contrast"}  2.7463290691375732  2.005376100540161   8.195638656616211e-08
 {"fill":"random"}    2.7463290691375732  2.9454143047332764  1.862645149230957e-08
@@ -239,7 +239,7 @@ at                   clean_ld            ablated_ld          worst_cos
   where the contrast direction costs 0.74. The plain mean direction, which every row shares, costs 2.21.
 - A direction read at fewer layers than the write is made at is refused before any forward.
 - **A probe's direction is a value** `project_out` takes: two `select`s of `fit.probe.W` and a `sub`, in the
-  `clab-trained-featurizers` skill's [probes reference](../../clab-trained-featurizers/references/probes-and-lora.md#use-a-probe-causally).
+  `nnspec-trained-featurizers` skill's [probes reference](../../nnspec-trained-featurizers/references/probes-and-lora.md#use-a-probe-causally).
 
 ## Noise and clamp
 
@@ -287,7 +287,7 @@ every value. The `clean` forward also reads the magnitudes that set the doses.
 ```
 
 ```text
-$ clab table out/noise_and_clamp clean_ld noisy_ld
+$ nnspec table out/noise_and_clamp clean_ld noisy_ld
 at                      clean_ld            noisy_ld
 {"scale":0.0,"seed":1}  2.7463290691375732  2.7463290691375732
 ...
@@ -297,7 +297,7 @@ at                      clean_ld            noisy_ld
 {"scale":6.0,"seed":1}  2.7463290691375732  3.8152503967285156
 {"scale":6.0,"seed":2}  2.7463290691375732  2.1724777221679688
 {"scale":6.0,"seed":3}  2.7463290691375732  2.4574038982391357
-$ clab table out/noise_and_clamp first_max rest_max norm9 clamped_ld clamp_null_ld
+$ nnspec table out/noise_and_clamp first_max rest_max norm9 clamped_ld clamp_null_ld
 first_max          rest_max           norm9               clamped_ld          clamp_null_ld
 2458.553466796875  37.67317199707031  166.64654541015625  2.6074612140655518  2.7463290691375732
 ```
@@ -370,7 +370,7 @@ back at that length: `{"op": "add", "with": "at"}` with `at` a step's scaled dir
 ```
 
 ```text
-$ clab table out/hold_coordinate coord clean.ld held.ld
+$ nnspec table out/hold_coordinate coord clean.ld held.ld
 at                  row  pos  pos_token  input                                             coord                answer  other   clean.ld            held.ld
 {"at":"at_first"}   0    13   Ġto        When Mary and John went to the store, John gave…  37.67071533203125     Mary    John   2.0063858032226562  2.0174789428710938
 {"at":"at_first"}   1    13   Ġto        When Alice and Bob went to the office, Bob gave…  39.87980651855469     Alice   Bob    3.3816299438476562  3.2701492309570312
@@ -384,7 +384,7 @@ at                  row  pos  pos_token  input                                  
 ...
 ```
 
-- **The check is `after`**: `clab table out/hold_coordinate held.after` gives every row the target,
+- **The check is `after`**: `nnspec table out/hold_coordinate held.after` gives every row the target,
   `c_first` 37.94 or `c_second` -17.80, to 1e-5.
 - **A row held at the other template's value loses the answer.** At `at_first` the second template's rows
   fall to 1.58, -1.26 and -1.51; at `at_second` the first template's fall to -0.17, -0.13 and 0.25. A row
@@ -392,6 +392,6 @@ at                  row  pos  pos_token  input                                  
 - **Set the value against `coord`**, the clean coordinate: 36 to 40 on one template, -14 to -22 on the other.
 - **Held at 0 it is the direction projected out**; held at the rows' mean coordinate it is a mean ablation
   along one direction. An SAE feature or another featurizer's coordinate is held between its `encode` and
-  `decode`: the `clab-trained-featurizers` skill.
+  `decode`: the `nnspec-trained-featurizers` skill.
 
-Edits and reductions: `clab describe ops`.
+Edits and reductions: `nnspec describe ops`.

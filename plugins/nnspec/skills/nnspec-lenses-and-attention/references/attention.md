@@ -10,7 +10,7 @@ CPU in seconds.
 - **Comparing an eager run with an sdpa run.** The two implementations differ in the last bits: GPT-2's
   ` Thursday` readout is 0.7922689 under sdpa and 0.7922713 under eager. Compare runs under one implementation.
 - **A key axis read as a fixed width.** `key` is each row's own tokens, as wide as the input's longest row. Past a
-  shorter row's last token the pattern is NaN, and `clab table` leaves those keys out.
+  shorter row's last token the pattern is NaN, and `nnspec table` leaves those keys out.
 - **A `key` selector for a word.** `select: {"key": 4}` is position 4 on every row, a different token wherever the
   rows differ. Read the whole key axis and find the word's key with a marker entry ([below](#a-word-that-moves-by-row)).
 - **`top_k` over `key` read as probabilities.** Over an axis other than the vocabulary it gives `values`, the
@@ -18,7 +18,7 @@ CPU in seconds.
 - **Query heads and key heads counted alike.** `attention_keys` and `attention_values` are per KV head
   (`num_kv_heads`), before they are repeated across query heads. SmolLM2-135M has 9 query heads and 3 KV heads.
 
-The layouts, by `clab describe components`:
+The layouts, by `nnspec describe components`:
 
 | component | layout | what it is |
 |---|---|---|
@@ -30,7 +30,7 @@ The layouts, by `clab describe components`:
 | `attention_head_outputs` | `rows, pos, num_heads, head_dim` | each head's output, before the output projection |
 
 `attention_premix`, every head's result as the output projection takes it, needs no eager. Patching or ablating
-a head's output there is the `clab-patching` or `clab-ablation` skill's.
+a head's output there is the `nnspec-patching` or `nnspec-ablation` skill's.
 
 ## One head's pattern, and the checks
 
@@ -79,9 +79,9 @@ that the read is a pattern:
 - `entropy` over `key` of `attention_scores` is the entropy of the head's softmax, in nats.
 
 ```bash
-clab run documents/attention_pattern.json
-clab table out/attention_pattern top3.ids top3.values
-clab table out/attention_pattern total_min total_max ahead_max
+nnspec run documents/attention_pattern.json
+nnspec table out/attention_pattern top3.ids top3.values
+nnspec table out/attention_pattern total_min total_max ahead_max
 ```
 
 ```text
@@ -96,13 +96,13 @@ total_min           total_max          ahead_max
 0.9999997615814209  1.000000238418579  0.0
 ```
 
-An aligned table cuts cells at 48 characters; `clab table --csv` prints them whole.
+An aligned table cuts cells at 48 characters; `nnspec table --csv` prints them whole.
 
 - **Key 20 takes 0.91 to 0.98** on every row: the first word of the second copy, the token after the last
   query's earlier copy at 19. Key 0, the first word, is second.
 - **The checks:** every head's keys sum to 1 within float32 rounding at every query, and the weight one key
   ahead of the query is exactly 0.0. A read failing either is not the pattern.
-- **`clab table out/attention_pattern run.look`** prints one line per key, with `key` and `key_token`:
+- **`nnspec table out/attention_pattern run.look`** prints one line per key, with `key` and `key_token`:
 
 ```text
 example_id  row  pos  pos_token  key  key_token  input                                             value
@@ -110,15 +110,15 @@ r0          0    39   Ġstereo    0    Ġpalm       palm printf bailout heads sm
 r0          0    39   Ġstereo    20   Ġpalm       palm printf bailout heads smarter seeded plast…  [0.9770815968513489]
 ```
 
-`clab table --csv out/attention_pattern run.focus` gives each layer-6 head's entropy at the last query. Head 9
+`nnspec table --csv out/attention_pattern run.focus` gives each layer-6 head's entropy at the last query. Head 9
 is at 0.13 to 0.35 nats on the three rows, the other heads at 0.82 to 3.09: a focused head has low entropy.
 
 ## The correct next token at each position
 
 On the repeated words each query of the second copy has its own correct next token, the word after it in the first
 copy. One read scores them all against a shifted column: a text column holding, on each row, the tokens the read's
-positions predict. `token_prob` scores the read's position i against the column's token i (the `clab` skill's
-[answer columns](../../clab/references/data.md#answer-columns)).
+positions predict. `token_prob` scores the read's position i against the column's token i (the `nnspec` skill's
+[answer columns](../../nnspec/references/data.md#answer-columns)).
 
 ```json
 {
@@ -151,9 +151,9 @@ positions predict. `token_prob` scores the read's position i against the column'
 ```
 
 ```bash
-clab run documents/next_token.json
-clab table out/next_token mean_first mean_second
-clab table out/next_token p_second
+nnspec run documents/next_token.json
+nnspec table out/next_token mean_first mean_second
+nnspec table out/next_token p_second
 ```
 
 ```text
@@ -177,10 +177,10 @@ r0          0    38   Ġguiding    palm printf bailout heads smarter seeded plas
   `seqs.next row 0: ' palm printf … stereo' is 20 tokens; the read has 19 positions on that row; …`.
 - **An unshifted column of the right length is not refused.** Those 20 words read at queries 20 to 39 score each
   position against the token it reads: 0.00025, where the shifted column gives 0.69.
-- **Table the two reads apart.** Their positions differ, so `clab table out/next_token p_first p_second` is
+- **Table the two reads apart.** Their positions differ, so `nnspec table out/next_token p_first p_second` is
   refused: `'p_first' and 'p_second' share no row and pos together: …`.
 
-Knocking out an induction head and scoring this read is the `clab-ablation` skill's.
+Knocking out an induction head and scoring this read is the `nnspec-ablation` skill's.
 
 ## A word that moves by row
 
@@ -214,11 +214,11 @@ Its record holds where the word landed on each row, and that position is the wor
 }
 ```
 
-`clab show out/attention_entity` prints the marker's positions (`run.entity   —   [4], [5], [6]`). In Python:
+`nnspec show out/attention_entity` prints the marker's positions (`run.entity   —   [4], [5], [6]`). In Python:
 
 <!-- test: skip -->
 ```python
-from clab import Plan
+from nnspec import Plan
 
 plan = Plan.load("out/attention_entity")
 pattern = plan.results["run.pattern"]                      # [layers, rows, pos, num_heads, key]
@@ -237,7 +237,7 @@ for row, (key,) in enumerate(plan.steps["run"].interventions["entity"].positions
 
 Head 9.8 puts the most weight on the subject's last token on all three rows. The marker reads the pattern at
 the subject's own query, which nothing uses. How a scope finds a word (`column`, `text`, `occurrence`) is the
-`clab` skill's [positions.md](../../clab/references/positions.md).
+`nnspec` skill's [positions.md](../../nnspec/references/positions.md).
 
 ## Queries after RoPE
 
@@ -269,7 +269,7 @@ query before the rotation. After it, each head's query keeps its norm and change
 ```
 
 ```text
-$ clab table out/query_rope norm_spread query_spread
+$ nnspec table out/query_rope norm_spread query_spread
 norm_spread          query_spread
 9.5367431640625e-07  3.0358388423919678
 ```
@@ -283,12 +283,12 @@ norm_spread          query_spread
 - **GPT-2 has no RoPE.** It adds a learned position embedding to the stream, so the same document on GPT-2 gives a
   `norm_spread` of 1.15: the norms differ too.
 - **A query swapped between prompts of different lengths moves the position its head looks from.** Nothing
-  refuses it; patching queries is the `clab-patching` skill's.
+  refuses it; patching queries is the `nnspec-patching` skill's.
 
 ## Elsewhere
 
 - Zeroing a head's pattern, knocking out keys through the scores or the pattern, `renormalize` with
-  `"norm": "sum"`: the `clab-ablation` skill.
-- Making a head attend as it did on another prompt, a query swap: the `clab-patching` skill.
-- `select` over `num_heads`, `key` and offsets, in full: the `clab` skill's
-  [sites-and-interventions.md](../../clab/references/sites-and-interventions.md).
+  `"norm": "sum"`: the `nnspec-ablation` skill.
+- Making a head attend as it did on another prompt, a query swap: the `nnspec-patching` skill.
+- `select` over `num_heads`, `key` and offsets, in full: the `nnspec` skill's
+  [sites-and-interventions.md](../../nnspec/references/sites-and-interventions.md).
