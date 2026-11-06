@@ -172,7 +172,7 @@ it second.
 
 ```json
 {
-  "description": "Directional ablation on GPT-2's IOI prompts. At each layer the direction is the mean residual stream at the last token of the prompts that name the answer first, less that of the prompts that name it second. It is projected out of every token at every layer in one entry; a second entry at the same site reads the cosine left along it. fill sweeps it against a random direction per layer (standard normal, seed 0) and the plain mean direction.",
+  "description": "Directional ablation on GPT-2's IOI prompts. At each layer the direction is the mean residual stream at the last token of the prompts that name the answer first, less that of the prompts that name it second. It is projected out of every token at every layer in one entry, whose cosine with the same direction after the edit reads what is left along it. fill sweeps it against a random direction per layer (standard normal, seed 0) and the plain mean direction.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {
     "first": {"rows": [
@@ -209,13 +209,12 @@ it second.
     "random": {"kind": "op", "op": "noise", "of": "zeros", "scale": 1.0, "seed": 0},
     "ablated": {"kind": "forward", "input": "ioi.input", "interventions": {
       "abl": {"site": "every", "pos": {"index": ":"},
-              "ops": [{"op": "project_out", "direction": {"sweep": ["contrast", "random", "average"], "label": "fill"}}]},
-      "check": {"site": "every", "pos": {"index": ":"},
-                "ops": [{"op": "cosine", "with": {"sweep": ["contrast", "random", "average"], "label": "fill"}}]},
+              "ops": [{"op": "project_out", "direction": {"sweep": ["contrast", "random", "average"], "label": "fill"}},
+                      {"op": "cosine", "with": {"sweep": ["contrast", "random", "average"], "label": "fill"}}]},
       "ld": {"site": "head", "pos": -1, "ops": [{"op": "logit_diff", "a": "ioi.answer", "b": "ioi.other"}]}}},
     "clean_ld": {"kind": "op", "op": "mean", "of": "clean.ld"},
     "ablated_ld": {"kind": "op", "op": "mean", "of": "ablated.ld"},
-    "abs_cos": {"kind": "op", "op": "abs", "of": "ablated.check"},
+    "abs_cos": {"kind": "op", "op": "abs", "of": "ablated.abl"},
     "worst_cos": {"kind": "op", "op": "max", "of": "abs_cos", "over": ["layers", "rows", "pos"]}
   },
   "saves": ["contrast", "clean_ld", "ablated_ld", "worst_cos"]
@@ -233,9 +232,9 @@ at                   clean_ld            ablated_ld          worst_cos
 - **One direction per layer.** `h_first.acts` is read at `layers: ":"`, so `mean` keeps its `layers` axis
   and `contrast` is `[12, 768]`; at layer L the write takes the slice labelled L. For one direction at
   every layer, reduce the layers too, `"over": ["layers", "rows", "pos"]`.
-- **The check reads what is left along the direction**, in an entry of its own ([what breaks](../SKILL.md#what-breaks)):
-  at most 8e-8 of cosine, so the write is where the direction was. `project_out` normalises the direction,
-  so its length does not matter.
+- **The `cosine` after the edit reads what is left along the direction**: at most 8e-8, so the write is
+  where the direction was. One label in two ops of the entry is one axis, and each point runs its own
+  forward. `project_out` normalises the direction, so its length does not matter.
 - **The control is a random direction per layer**, drawn by `noise` on zeros: it moves the score +0.20,
   where the contrast direction costs 0.74. The plain mean direction, which every row shares, costs 2.21.
 - A direction read at fewer layers than the write is made at is refused before any forward.

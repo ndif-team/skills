@@ -34,8 +34,6 @@ has attention knockout, the hydra effect and mixtures of experts.
 - **The optimal constant fits the score it trains on**: held-out rows kept 0.65 of a clean 3.46 and their KL
   rose. Score it on held-out rows and with `kl` ([the recipe](references/constants-directions-and-writes.md#the-optimal-constant)).
 - **`attention_probabilities` and `attention_scores` need eager attention**; `attention_premix` does not ([eager](../clab/references/sites-and-interventions.md#attention-needs-eager)).
-- **Keep a swept edit and a read op on the same sweep in separate entries**: in one entry the first point's
-  forward stands for every point, with no refusal ([`clab-debugging`'s symptoms](../clab-debugging/references/symptoms.md#sweeps)).
 
 ## What to put in its place
 

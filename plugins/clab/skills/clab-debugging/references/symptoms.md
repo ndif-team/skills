@@ -159,7 +159,6 @@ Scoped reads and positions are the `clab` skill's [positions reference](../../cl
 |---|---|---|---|
 | a grid of two sweeps came back as its diagonal | two sweeps with no `label` on fields of one name share the field's name as label, and one label is one axis | `clab show`'s result line: two `layers` sweeps of 2 values each read `layers  2 points, each [4,1]` | its own `label` on each: the same document reads `read_layer, write_layer  4 points, each [4,1]` |
 | a `mean` or `sum` came back with one number per layer | a reduction keeps a `layers` axis unless `over` names it | the result's `dims` in `clab show` | `"over": ["layers", "rows", "pos"]` on a `[layers, rows, pos]` value |
-| a swept write gives the first point's numbers at every point, and its score has no sweep axis | one entry uses the sweep twice, an edit and then a read op (`swap` then `cosine` on one swept operand): the forward runs at the first point and serves all, unrefused | `clab show`'s step table lists that forward once, `all 2 points` under `serves`, though its own write is swept | the swept edit in one entry and the read op in a second entry at the site |
 | a swept step's saved read is one tensor, not one per point | a result is keyed by the sweep axes its own value depends on | the result's `axes` in `clab show` | read it as one value; sweeps are the `clab` skill's [sweeps reference](../../clab/references/sweeps.md) |
 
 ## Rows a read did not reach

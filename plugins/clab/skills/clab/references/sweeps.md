@@ -110,6 +110,7 @@ at            value
 | one swept site used by two steps, or one swept bundle pulled into two | one | each step has the same points |
 | `max_new_tokens` and `min_new_tokens` both swept, no `label` | two field names | crossed, including `max_new_tokens=2,min_new_tokens=6` |
 | the same with `"label": "n"` on both | `n` | zipped |
+| one label in two ops of one entry, or in two entries of a step | one | zipped; a forward per point where any of them writes |
 | one label over different values | — | refused |
 
 - **Check the `axes` column of `clab show` before trusting a grid**: a grid that zipped has one axis where you expected two.
@@ -121,7 +122,7 @@ at            value
 ## What a sweep costs
 
 - **Points that differ only in what they read share one forward**: `counterfactual` above runs once for both `src` points (`serves all 2 points`).
-- **Each point that changes a write, an operand or an option runs its own forward**: `patched` runs four. A swept edit and a read op on the same sweep in one entry do not, and run the first point only ([what breaks](../SKILL.md#what-breaks)).
+- **Each point that changes a write, an operand or an option runs its own forward**: `patched` runs four. An edit and a later read op of one entry on one sweep run a forward per point too.
 - **The layer sweep above runs 26 forwards**: one `clean` and one `counterfactual` forward serve all twelve points, and `null` and `patched` run twelve each.
 - **A value is made once per point on the axes it depends on** (its `axes` in `clab show`); a read that depends on none is one value.
 - **A large grid grows the manifest and compile time** faster than the points; split it into documents by layer range.
