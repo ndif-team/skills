@@ -27,8 +27,8 @@ clab describe records        # prints the format's records: the install works
 - **Into another environment**, install nnterp first, then clab with `--no-deps`, since its `pyproject.toml` names nnterp by that local path.
 - **Inside the venv a command is `clab …`**; outside it, `uv run --no-sync clab …`, since a plain `uv run` re-syncs and moves transformers.
 - **The first run downloads the checkpoint**; after that, `HF_HUB_OFFLINE=1 clab run …` runs from the cache.
-- **Check a document without a model**: `python -c "from clab import Plan; Plan('documents/x.json').compile()"` refuses most mistakes, naming the document path of each.
-- **`clab describe <section>` is the spec** on your machine: `records`, `steps`, `ops`, `components`, `featurizers`, `pos`, `engines`.
+- **Check a document without a model** with the environment's python (there is no `clab compile`): `python -c "from clab import Plan; Plan('documents/x.json').compile()"` refuses most mistakes, naming the document path of each.
+- **`clab describe` is the spec** on your machine; `clab describe ops` (or `components`, `pos`, `steps`, …) prints one section.
 
 ## A complete experiment
 
@@ -38,7 +38,7 @@ has a counterfactual whose second subject is the other name, so its answer is th
 
 ```json
 {
-  "description": "Interchange on GPT-2's indirect-object task: read the residual stream leaving block 8 at the last token of a prompt whose second subject is the other name, swap it into the base prompt at the same place, and score the counterfactual's answer against the base's. The null swaps the base's own value back.",
+  "description": "Interchange on GPT-2's indirect-object task: swap in the residual stream leaving block 8 at the last token from a prompt naming the other subject, and score the counterfactual's answer against the base's. The null swaps the base's own value back.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"pairs": {"rows": [
     {"example_id": "mary", "input": "When Mary and John went to the store, John gave a drink to",
@@ -116,17 +116,18 @@ Each mistake below runs without a refusal and gives wrong numbers.
 - **A fit with no `epochs: 0` point has no floor.** Sweep `"epochs": {"sweep": [0, N]}`; the trained featurizer means something only where it beats its own draw ([featurizers and fit](references/featurizers-and-fit.md#epochs-0-is-the-null)).
 - **A generate step without `do_sample: false` may sample**, from the checkpoint's generation config, and nothing seeds it. Write `"do_sample": false` on every generate step ([generate](references/generate.md#options)).
 - **Two sweeps of one field without labels zip into the diagonal.** Give each its own `label` for a grid, then check the `axes` column of `clab show` ([sweeps](references/sweeps.md#labels-zip-or-cross)).
+- **A swept edit and a read op on the same sweep in one entry run the first point at every point.** `project_out` on a swept `direction`, then `cosine` with that sweep, is one forward that `clab show` lists once, `serves all 3 points`. Keep a swept edit and a swept read op in separate entries ([symptoms](../clab-debugging/references/symptoms.md#sweeps)).
 - **A write at a slice or list of layers patches them all at once.** To patch one layer at a time, sweep `layers` ([sites and interventions](references/sites-and-interventions.md#writes-across-layers)).
 - **A swept write `pos` with an unswept read `pos` puts one read value at every position.** Sweep the read's `pos` with the write's, under one label ([sweeps](references/sweeps.md#sweep-one-value)).
-- **An unscoped `pos` between two inputs pairs index with index**, whatever tokens sit there. Scope both sides to the word they share ([positions](references/positions.md#pairing-with-another-forward)).
+- **An unscoped `pos` between two inputs of one length pairs index with index**, whatever tokens sit there. Scope both sides to the word they share ([positions](references/positions.md#pairing-with-another-forward)).
 - **`occurrence` counts matches in the whole row**, from the first. On the IOI prompts `{"text": " to"}` is position 5, not 13; write `"occurrence": -1` for the last, and check `positions` in `clab show` ([positions](references/positions.md#scopes)).
 - **An index along a `select`ed axis counts within the select list.** `argmax` over `{"num_heads": [9, 6]}` gives 1 for head 6; map it back through the list ([sites and interventions](references/sites-and-interventions.md#select)).
 - **A search of generated text loses the first token's space on a SentencePiece tokenizer.** Give the column `"strip": true` wherever `contains` or a scope searches a generation ([generate](references/generate.md#the-first-generated-tokens-space)).
 - **A mean over a generation skips rows it never reached.** Count the `alignment_missing` rows first ([positions](references/positions.md#rows-a-scope-never-reached)).
-- **A freeze listed after the patch it protects undoes the patch.** Of two writes at one site the later wins; list the freeze first ([sites and interventions](references/sites-and-interventions.md#the-order-entries-run-in)).
-- **A `grad` of the wrong entry gives a plausible map.** Carry the null: a `grad` of the metric with `{"op": "mul", "with": 0}` appended must be exactly 0 ([sites and interventions](references/sites-and-interventions.md#a-gradient-at-a-site)).
+- **A freeze listed after the patch it protects undoes the patch.** Of two writes on one component and layer the later wins; list the freeze first ([sites and interventions](references/sites-and-interventions.md#the-order-entries-run-in)).
+- **A `grad` null cannot catch the wrong metric.** A `grad` of the metric with `{"op": "mul", "with": 0}` appended must be exactly 0, which proves the gradient is of that entry and the wiring exact. That the entry is the metric you report takes a central difference at one point, and the ranking real patching of the top points ([check the gradient](../clab-patching/references/attribution.md#check-the-gradient)).
 - **A published SAE with a wrong `centered`, `activation` or layer is not refused.** State all three inline from its release, and compare its mean L0 with the release's ([featurizers and fit](references/featurizers-and-fit.md#a-published-sparse-autoencoder)).
-- **A null that passes in bfloat16 certifies the wiring, not small effects.** Recompute a few points in float32 before reading an effect near bfloat16's rounding ([ops](references/ops.md#dtypes)).
+- **A null that passes in bfloat16 certifies the wiring, not small effects.** Recompute a few points in float32 before reading an effect near bfloat16's rounding ([the float32 rule](../clab-debugging/SKILL.md#the-float32-rule)).
 
 ## The document
 
@@ -153,9 +154,10 @@ Each mistake below runs without a refusal and gives wrong numbers.
 | `fit` | train featurizers inside the run, through the frozen model ([featurizers and fit](references/featurizers-and-fit.md)) |
 | `load` | bring in a value an earlier run saved: `{"kind": "load", "from": "out/x", "value": "acts"}` |
 
-- **Steps run in the order written**, and a value is named only after the step that makes it.
+- **Steps run in the order their keys are written**, and a value is named only after the step that makes it: `names no value produced before this step` means a step comes too early.
+- **Steps, datasets and featurizers share one namespace**: a step named like a dataset is refused (`steps.lens: 'lens' is also a dataset or a featurizer`).
 - **An entry's value is `<step>.<entry>`** (`clean.logits`), an op step's is its name (`clean_ld`), a column is `<dataset>.<column>` (`pairs.cf_answer`).
-- **A fit's members are `<fit>.<featurizer>`, `<fit>.<eval>.<op>` and `<fit>.history.<op>`**; a `top_k` step's are `.ids`, `.probs` and `.tokens`.
+- **A fit's members are `<fit>.<featurizer>`, `<fit>.<eval>.<op>` and `<fit>.history.<op>`**; a `top_k` step's are `.ids`, `.probs` over a vocabulary or `.values` over another axis, and `.tokens` over logits.
 - **A forward has no value of its own**: save its entries, never the step.
 
 `clab describe steps` prints every kind's fields.
@@ -163,9 +165,9 @@ Each mistake below runs without a refusal and gives wrong numbers.
 ### Entries: read or write
 
 An entry is `{"site": ..., "pos": ..., "ops": [...]}`. With no edit among its ops it reads; with one it writes,
-and the forward runs on from the written value. The edits are `swap`, `add`, `sub`, `scale`, `noise`,
-`clamp`, `project_out`, `normalize`, `renormalize`, `decode` and `apply`. Ops after the last edit shape what the
-entry binds, not what the model sees. Entries at one site compose in the order written. An operand
+and the forward runs on from the written value. The edits are the `edits` group of `clab describe ops`
+(`swap`, `add`, `scale`, `project_out`, …). Ops after the last edit shape what the entry binds, not what the
+model sees. Entries on one component and layer compose in the order written, whatever their site names. An operand
 (`with`, `factor`, `scale`) is a number or a named value, and broadcasts over any axis it leaves out. A root
 `interventions` bundle is a dict of entries that steps pull in by name. An entry whose first op is
 `grad` reads a gradient. All of it is in [sites and interventions](references/sites-and-interventions.md).
@@ -205,15 +207,18 @@ counts within it. `clab describe pos` has the grammar; [positions](references/po
 
 | class | ops | does |
 |---|---|---|
-| metrics | `match`, `logit_diff`, `token_prob`, `token_logit`, `cross_entropy`, `kl`, `js`, `cosine`, `contains` | score each row and position, in float32 |
-| reductions | `mean`, `sum`, `min`, `max`, `std`, `median`, `count`, `norm`, `dot`, `entropy`, `pca` | remove the axes `over` names; by default rows and positions |
+| metrics | `match`, `logit_diff`, `token_prob`, `cross_entropy`, `kl`, `cosine`, `contains`, … | score each row and position, in float32 |
+| reductions | `mean`, `sum`, `max`, `std`, `count`, `norm`, `entropy`, `pca`, … | remove the axes `over` names; by default rows and positions |
 | transforms | `readout`, `argmax`, `top_k`, `detokenize`, `encode`, `grad`, `permute` | change the layout without writing back |
-| arithmetic, comparisons | `abs` … `pow`; `eq`, `ne`, `gt`, `ge`, `lt`, `le` | compute per entry; a comparison is a 0/1 mask |
+| arithmetic | `abs`, `exp`, `log`, `sign`, `sqrt`, `square`, `neg`, `mul`, `div`, `pow` | compute per entry, in float32 |
+| comparisons | `eq`, `ne`, `gt`, `ge`, `lt`, `le` | a 0/1 mask |
 | edits | `swap`, `add`, `scale`, `noise`, … | write back, inside an entry |
 
-An op runs as an `op` step or inside an entry, as the same function with the same numbers. Inside an entry it
-sees one batch, so an op over rows belongs in a step. `clab describe ops` lists every op's arguments, and
-[ops](references/ops.md) says which to use for what.
+An op runs as an `op` step or inside an entry, as the same function. An entry's op runs on each batch and a
+step's on the whole value. So an op whose bits depend on the value's shape (`readout`, `encode`, a long sum)
+can differ in its last bits between the two, on the CPU too. Inside an entry an op sees one batch, so an op
+over rows belongs in a step. `clab describe ops` lists every op, and [ops](references/ops.md) says which to
+use for what.
 
 ### Sweeps
 
@@ -278,7 +283,7 @@ memory.
 ## Which skill
 
 - **`clab-patching`**: which layer, position, head, neuron or path carries a behaviour; interchange, path and attribution patching.
-- **`clab-ablation`**: what a component contributes when removed: zero, mean, resample, constant and expert ablation.
+- **`clab-ablation`**: what a component contributes when removed: zero, mean, resample, constant, neuron and expert ablation.
 - **`clab-lenses-and-attention`**: what each layer predicts (logit and tuned lens) and where a head looks.
 - **`clab-steering-and-generation`**: steering with a direction, and scoring what a generation says.
 - **`clab-trained-featurizers`**: DAS, DBM, head masks, SAEs, probes, LoRA, cached harvests and bundles.

@@ -1,6 +1,6 @@
 ---
 name: clab-lenses-and-attention
-description: "Read what a model predicts at each layer and where its heads look, with clab documents. Use for the logit lens (readout at every layer in one forward, the wiring check that the last layer's lens equals the model's logits, top_k tokens per layer decoded, KL from each layer to the final distribution, the layer where an answer's probability rises, a sublayer's lens), the tuned lens (an affine translator per layer fitted on KL, with its epochs 0 null), what the model says at a position (top_k, token_prob), and attention patterns (attention_probabilities under eager attention, the key axis, keys relative to the query with select offset, previous-token and induction stripes, finding induction heads on a repeated random sequence, attention sinks, head entropy, the weight on a subject token, attention_queries after RoPE). Knocking out a head or a key is clab-ablation; patching a pattern or a query is clab-patching; the format itself is the clab skill."
+description: "Find the layer where a model's prediction forms, and where its attention heads look, with clab documents. The logit lens: readout at every layer in one forward, its wiring check, top-k tokens and KL per layer. The tuned lens: one `affine` translator per layer, trained in the run. What the model says at a position, and a different correct next token at each position. Attention patterns under eager attention: previous-token and induction heads, sinks, head entropy, the weight on a subject, queries after RoPE. Knocking out a head or a key is clab-ablation. Patching a pattern, or testing which layer causally carries an answer, is clab-patching. Probes, SAEs, DAS and reusing a trained lens elsewhere are clab-trained-featurizers. Generating, scoring what a generation said, and steering are clab-steering-and-generation. A refusal or wrong numbers is clab-debugging; the format is the clab skill."
 ---
 
 # Lenses and attention patterns
@@ -15,28 +15,22 @@ Everything here reads; nothing writes into the forward. The format (sites, `pos`
 ## What breaks
 
 - **A lens read without its wiring check.** Every layer looks plausible whether or not `readout` is the model's
-  own computation. Read `logits` at the same `pos` and take `kl` of the lens against it: at the last layer it is
-  0.0 with `readout` as a step, or the lens is wrong.
-- **`readout` inside the entry, then an exact comparison.** On GPT-2 the entry form differs from the model's
-  logits in the last bits (KL ±5e-7 at the last layer; `token_prob` by 2e-6). Write `readout` as an op step over
-  a plain read wherever a number must equal another.
+  own computation. Write the check as op steps: `kl` of a `readout` step against `logits` read at the same `pos` is
+  0.0 at the last layer, or the lens is wrong. In an entry `readout` runs per batch and can differ from the step in
+  the last bits ([the `clab-debugging` skill](../clab-debugging/SKILL.md#reproducing-a-number)).
 - **Reading only the output's top token.** On "The Colosseum is in the city of", ` Rome` is 0.84 at layer 9 and
   0.014 at the output, whose top token is ` P`. Score the answer at every layer.
 - **An early layer's lens is not what the layer knows.** The final norm and head were trained on the last layer's
   stream. Compare layers with each other and with `to_final`, or train a [tuned lens](references/tuned-lens.md).
-- **An answer spelled without its leading space.** After "Monday, Tuesday, Wednesday," GPT-2 gives `ĠThursday`
-  0.792 and `Thursday` 0.013: two tokens. `Ġ` in a decoded token is GPT-2's leading space; answer columns are the
-  `clab` skill's ([data.md](../clab/references/data.md)).
-- **An attention component on an sdpa load.** `attention_probabilities`, `attention_scores`, `attention_queries`,
-  `attention_keys`, `attention_values` and `attention_head_outputs` are refused before any forward:
-  `clab: run.look: the nnterp engine does not serve attention_probabilities: read inside the eager attention
-  forward, but this model runs 'sdpa'; load with attn_implementation='eager'`. Put
-  `"attn_implementation": "eager"` in the `model` block. The hooks engine refuses them under eager too.
+- **An answer without its leading space is another token** (the `clab` skill's list); `Ġ` in a decoded token is
+  GPT-2's leading space.
+- **An attention component needs eager attention**: add `"attn_implementation": "eager"` to the `model` block, or it
+  is refused ([which components](../clab/references/sites-and-interventions.md#attention-needs-eager)).
 - **A key counted from the start for a score relative to the query.** `select: {"key": 1}` is the same token at
   every query. A previous-token or induction score is `{"key": {"offset": -1}}`, the key at a fixed distance
   from each query. A key counted from the end (`-1`) is refused, and so is an offset in a write.
-- **An index from `top_k` or `argmax` along a selected axis.** It counts within the selection. With
-  `"layers": ":"` and no `select` on heads, the ids are the model's layer and head; under `"layers": "4:"`, add 4.
+- **A `top_k` or `argmax` id along a narrowed axis counts within it** (the `clab` skill's list): under
+  `"layers": "4:"`, add 4.
 
 ## The logit lens
 
@@ -76,9 +70,8 @@ own final norm and head, as if that layer were the last; `"layers": ":"` reads e
 ```
 
 - `run.h` is laid out `layers, rows, pos, hidden_size`; `lens` replaces `hidden_size` with `vocab_size`.
-- `readout` takes `token_embeddings`, `layer_input`, `attention_output`, `layer_mid`, `mlp_output` and
-  `layer_output`. Another component, or a site that selects part of `hidden_size`, is refused before the model
-  loads.
+- `readout` takes a component `clab describe components` marks `stream`, such as `layer_output` or `mlp_output`.
+  Another component, or a site that selects part of `hidden_size`, is refused before the model loads.
 - `to_final` is KL(lens ‖ final) in nats. `run.final` has no `layers` axis, so every layer compares with the one
   final distribution.
 - `top3` is a `top_k` step, which decodes its tokens. Its members `top3.ids`, `top3.probs` and `top3.tokens` are
@@ -113,8 +106,8 @@ eiffel      11     1    9    Ġof        The Eiffel Tower is in the city of   Pa
 Variations, each a change to the document above:
 
 - **Keep only the score.** An entry `{"site": "resid", "pos": -1, "ops": [{"op": "readout"}, {"op": "token_prob",
-  "token": "facts.answer"}]}` holds one number per layer, row and position, never the vocabulary. It differs from
-  the step form by up to 2e-6 on GPT-2: use it for large runs, not for the wiring check.
+  "token": "facts.answer"}]}` holds one number per layer, row and position, never the vocabulary: for large runs,
+  not the wiring check.
 - **The last few tokens.** `"pos": {"index": "-3:"}` on both `h` and `final` lenses each row's last three tokens;
   `kl` pairs position with position, and `to_final` is 0.0 at layer 11 at each.
 - **A sublayer's lens.** `mlp_output` or `attention_output` in place of `layer_output` lenses what one sublayer
@@ -163,8 +156,9 @@ eiffel,2,9,Ġof,The Eiffel Tower is in the city of,"{""ids"":[6342,3576,968,2437
 - `probs` is a float32 softmax over the whole vocabulary, so it equals `token_prob` of the same id.
 - Each token is the tokenizer's piece, spelled as `pos_token` is: `ĠThursday` and `Thursday` are ids 3635 and 25381.
 - At the last layer the logit lens lists the same tokens as this readout (` Paris`, ` London`, ` New` above).
-- `detokenize` turns a generation's ids into text; it is for a `generate` step (the `clab-steering-and-generation`
-  skill), not for logits.
+- `detokenize` turns a `generate` step's ids into text (the `clab-steering-and-generation` skill), not logits.
+- **A different answer at each position**, such as each next token of a repeat, is a shifted column read at a `pos`
+  slice: [the recipe](references/attention.md#the-correct-next-token-at-each-position).
 
 ## Previous-token and induction heads
 
@@ -174,7 +168,7 @@ token's earlier copy. On 20 random words repeated once, that is key p − 19 at 
 
 ```json
 {
-  "description": "Previous-token and induction stripes on GPT-2 small, every head of every layer in one forward. Each `seqs` row is 20 random single-token words repeated once (40 tokens; GPT-2 adds no BOS), so the token at query p >= 20 last occurred at p - 20 and the token after that occurrence is key p - 19. `prev_score` is each head's mean weight on key p - 1 over queries 1 to 39; `induction_score` its mean weight on key p - 19 over the second copy's queries 20 to 39; `control_score` the same read on 40 random words that never repeat, the null. `sink_score` is the weight on key 0, the first token. Eager attention, because sdpa never materializes the pattern.",
+  "description": "Previous-token and induction stripes on GPT-2 small, every head of every layer in one forward. Each `seqs` row is 20 random single-token words repeated once (40 tokens; GPT-2 adds no BOS). At query p >= 20 the token after the current token's earlier copy is key p - 19. `prev_score` is each head's mean weight on key p - 1 over queries 1 to 39. `induction_score` is its mean weight on key p - 19 over queries 20 to 39. `control_score` is the same read on 40 random words that never repeat, the null. `sink_score` is the weight on key 0, the first token. Eager attention, because sdpa never materializes the pattern.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32", "attn_implementation": "eager"},
   "data": {
     "seqs": {"rows": [
@@ -270,21 +264,25 @@ layer  num_heads  induction_score         control_score           prev_score    
 - **Sinks:** `sink_share` is 0.507: 73 of 144 heads put over half their weight on key 0. GPT-2 adds no BOS, so
   key 0 is the first word. Split at query 20, the induction heads put 0.92 to 0.98 there over the first copy
   and under 0.09 over the second.
-- **A stripe says where a head looks, not what it does.** Test a candidate with the `clab-ablation` or
-  `clab-patching` skill.
+- **The bottom k**, for a control head: a `top_k` step over a `neg` step of `induction_score`; its `values` are the
+  scores negated. Added to this document, it ranks 4.11, 2.2, 3.3, 3.7 and 3.2 lowest, each under 2e-6.
+- **A stripe says where a head looks, not what it does.** The model's copying is the
+  [next token at each position](references/attention.md#the-correct-next-token-at-each-position); test a candidate
+  head with the `clab-ablation` or `clab-patching` skill.
 
 ## The tuned lens
 
 A tuned lens trains one affine translator per layer, so that each layer's lens matches the model's own
 next-token distribution. One `affine` featurizer over `layers` holds all of them and one fit trains them; the
-`epochs: 0` point beside it must give exactly the logit lens. The document, its null and its traps are
-[references/tuned-lens.md](references/tuned-lens.md).
+`epochs: 0` point beside it must give exactly the logit lens, and the wiring check reads in the same forward. The
+document, its null and its traps are [references/tuned-lens.md](references/tuned-lens.md).
 
 ## One head's pattern, sinks, a subject, queries
 
 [references/attention.md](references/attention.md) has the `[rows, pos, num_heads, key]` layout, `top_k` over
-`key` and the checks that a read is a pattern (sums to 1, zero ahead of the query). It also has head entropy, the
-weight on a word that moves by row, and `attention_queries` after RoPE, on SmolLM2.
+`key` and the checks that a read is a pattern (sums to 1, zero ahead of the query). It also has the correct next
+token at each position of a repeat, head entropy, the weight on a word that moves by row, and `attention_queries`
+after RoPE, on SmolLM2.
 
 ## Elsewhere
 
@@ -293,6 +291,8 @@ weight on a word that moves by row, and `attention_queries` after RoPE, on SmolL
 | zero a head's pattern, knock out keys, mean-ablate a head | the `clab-ablation` skill |
 | patch a pattern or a query from another prompt, patch a head's output | the `clab-patching` skill |
 | the fit step's fields, `epochs: 0`, bundles | the `clab` skill's [featurizers-and-fit.md](../clab/references/featurizers-and-fit.md) |
+| reuse a trained lens in another document; probes, SAEs, DAS | the `clab-trained-featurizers` skill |
+| generate, score what a generation said, steer | the `clab-steering-and-generation` skill |
 | `select`, components and their layouts | the `clab` skill's [sites-and-interventions.md](../clab/references/sites-and-interventions.md) |
 | `top_k` members, `kl` direction, reductions over `over` | the `clab` skill's [ops.md](../clab/references/ops.md) |
 | a refusal, or numbers wrong with nothing refused | the `clab-debugging` skill |

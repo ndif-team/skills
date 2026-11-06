@@ -8,19 +8,14 @@ the corpus root are its [running reference](../../clab/references/running-and-en
 
 ## What breaks here
 
-- **`file_path` and `from` need a corpus root.** It is the nearest directory above the document that holds a
-  `data/` folder. With inline rows only, make an empty `data/` beside `documents/`; without one, every bundle
+- **`file_path` and `from` resolve against the corpus root**
+  ([which folder that is](../../clab/references/running-and-engines.md#where-output-goes)). `clab run` writes
+  `out/<document>/` under the working directory, so run, show and table from the root; from elsewhere a bundle
   is refused (`out/das/fit.rot.safetensors does not exist under the corpus root; run the document that writes
-  it first`), from any working directory.
-- **Run, show and table from the corpus root.** `clab run` writes to `out/<document>/` under the working
-  directory, while `file_path` reads under the root. From elsewhere, tabling a run that loaded a bundle is
-  refused with that same message.
-- **One training run per output directory.** A second run into the same `--out` replaces the manifest and
-  leaves the other files, so the first run's values no longer table (`'held_acc' was not saved; add it to
-  saves`). The default `out/<document>/` keeps them apart.
-- **Two runs compare at one batch size and one thread count.** A fit's body and evals run at its own
-  `batch_size`, the steps around it at `--batch-size`. `das_apply.json`'s `ce` equals `das.json`'s `held_ce`
-  to the bit at one thread count; at another the last bits move.
+  it first`).
+- **Two runs agree to the bit at one batch size and thread count**, a fit's body at its own `batch_size`;
+  what moves bits is the `clab-debugging` skill's
+  [reproducibility](../../clab-debugging/SKILL.md#reproducing-a-number).
 - **A cache is the run that made it.** Change a row, a `take` or a `shuffle`, and every load of the old cache is
   refused until the harvest runs again. Only names in the harvesting run's `saves` have files.
 
@@ -36,6 +31,8 @@ A saved `fit.<name>`, and a saved `pca` op step, is a bundle: `out/<document>/<n
 | `sae` | `W_enc` `[768, latents]`, `b_enc`, `W_dec` `[latents, 768]`, `b_dec` | `latents`, `activation`, `centered` |
 | `linear` | `W` `[768, classes]`, `b` `[classes]` | `classes`, as `json.dumps` writes the sorted list |
 | `lora` | `A` `[768, rank]`, `B` `[rank, 768]` | `rank`, `alpha`; across sites, `with.component`, `with.layer` |
+| `affine` | `W` `[768, 768]`, `b` `[768]`; over layers, `[layers, 768, 768]` and `[layers, 768]` | over layers, `over`, and `layer` lists them (`[4, 5]`) |
+| `constant` | `vector` `[768]` | nothing more |
 
 Every header also records `format` (`clab/1`), `kind`, `model.key`, `model.revision`, `model.dtype`,
 `component`, `layer`, `width` and `document`, each as a string. To read one, from the corpus root:
@@ -54,7 +51,7 @@ with safe_open("out/das/fit.rot.safetensors", "pt") as f:
 
 A swept fit writes one file whose keys carry each point's coordinate (`mask.mask=1.0/theta`). No featurizer
 loads it; rerun the document unswept at the point you keep. A hand-made bundle loads if it has the tensors
-and the header a clab one has: a probe's span as a `subspace` is in
+and the header a clab one has: a probe's direction as a `subspace` is in
 [probes-and-lora.md](probes-and-lora.md#use-a-probe-causally). A file with no header is a published one, and
 only an `sae` reads it ([sae.md](sae.md#splice-in-a-published-dictionary)).
 
@@ -78,7 +75,7 @@ loads, before any forward.
 ## Cached harvests
 
 A harvest is a read over every row of a dataset, saved. A later document that only fits or reduces it needs
-the values, not the forwards: a `load` step brings a saved value in with its record (layout, positions, the
+the values, not the forwards. A `load` step brings a saved value in with its record (layout, positions, the
 read's site), so every step after it treats it as the value it was.
 
 ```json
@@ -139,6 +136,25 @@ place of the forward:
   `days.input` at layer 5 from position 1 trains a dictionary equal to the bit, at one batch size.
 - **An `encode` of a loaded read uses the featurizer at the read's site**, so this document declares no
   `sites`. An op's value over a read, loaded or not, is no read's own, and its `encode` is refused.
+
+A loaded read feeds any step a read does, and no fit is needed. These steps, in a document with
+`harvest.json`'s model and `days` and the sites `target` (layer 5's `layer_output`) and `head`
+(`lm_head_output`), mean-ablate the last token with the harvest's mean (the `clab-ablation` skill's recipe):
+
+```json
+{
+  "harvest": {"kind": "load", "from": "out/harvest", "value": "harvest.acts"},
+  "average": {"kind": "op", "op": "mean", "of": "harvest"},
+  "clean": {"kind": "forward", "input": "days.input", "interventions": {"logits": {"site": "head", "pos": -1}}},
+  "ablated": {"kind": "forward", "input": "days.input", "interventions": {
+    "abl": {"site": "target", "pos": -1, "ops": [{"op": "swap", "with": "average"}]},
+    "logits": {"site": "head", "pos": -1}}},
+  "kl": {"kind": "op", "op": "kl", "of": "clean.logits", "against": "ablated.logits"}
+}
+```
+
+`clab show` lists 0 forwards for `harvest` and `average`, and `kl` equals the same document's with the
+harvest's forward in place of the load to the bit.
 
 A load is refused before any model loads when it does not match its source:
 

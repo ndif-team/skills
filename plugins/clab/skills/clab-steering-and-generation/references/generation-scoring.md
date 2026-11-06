@@ -71,8 +71,8 @@ spain       5    [{"role":"user","content":"What is the capital …  0.0      Ma
 
 - **`after` takes a column or a literal** (`{"text": ...}`), compares as `contains` does, and cuts at the
   first occurrence. It is refused beside `tokens: true`.
-- **The scope searches decoded generated text** and matches on token boundaries: `Step 2:` is the tokens
-  `Step`, `Ġ`, `2`, `:` here.
+- **The scope searches decoded generated text** and matches on token and word boundaries: `Step 2:` is the
+  tokens `Step`, `Ġ`, `2`, `:` here.
 
 ## Teacher forcing a fixed answer
 
@@ -138,15 +138,16 @@ zealand     5    Is the capital of New Zealand Auckland or Welli…   Wellington
 ```
 
 - **The null is the city the model says.** Greedy decoding takes the top token at every step. So the city it
-  generated, forced, is the top prediction at every token: `exact` or `exact_other` is 1 on every row, the
-  one `said` names.
+  generated, forced, is the top prediction at every token: `exact` or `exact_other` (`min` of `match` over
+  `pos`, 1 only where every token matched) is 1 on every row, the one `said` names.
 - **The model prefers the right capital on 2 of 6 rows**, and on each row it says the city it prefers.
 - **Keep `occurrence: -1`.** The default `occurrence: 0` picks the prompt's copy: `gold.first` lands at 6 and 7,
   inside the question, where `gold.logits` lands at 13 to 16. It runs without a warning, and the Australia
   row's negative log-likelihood is then 1.757 instead of 0.348.
-- **A multi-token answer is a ragged read.** ` Ankara`, ` Brasilia` and ` Buenos Aires` are two tokens, so
-  `nll_gold` holds two values on those rows; `sum` over `pos` makes one. `clab table out/forced_capitals
-  nll_gold` prints one line per token.
+- **The sequence score of a forced answer is `cross_entropy` summed over `pos`**, its negative
+  log-likelihood (`seq_gold`). `token_prob` and `cross_entropy` give one value per token: ` Ankara`,
+  ` Brasilia` and ` Buenos Aires` are two tokens, and `clab table out/forced_capitals nll_gold` prints two
+  lines on those rows.
 - **The appended answer needs its leading space** (` Canberra`), since a list input joins with nothing
   between. Without it the answer joins the prompt's last word: `isCanberra`, tokens `Can`, `berra`. That is
   no whole-word occurrence, so `occurrence: -1` finds the prompt's copy instead. The read lands at 6 and 7,
@@ -159,17 +160,20 @@ clab: steps.f.input[0]: 'qa.chat' is not text on row 0 of 'qa'; a list input joi
 
 ### Forcing an assistant reply
 
-To force a reply after a chat prompt, write the prompt as the template renders it, as text. Then append the
-reply. Check that the text and the chat tokenize alike:
+Teacher forcing a chat means writing the prompt out as the template renders it, as text, since a list input
+refuses a chat column. Append the reply to that text, and check that the text and the chat give the same logits:
 
 ```json
 {
-  "description": "Teacher-force an assistant reply. A list input joins text, and a chat column is not text, so the prompt is written as the template renders it (`text`, the default system message included). `c` and `t` read the last prompt token from the chat and from the text; `agree` is 1 where every logit is equal. `forced` appends the reply the model generates greedily and reads the positions that predict it; `hit` is 1 where each token was the top prediction.",
+  "description": "Teacher-force an assistant reply. A list input joins text, and a chat column is not text, so the prompt is written as the template renders it (`text`, the default system message included). `c` and `t` read the last prompt token from the chat and from the text; `agree` is 1 where every logit is equal. `forced` appends each row's reply and reads the positions that predict it: row 0's is the reply the model generates greedily, row 1's names another city. `hit` is 1 where a token was the top prediction, and `seq`, the cross-entropy summed over `pos`, is the reply's negative log-likelihood.",
   "model": {"key": "HuggingFaceTB/SmolLM2-135M-Instruct", "revision": "12fd25f77366fa6b3b4b768ec3050bf629380bac", "dtype": "float32"},
   "data": {"qa": {"template": {"add_generation_prompt": true}, "rows": [
-    {"chat": [{"role": "user", "content": "What is the capital of France?"}],
+    {"example_id": "paris", "chat": [{"role": "user", "content": "What is the capital of France?"}],
      "text": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n",
-     "reply": "The capital of France is Paris."}]}},
+     "reply": "The capital of France is Paris."},
+    {"example_id": "lyon", "chat": [{"role": "user", "content": "What is the capital of France?"}],
+     "text": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n",
+     "reply": "The capital of France is Lyon."}]}},
   "sites": {"head": {"component": "logits"}},
   "steps": {
     "c": {"kind": "forward", "input": "qa.chat", "interventions": {"l": {"site": "head", "pos": -1}}},
@@ -178,30 +182,42 @@ reply. Check that the text and the chat tokenize alike:
       "l": {"site": "head", "pos": {"scope": {"column": "qa.reply", "occurrence": -1, "before": true}}}}},
     "same": {"kind": "op", "op": "eq", "of": "c.l", "with": "t.l"},
     "agree": {"kind": "op", "op": "min", "of": "same", "over": ["rows", "pos", "vocab_size"]},
-    "hit": {"kind": "op", "op": "match", "of": "forced.l", "expected": "qa.reply"}
+    "hit": {"kind": "op", "op": "match", "of": "forced.l", "expected": "qa.reply"},
+    "nll": {"kind": "op", "op": "cross_entropy", "of": "forced.l", "target": "qa.reply"},
+    "seq": {"kind": "op", "op": "sum", "of": "nll", "over": ["pos"]}
   },
-  "saves": ["agree", "hit"]
+  "saves": ["agree", "hit", "seq"]
 }
+```
+
+`clab table out/forced_reply agree` prints `1.0`; `clab table out/forced_reply seq`:
+
+```text
+example_id  row  text                                              reply                            value
+paris       0    <|im_start|>system\nYou are a helpful AI assist…  The capital of France is Paris.  0.5047430992126465
+lyon        1    <|im_start|>system\nYou are a helpful AI assist…  The capital of France is Lyon.   11.343289375305176
 ```
 
 - **`agree` is 1.0**: the text renders to the chat's tokens, and the logits are equal to the bit. Compare
   `plan.run.tokens["qa.chat"]` with `plan.run.tokens["qa.text"]` after a run to check another template.
-- **The null is the greedy reply**: `hit` is 1.0 at all 7 positions, from the header's `Ċ` at 36 to `ĠParis`
-  at 42.
+- **The null is the greedy reply**: `hit` is 1.0 at all 7 positions of row 0, from the header's `Ċ` at 36 to
+  `ĠParis` at 42. On row 1 it is 0.0 at 41, where the model predicts Paris and the reply says Lyon.
+- **`seq` scores the whole reply**: 0.50 for the reply the model gives, 11.34 for the Lyon reply.
 - **The reply has no leading space**: its first word follows the header's newline.
 - **The text holds the template's default system message**, which the chat never states. Render it outside
   clab with the tokenizer's `apply_chat_template(messages, tokenize=False, add_generation_prompt=True)`,
   which gives this row's `text` exactly, never from memory of the template.
 
-## Chat prompts and positions inside a turn
+## Scoring a reply to a chat
 
-A chat column renders through the checkpoint's own template. The dataset's `template` passes arguments to it,
-and `add_generation_prompt` ends the prompt with the assistant's header. A `turn` scope names one message's
-own tokens:
+A chat column, `template`, `add_generation_prompt` and the system message a template writes are the `clab`
+skill's [data reference](../../clab/references/data.md#chats), and the `turn` scope its
+[positions reference](../../clab/references/positions.md#chat-turns). This document scores the reply to a
+follow-up question, with and without the assistant's header:
 
 ```json
 {
-  "description": "A follow-up question in a two-turn chat. `asked` renders each chat through the checkpoint's template with the assistant's header appended (`add_generation_prompt`), so the generation is the assistant's reply; `closed` renders the same rows without it, so the prompt ends with the template's close of the last message and the model writes the header itself. `follow_up` reads layer 12 at the last token of the second user message, `reply` at the prompt's last token. `said` and `closed_said` ask whether each reply names the second country's capital.",
+  "description": "A follow-up question in a two-turn chat. `asked` sets `add_generation_prompt` and `closed` does not, so on `closed` the model writes the assistant's header itself. `follow_up` reads layer 12 at the last token of the second user message, `reply` at the prompt's last token. `said` and `closed_said` ask whether each reply names the second country's capital.",
   "model": {"key": "HuggingFaceTB/SmolLM2-135M-Instruct", "revision": "12fd25f77366fa6b3b4b768ec3050bf629380bac", "dtype": "float32"},
   "data": {
     "asked": {"template": {"add_generation_prompt": true}, "rows": [
@@ -241,35 +257,21 @@ japan       0    [{"role":"user","content":"What is the capital …  <|im_start|
   answer.reply      —   [58] on all 3 rows
 ```
 
-- **Without `add_generation_prompt` the model writes the header itself.** Here 4 of the 10 tokens are
-  `<|im_start|>`, `ass`, `istant` and `Ċ`, and `detokenize` keeps them in the text. A read at a fixed decode
-  call then lands in the header. Give a chat that generates `"template": {"add_generation_prompt": true}`.
-- **A `turn` scope holds the message's own tokens**, never the template's markers. `follow_up` lands at 52,
-  the `?` of "And of Japan?", not at the `<|im_end|>` after it. `reply` at 58 is the header's newline.
-- **`occurrence` counts that role's messages**: `{"turn": "user", "occurrence": 1}` is the second user
-  message. A turn takes frame 0, the prefill, in a generate step.
-- **A system message the template writes is positions, not a turn.** On a chat with none, `{"turn":
-  "system"}` is refused:
-
-```text
-clab: fq.sys: row 0: the row has no 'system' message; the template wrote a 'system' header of its own, whose tokens are positions, not a message: locate its words with a {'text': ...} scope
-```
-
+- **Without the header the model writes it**: 4 of `closed`'s 10 tokens are `<|im_start|>`, `ass`, `istant`
+  and `Ċ`, and `detokenize` keeps them, so a read at a fixed decode call lands in the header.
+- **Check a turn's positions in `clab show`**: `follow_up` lands at 52, the `?` of "And of Japan?", and `reply`
+  at 58, the header's newline.
 - **A table joins one dataset's values.** Tabling `said` beside `closed_said` is refused: `'said' has a row
   per example of 'asked' and 'closed_said' of 'closed'; a table joins the values of one dataset`. Table them
   apart.
-- **The template's other arguments** (a pinned date for a template that reads the clock) are the `clab`
-  skill's [data reference](../../clab/references/data.md).
 
-## Counting rows a scope never reached
+## Counting missing rows per sweep point
 
-A read at generated text is `alignment_missing` on a row that never says the text. The run finishes, the
-row's values are NaN, and every reduction skips it. Count first:
-
-- **Inside a document**, `count` of an index -1 read over `["rows", "pos"]` is the number of rows it reached
-  (`reached` in the skill's scoring recipe). A `before` read counts tokens, not rows.
-- **In a sweep, count each point.** A steered generation reaches fewer rows as the dose rises. A read added
-  to the `steered` step of the skill's `steer_generation.json` (a fragment of its `interventions`):
+A read at generated text is `alignment_missing` on a row that never says the text. How that passes through
+ops and tables, and the count inside a document, are the `clab` skill's
+[positions reference](../../clab/references/positions.md#rows-a-scope-never-reached). In a sweep, count each
+point: a steered generation reaches fewer rows as the dose rises. A read added to the `steered` step of the
+skill's `steer_generation.json` (a fragment of its `interventions`):
 
 ```json
 {"said": {"site": "resid", "pos": {"frame": "1:", "scope": {"column": {"column": "qa.answer", "strip": true}}, "index": -1}}}
@@ -296,11 +298,6 @@ for point in plan.steps["steered"]:
 ```
 
 - **A mean over that read at dose 1.0 is one row's number.** Report it as "over 1 of 6 rows", or not at all.
-- **`positions` is keyed by dataset** (`"qa"` here), and a row that was not reached holds the string
-  `"alignment_missing"` in place of its list.
+- **`positions` is keyed by dataset** (`"qa"` here).
 - **A write over decode calls that never lands** leaves that row unsteered, and a mean over rows dilutes the
   effect. Check a scoped write's `positions` the same way.
-- **To make a miss a refusal**, ask the question in the prefill by teacher forcing
-  ([above](#teacher-forcing-a-fixed-answer)): a row whose input lacks the text is refused before any forward.
-- **How missing values pass through ops and tables** is the `clab` skill's
-  [positions reference](../../clab/references/positions.md).

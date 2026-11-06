@@ -1,6 +1,6 @@
 ---
 name: clab-trained-featurizers
-description: Train a featurizer inside a clab run, or load one from a bundle, and test what it learned. Distributed alignment search (DAS, a trained rank-k subspace swapped in from a counterfactual, interchange intervention accuracy) and boundless masking (DBM, a gate over units), with PCA and random subspaces of matched rank as controls; head masking (a gate per attention head of every layer, the L1 weight, the heads kept); sparse autoencoders (a published Gemma Scope or SAELens JumpReLU or TopK file spliced in, its L0, latent ablation, max-activating examples, training a dictionary); linear probes per layer and their floor; LoRA adapters trained through the frozen model and switched on in chosen steps; cached harvests (`load`, shards) and bundles (`file_path`). Covers fit, subspace, gate, pca, sae, linear, lora, encode, decode, apply, epochs 0, fit.<name>, eval and history. The tuned lens is clab-lenses-and-attention, the optimal constant clab-ablation, the fit step's fields the clab skill.
+description: Find which subspace, units or heads carry a variable by training them inside a clab run, or test what a trained or published featurizer encodes. Use it for distributed alignment search (DAS), the trained-subspace form of an interchange, and boundless masking (DBM), each beside PCA and random subspaces of matched rank. Use it for head masking with a gate per head, and for sparse autoencoders: splicing in a SAELens or Gemma Scope file, L0, latent ablation, max-activating examples, training one. Also for a linear probe per layer and patching or ablating along its direction, a LoRA trained through the frozen model, and a harvest or bundle saved once and loaded elsewhere. Plain activation patching and interchange are clab-patching; the tuned lens clab-lenses-and-attention; the optimal constant clab-ablation; a refused bundle or load, or numbers that look wrong, clab-debugging; the fit step's fields the clab skill.
 ---
 
 # Trained featurizers
@@ -20,28 +20,30 @@ Each of these runs without a refusal and costs a conclusion.
 
 - **The bare name after a fit is the untrained draw.** Steps after the fit name the trained one `fit.<name>`:
   `das.json` below scores 7/7 through `fit.rot` and 0/7 through `rot`. Use the bare name on purpose, as the null.
-- **A fit without its `epochs: 0` point proves nothing.** A trained featurizer means something only where it
-  beats its own draw on the same rows. Score the bare name after the fit, with the featurizer given the fit's
-  `seed`, or sweep `"epochs": {"sweep": [0, N]}`.
+- **A fit without its draw beside it proves nothing.** A trained featurizer means something only where it
+  beats its starting draw on the same rows. The bare name after the fit, an `"epochs": 0` point and the
+  featurizer declared with the same `seed` and no fit are one control, that draw. On `das.json` all three give
+  the same held-out `ce`, row for row to the bit.
 - **`lr × steps` bounds how far a featurizer gets.** Count the steps, `epochs × ⌈rows / batch_size⌉`. On
   `das.json`, lr 1e-4, 1e-3, 1e-2 and 1e-1 give 0/7, 7/7, 2/7 and 0/7: sweep `lr` before reading a flat curve.
-- **A published SAE stated wrongly runs.** Write its `activation`, `centered` and layer from the release, the
-  layer inline in `site`. A dictionary on GPT-2 stated with the wrong `centered` gives mean L0 21.7 where its
-  truth gives 24.6. Compare mean L0 over every token after the first with the release's ([SAEs](references/sae.md)).
+  For about 15 pairs, start near 80 steps at lr 1e-3 to 3e-3: `das.json` cut to 14 pairs fits every one at
+  40 epochs of `batch_size` 7, and does not at 10 epochs or at lr 1e-2.
+- **A published SAE stated wrongly runs.** State its `activation`, `centered` and layer from the release
+  ([SAEs](references/sae.md#splice-in-a-published-dictionary)).
 - **`apply` replaces; the `encode`, edit, `decode` bracket edits.** A subspace's `apply` is its projection and an
   SAE's drops the error term. An interchange or a latent ablation is the bracket, which keeps everything else.
 - **A featurizer at a site that picks several layers is one shared featurizer.** Sweep the site's `layers`
   for one per layer. Only a gate or an affine with `layers` in its `over` holds units per layer.
-- **A probe that decodes a variable does not show the model uses it.** Test use with an interchange along
-  the probe's span ([probes](references/probes-and-lora.md#use-a-probe-causally)).
-- **GPT-2's first position is an outlier.** Its layer 5 output has norm about 2990 against about 85 elsewhere.
+- **A probe that decodes a variable does not show the model uses it.** Patch or ablate along its direction,
+  a `subspace` bundle of its weights ([probes](references/probes-and-lora.md#use-a-probe-causally)).
+- **GPT-2's first position is an outlier**: a `norm` of its layer 5 output is many times any later position's.
   Harvest from position 1 (`{"index": "1:"}`) for a PCA or a dictionary, or position 0 takes a direction.
 
 These are refused, and the fix is not obvious from the message:
 
-- **A loading document needs a corpus root.** `file_path` and a load's `from` resolve under the nearest
-  directory above the document that holds `data/`. With inline rows only, create an empty `data/` there, or the
-  bundle is refused (`does not exist under the corpus root`). Run, show and table from that directory.
+- **`does not exist under the corpus root`.** `file_path` and a load's `from` resolve against the nearest
+  folder above the document that holds `data/`, else the folder above the document's own
+  ([the rule](../clab/references/running-and-engines.md#where-output-goes)); run, show and table from it.
 - **Two training runs into one output directory keep only the last manifest.** The first run's values then
   table as `'held_acc' was not saved; add it to saves`. Leave each training run its own `out/<document>/` and
   point `file_path` there, as every document in this skill does.
@@ -156,7 +158,7 @@ rank-4 subspace to do the same swap with 4 of the 768 dimensions.
 - **`v_cf` encodes the harvest** in the subspace being trained, and the bracket swaps those 4 coordinates into
   the base prompt's. `decode` writes back only the change, so the other 764 dimensions stay the base's.
 - **`ce` is the objective; `acc`**, the interchange intervention accuracy, **is reported**.
-- **`rot` carries `"seed": 0`**, the fit's seed, so the bare `rot` after the fit is the fit's starting draw.
+- **`rot` carries `"seed": 0`**, so its draw, the fit's starting point, can be declared again in another document.
 
 ```text
 clab run documents/das.json
@@ -174,10 +176,9 @@ epochs  value
 9       0.9523809552192688
 ```
 
-The trained subspace swaps the day on all 7 held-out pairs; its draw on none. The `ctl_*` steps equal an
-`epochs: 0` run's `held_*` values to the bit, so this document carries its own null. Twenty-one pairs train
-it in seconds on a CPU. The rank curve, the spread across seeds, the PCA control and DBM are
-[subspaces-and-masks.md](references/subspaces-and-masks.md).
+The trained subspace swaps the day on all 7 held-out pairs; its draw, the `ctl_*` steps, on none, so this
+document carries its own null. Twenty-one pairs train it in seconds on a CPU. The rank curve, the spread
+across seeds, the PCA control and DBM are [subspaces-and-masks.md](references/subspaces-and-masks.md).
 
 ### Load it in a second document
 
@@ -227,10 +228,11 @@ row  pos  pos_token  input                               cf_answer  value
 ```
 
 `ce` equals `das.json`'s `held_ce` to the bit, row for row, and `acc` is 1.0: the same rows through the same
-rotation. That holds at one batch size and one thread count; at another the last bits move (reproducibility is
-the `clab-debugging` skill's). A header that disagrees with the loading document is refused before the model loads,
-naming the key (`header 'layer' is '5'; this document uses 'rot' at layer_output layer 6`). The checks and
-the file layouts of every kind are [harvest-and-bundles.md](references/harvest-and-bundles.md).
+rotation. That holds at one batch size and one thread count; at another the last bits move (the
+`clab-debugging` skill's [reproducibility](../clab-debugging/SKILL.md#reproducing-a-number)). A header that
+disagrees with the loading document is refused before the model loads, naming the key (`header 'layer' is
+'5'; this document uses 'rot' at layer_output layer 6`). The checks and the file layouts of every kind are
+[harvest-and-bundles.md](references/harvest-and-bundles.md).
 
 ## Which kind for which question
 
@@ -242,6 +244,7 @@ the file layouts of every kind are [harvest-and-bundles.md](references/harvest-a
 | what a trained subspace has to beat | a drawn `subspace`; a loaded `pca` | [controls](references/subspaces-and-masks.md#controls-of-matched-rank) |
 | which interpretable features are active, and what an edit of one does | `sae` | [sae.md](references/sae.md) |
 | whether a property is linearly decodable, and where | `linear` | [probes](references/probes-and-lora.md#a-probe-per-layer) |
+| patch, ablate or project out along a probe's direction | a `subspace` bundle of its weights | [probes](references/probes-and-lora.md#use-a-probe-causally) |
 | what a low-rank weight change learns, on in some steps | `lora` | [LoRA](references/probes-and-lora.md#lora-train-an-adapter) |
 | reuse a harvest, fit with no forward | a `load` step | [cached harvests](references/harvest-and-bundles.md#cached-harvests) |
 | a full linear map per layer (tuned lens) | `affine` | the `clab-lenses-and-attention` skill |
@@ -257,6 +260,6 @@ Every kind's fields and ops are in `clab describe featurizers`; the fit and load
 - [sae.md](references/sae.md): a published file's layout and the three fields it needs, L0 and splice KL,
   ranking and ablating latents, max-activating examples, training a dictionary and loading it.
 - [probes-and-lora.md](references/probes-and-lora.md): a probe per layer and its floor, many probes in one
-  fit, a probe's span used in an interchange, LoRA trained, applied in chosen steps, and across sites.
+  fit, a probe's direction patched and ablated, LoRA trained, applied in chosen steps, and across sites.
 - [harvest-and-bundles.md](references/harvest-and-bundles.md): bundle files, headers and the checks;
   `load` a saved harvest, fit on it with no forward, and harvest in shards.

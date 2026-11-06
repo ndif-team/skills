@@ -43,7 +43,7 @@ then `steps.clean: unknown step kind 'forwards'; …`.
 | `unknown field 'word'; valid: column, text, turn, occurrence, strip, lower, until, before` | before load | a misspelled scope key | the listed keys |
 | `a column's strip goes on its reference` | before load | `strip` or `lower` beside a `column` scope | `{"column": {"column": "<dataset>.<column>", "strip": true}}` |
 | `frame 1: a forward makes one call, the prefill` | before load | a decode frame on a `forward` | frame 0, or a `generate` step |
-| `label 'layers' is also the sweep at sites.target.layers, over [3, 6]; one label is one axis` | before load | two sweeps sharing a label (a field's name is the default) over other values | a `label` on one to cross them, or the same values to pair them |
+| `label 'layers' is also the sweep at sites.target.layers, over [3, 6]; one label is one axis` | before load | two sweeps sharing a label (a field's name is the default) over other values | its own `label` on each to cross them, or the same values to pair them |
 
 At a sweep point the path gains the point: `steps.patched.interventions.logits.pos.frame at frame=1: frame 1: …`.
 
@@ -58,7 +58,8 @@ At a sweep point the path gains the point: `steps.patched.interventions.logits.p
 | `no site 'heads'; declared: target, head` | before load | a site name `sites` does not declare | a declared site, or a site written inline |
 | `'patched.logit' names no step's value; a save is a step or a step's member` | before load | a `saves` entry no step makes | a step's name or `<step>.<entry>` |
 | `'ld' is saved twice` | before load | a name listed twice in `saves` | list it once |
-| `no file data/cities/train.json under the corpus root` | before load | a `path` dataset with no `data/` directory above the document | inline `rows`, or a `data/` directory above the document |
+| `no file data/cities/train.json under the corpus root` | before load | a `path` the corpus root does not hold ([the rule](../../clab/references/running-and-engines.md#where-output-goes)) | inline `rows`, or the file under the corpus root's `data/` |
+| `'facts' is also a dataset or a featurizer` | before load | a step named as a dataset or a featurizer: the three share one namespace | another name for the step |
 
 ## Operands
 
@@ -77,7 +78,7 @@ by position; it holds every layer the write acts at; it is one dataset's rows. T
 | `'patched.logits' is this entry or one this forward makes after it; an operand names an earlier entry` | before load | a same-forward operand listed later | list it earlier, or read it in an earlier forward |
 | `operand 'patched.later' is read at layer_output layer 8, which the nnterp engine's forward reaches no earlier than this write's layer_output layer 6` | after load | a same-forward operand at a later site | read it in a forward before this one |
 | `operand 'counterfactual.v_cf' holds 4 positions on rows 0-1, 3 positions on row 2 and 2 positions on row 3; a scoped read pairs with another forward's value when every row's scope holds the same number of tokens` | after load | a scope whose rows hold different numbers of tokens (entities of 4, 3, 2 tokens) | `"index": -1` inside the scope on both sides, or reduce over `pos` |
-| `operand 'counterfactual.v_cf' was read on pairs.cf_input, row 2 of which is 9 tokens; pairs.input has 7, so pairs.cf_input's position 5 (' in') pairs with pairs.input's position 5 (' city')` | after load | one unscoped `pos` on two inputs of different lengths | a scope on each side naming the token in its own row |
+| `operand 'counterfactual.v_cf' was read on pairs.cf_input, row 2 of which is 9 tokens; pairs.input has 7, so pairs.cf_input's position 5 (' in') pairs with pairs.input's position 5 (' city')` | after load | one unscoped `pos` on inputs of different lengths, past the tokens both end (or begin) with alike and the one next to them | a scope on each side naming the token in its own row |
 
 ## Entries and ops
 
@@ -88,7 +89,7 @@ by position; it holds every layer the write acts at; it is one dataset's rows. T
 | `'mean' over 'layers': inside an entry an op acts at each layer` | before load | a reduction over `layers` inside an entry | an op step with `"over": ["layers"]` |
 | `a reduction cannot remove 'layers'; the value is ['rows', 'pos']` | before load | `over` names an axis the value lacks | an axis of the printed layout |
 | `readout projects a residual-stream value; attention_premix is not one` | before load | `readout` on a value that is not a stream | one of the listed stream components |
-| `'top' is a top_k's value, several tensors (its ids, their probs and their tokens)` | before load | an op over a whole `top_k` | name a member: `top.ids`, `top.probs` |
+| `'top' is a top_k's value, several tensors (its ids, their probs and their tokens)` | before load | an op over a whole `top_k` | name a member: `top.ids`, and `top.probs` or `top.values` |
 
 ## Gradients
 
@@ -98,6 +99,40 @@ by position; it holds every layer the write acts at; it is one dataset's rows. T
 | `grad follows 'swap', an edit, and an entry that takes a gradient writes nothing` | before load | an edit before `grad` in one entry | the write in its own entry, listed before the `grad` at the site |
 | `grad is taken in a forward, not a generate` | before load | `grad` in a `generate` step | a forward over the prompt with the generated text appended (a list input) |
 | `grad's of 'early' is read at layer_output layer 2, which the nnterp engine's forward reaches no later than this entry's layer_output layer 6` | after load | `of` at a site the forward reaches before the gradient's | an `of` the site feeds, at a later site such as the head |
+
+## Featurizers, fits, bundles and loads
+
+`file_path` and a `load`'s `from` resolve against the corpus root, whose rule is the `clab` skill's
+[running reference](../../clab/references/running-and-engines.md#where-output-goes); run, show and table from it.
+The fields and header checks are its [featurizers reference](../../clab/references/featurizers-and-fit.md); a
+published SAE's fields are the `clab-trained-featurizers` skill's
+[sae reference](../../clab-trained-featurizers/references/sae.md#splice-in-a-published-dictionary). `<file>` is
+the bundle's path.
+
+| first clause | refused | cause | fix |
+|---|---|---|---|
+| `'linear' takes no 'seed'; its arguments: classes, file_path` | before load | a field the kind does not take | the listed fields; `clab describe featurizers` |
+| `'probe' is a 'linear' featurizer, which has no decode: it serves encode` | before load | an op the kind does not serve | an op it serves, as listed |
+| `the entry writes back here with the encode of 'rot' (ops[0]) still open` | before load | an edit after an `encode` and no `decode` | `{"op": "decode", "featurizer": "rot"}` after the edits |
+| `decode closes an encode of its own entry, so it runs inside the entry that encodes` | before load | `decode` as an op step | the `encode` … `decode` pair inside one entry |
+| `featurizer 'rot' is used at width 3072 here and 768 elsewhere; a featurizer has one width` | after load | one featurizer at sites of two widths | one featurizer per width |
+| `<file> does not exist under the corpus root; run the document that writes it first` | before load | a bundle not written yet, or a document under another corpus root | run the writing document; run from the corpus root |
+| `<file>: header 'layer' is '6'; this document uses 'probe' at layer_output layer 5` | before load | a use at another component or layer than the bundle's | the bundle's site, or a bundle trained there |
+| `header 'k' is '4'; this document expects '8'` | before load | a field the header records, given another value | leave it out: the header supplies it |
+| `header 'model.dtype' is 'float32'; this document expects 'bfloat16'` | before load | another model `key`, `revision` or `dtype` than the bundle's | the bundle's model |
+| `<file> holds one bundle per point of a sweep (epochs=0, epochs=8)` | before load | a swept fit's file | rerun the fit unswept at the point you keep |
+| `'rot' is loaded from a bundle, which fixes it; a fit trains a featurizer it draws` | before load | a loaded featurizer in a fit's `train` | train a drawn one |
+| `<file> is a published sae, which says neither how it encodes nor where it was trained` | before load | a file with no clab header, without `activation`, `centered` and `site` | the three, as its release names them |
+| `<file> holds a JumpReLU threshold; its activation is 'jumprelu', not 'relu'` | before load | `relu` on a file with a `threshold`, or `jumprelu` on one without | the activation the file holds |
+| `<file> is not a safetensors file, which a file_path is read as` | before load | a `.npz` | `numpy.load` it, then `safetensors.torch.save_file` |
+| `featurizer 'sae' was trained at layer_output layer 6 (its site); this use is layer_output layer 5` | after load | a published SAE used at another layer than its `site` | use it at its `site` |
+| `'harvest.acts' was made over the rows of dataset 'days', and this document's 'days' is not the rows out/harvest read` | before load | a `load` whose dataset holds other rows, or another order | the harvesting run's dataset block |
+| `'harvest.acts' was made over the rows of dataset 'days', which this document does not declare` | before load | the dataset declared under another name | declare it as the harvesting run did |
+| `out/harvest ran another model than this document's` | before load | a `load` from a run of another model or dtype | the harvesting run's `model` |
+| `'basis' is a bundle, which a featurizer of its kind loads, with 'file_path'` | before load | a bundle named in a `load` | a featurizer of its kind with that `file_path` |
+
+A wrong `centered`, a TopK file stated as `relu` and a wrong layer in `site` run and give wrong numbers
+([symptoms](symptoms.md#featurizers)).
 
 ## Positions in a row
 
@@ -119,11 +154,27 @@ position i; every row is checked after the tokenizer loads.
 
 | first clause | refused | cause | fix |
 |---|---|---|---|
-| `pairs.cf_answer row 0: ' Colosseum' is 4 tokens; the read has 1 position on that row` | after load | an answer of several tokens against one position | teacher-force it (append it to the input, read `before` its scope with `"occurrence": -1`), or a one-token answer |
+| `pairs.cf_answer row 0: ' Colosseum' is 4 tokens; the read has 1 position on that row` | after load | an answer of several tokens against one position | teacher-force it (below), or a one-token answer |
 | `facts.bare row 1: 'Rome' is 2 tokens; the read has 1 position on that row` | after load | the leading space left out, where the bare word splits | ` Rome`, as the model continues the prompt |
 | `pairs.cf_answer row 0: [' Rome', ' Paris'] stands for 2 ids (a set, or a class under strip or lower), which have no one logit for logit_diff` | after load | a set where the metric reads one logit (`logit_diff`, `token_logit`) | `token_prob`, which sums the set, or one spelling per row |
 | `pairs.cf_answer row 0: its members are ' Rome' 1, ' Colosseum' 4 tokens; a set's members are one width` | after load | set members of different token counts | members of one width, or one column per alternative |
 | `days.answer row 0: position 3 predicts ' 3' in the input, which is not token 0 of '3' as it tokenizes alone` | after load | a teacher-forced prompt ending in a space, which GPT-2 merges into the next token | the space on the answer (` 3`), not on the prompt |
+
+The teacher-forcing fix for the first row above: a forward of the prompt with the answer appended, as a list
+input, read at the positions that predict the answer's last copy. A fragment of `steps`, `head` being
+`lm_head_output`:
+
+```json
+{
+  "forced": {"kind": "forward", "input": ["pairs.input", "pairs.cf_answer"], "interventions": {
+    "logits": {"site": "head", "pos": {"scope": {"column": "pairs.cf_answer", "occurrence": -1, "before": true}}}}},
+  "p": {"kind": "op", "op": "token_prob", "of": "forced.logits", "token": "pairs.cf_answer"}
+}
+```
+
+`p` holds one probability per answer token, `[rows, 4]` for ` Colosseum`. Changing only the read, with the
+answer not appended, is refused as text not in the input. Without `"occurrence": -1`, a prompt that names the
+answer moves the read onto its own copy, unrefused ([symptoms](symptoms.md#positions-and-selections)).
 
 ## Rows a read did not reach
 
@@ -162,5 +213,6 @@ A read is never refused for a row it misses; a write whose operand is missing on
 | ``answer: generate rejected 'max_new_tokns': The following `model_kwargs` are not used by the model`` | at run | an option the model's `generate` does not take | the option's spelling in transformers |
 | `'patched.logits' was not saved; add it to saves` | `clab table` | a name not in `saves`, or a run whose `--out` a later run reused | add it to `saves` and rerun, each run to its own `--out` |
 | `no run at 'out/nowhere' (no manifest.json); run the document first` | `clab show`, `clab table` | a directory no run wrote | the run's `--out` |
+| `'clean_ld' has a pos column counting positions of pairs.input, and 'cf_ld' one counting positions of pairs.cf_input` | `clab table` | values read on two inputs in one table | table them one at a time |
 
 A step that runs out of CUDA memory is the one refusal that writes output ([SKILL.md](../SKILL.md#out-of-memory)).

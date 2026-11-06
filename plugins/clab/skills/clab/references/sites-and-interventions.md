@@ -7,29 +7,30 @@ inline (`"site": {"component": "lm_head_output"}`). Which tokens is the entry's 
 
 ## Components
 
-Names are nnterp's, the same on every model family. The ones an experiment reaches for, from
-`clab describe components`:
+Names are nnterp's, the same on every model family. `clab describe components` lists every one with the axes
+it can be narrowed by; these are the ones an experiment reaches for:
 
-| component | layout | what it holds |
+| component | layout | holds, and when to use it |
 |---|---|---|
 | `token_embeddings` | `rows, pos, hidden_size` | the embedding module's output; takes no `layers` |
-| `layer_input`, `layer_output` | `rows, pos, hidden_size` | the residual stream entering and leaving block i |
-| `layer_mid` | `rows, pos, hidden_size` | the stream between the sublayers |
-| `attention_output`, `mlp_output` | `rows, pos, hidden_size` | what each sublayer adds to the stream |
-| `attention_norm_output`, `mlp_norm_output`, `mlp_input` | `rows, pos, hidden_size` | the normed stream a sublayer is called with |
-| `attention_premix` | `rows, pos, num_heads, head_dim` | every head's result as the output projection takes it; no eager needed |
-| `attention_queries`, `attention_keys`, `attention_values` | `rows, pos, num_(kv_)heads, (qk_)head_dim` | after projection and RoPE; keys and values per KV head |
-| `attention_scores`, `attention_probabilities` | `rows, pos, num_heads, key` | the pattern before and after its softmax |
-| `attention_head_outputs` | `rows, pos, num_heads, head_dim` | each head's output before the projection |
-| `mlp_activation`, `mlp_neurons` | `rows, pos, intermediate_size` | the activation, and what the down projection sums; they differ on a gated MLP |
-| `final_norm_output` | `rows, pos, hidden_size` | what the head projects; takes no `layers` |
-| `lm_head_output`, `logits` | `rows, pos, vocab_size` | the head's projection; what the model returns, after any softcap |
+| `layer_input`, `layer_output` | `rows, pos, hidden_size` | the residual stream entering and leaving block i: the default site to patch, lens or steer |
+| `layer_mid` | `rows, pos, hidden_size` | the stream between attention and MLP: lens or patch it to split a block between its sublayers |
+| `attention_output`, `mlp_output` | `rows, pos, hidden_size` | what one sublayer adds to the stream: patch or ablate that sublayer alone |
+| `attention_norm_output`, `mlp_norm_output` | `rows, pos, hidden_size` | the normed stream a sublayer is called with: what a probe or SAE trained on normed activations reads; a write there reaches that sublayer only; `readout` refuses it |
+| `mlp_input` | `rows, pos, hidden_size` | what the MLP is called with: on GPT-2 the same numbers as `mlp_norm_output` |
+| `attention_premix` | `rows, pos, num_heads, head_dim` | every head's result as the output projection takes it: the per-head site to patch and ablate; no eager needed |
+| `attention_head_outputs` | `rows, pos, num_heads, head_dim` | each head's output read inside the attention: on GPT-2 under eager the same numbers as `attention_premix`, so prefer that |
+| `attention_queries`, `attention_keys`, `attention_values` | `rows, pos, num_(kv_)heads, (qk_)head_dim` | after projection and RoPE, keys and values per KV head: a head's query-key geometry, or what it moves from a position |
+| `attention_scores`, `attention_probabilities` | `rows, pos, num_heads, key` | the pattern before and after its softmax: where a head looks |
+| `mlp_activation`, `mlp_neurons` | `rows, pos, intermediate_size` | the activation, and what the down projection sums: neuron sites; they differ on a gated MLP |
+| `final_norm_output` | `rows, pos, hidden_size` | what the head projects; takes no `layers`: the model's last representation, for a probe or a direction's `dot` |
+| `lm_head_output`, `logits` | `rows, pos, vocab_size` | the head's own projection, and what the model returns after any softcap: score the output on `logits`, the only one `--readout at-reads` acts on |
 
 On GPT-2 these hold to the bit: `layer_input` + `attention_output` is `layer_mid`, `layer_mid` + `mlp_output`
 is `layer_output`, block 2's `layer_output` is block 3's `layer_input`, and `lm_head_output` is `logits`.
-Check them on another architecture before relying on one. A mixture of experts adds `router_logits`,
-`expert_weights`, `expert_indices`, `expert_outputs`, `routed_output` and `shared_expert_output`, whose recipes
-are the `clab-ablation` skill's.
+Check them on another architecture before relying on one. A mixture of experts adds routing and expert
+components (`router_logits`, `expert_outputs`, …), each with its when-to-read line and recipes in the
+`clab-ablation` skill ([experts](../../clab-ablation/references/keys-experts-and-hydra.md#expert-knockout)).
 
 ### Attention needs eager
 
@@ -96,6 +97,7 @@ tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave 
 - **An index along a selected axis counts within the list**: `biggest` 1 on row 0 is head 6. Map it back through the list.
 - **An operand must carry the same picks in the same order** as the write it meets; build every site of a head set from one sorted list.
 - **A write selects on one axis**; a read may select heads and dimensions together.
+- **A `select` applies at every layer of its site**: `{"component": "mlp_activation", "layers": [3, 5], "select": {"intermediate_size": [1, 2]}}` is neurons 1 and 2 at both layers. Other picks at each layer are one site per layer, each with its own `select`.
 - **A pick outside the axis, or an axis the component lacks, is refused**: `select num_heads [12] outside the model's 12`; `layer_output has no axis 'num_heads' to select; its axes: hidden_size`.
 - **`{"key": {"offset": -1}}` is each query's previous token** on an attention pattern, a read only; the `clab-lenses-and-attention` skill has its recipes.
 - **`readout` needs the whole stream, and a metric the whole vocabulary**: select after them, in a second read, never before.
@@ -104,7 +106,7 @@ tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave 
 
 An entry is `{"site": ..., "pos": ..., "ops": [...]}`, binding `<step>.<entry>` to its value after its ops.
 
-- **An entry with an edit in its ops writes; one without only reads.** The edits are `swap`, `add`, `sub`, `scale`, `noise`, `clamp`, `project_out`, `normalize`, `renormalize`, `decode` and `apply`.
+- **An entry with an edit in its ops writes; one without only reads.** The edits are the `edits` group of `clab describe ops`: `swap`, `add`, `scale`, `noise`, `project_out` and the rest, with a featurizer's `decode` and `apply`.
 - **The arithmetic ops never write.** `mul` by 0 reads a zero and leaves the forward as it was; `scale` with `factor` 0 writes the zero.
 - **A write binds what it wrote**: `patched.patch` is the value left at its selection.
 - **A read leaves the model only when something names it** (`saves`, a later step or entry); an entry nothing names costs nothing.
@@ -161,9 +163,9 @@ tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave 
 ```
 
 - **Inside an entry, edits act on the live value and the last edit's result is written back.** The ops after it shape what the entry binds: `halve` writes half and binds its norm.
-- **Entries at one site compose in the order written**: a read listed before a write sees the old value (`before`), one listed after it the written one (`after`).
+- **Entries on one component and layer compose in the order written, whatever their site names.** A read listed before a write sees the old value (`before`), one listed after it the written one (`after`), under either site name.
 - **Entries at different sites act as the forward reaches them**, whatever order they are listed in: `scored` comes first in every list, and its head entry reads the written run.
-- **Of two writes at one site, the later wins where they overlap.** A freeze that protects a patch goes before it; listed after, it puts the clean value back and every point equals the clean run.
+- **Of two writes on one component and layer, the later wins where they overlap.** A freeze that protects a patch goes before it; listed after, it puts the clean value back and every point equals the clean run.
 - **`mul` by 0 only reads**: `read_only.ld` is the clean run's to the bit.
 - **An edit after an op that changed the layout has no live value to write**, and is refused at compile: `'add' is an edit, which writes back, and it follows 'readout', which turned the value into ['rows', 'pos', 'vocab_size']: there is no live value to write; …`.
 - **An op that aggregates over rows is refused in an entry**, which sees one batch: `'mean' aggregates over rows, and inside an entry it sees one batch; make it a step after the forward`.
@@ -210,7 +212,7 @@ and its null:
 
 ```json
 {
-  "description": "A gradient at a site and its null: the gradient of the logit difference at the head with respect to the residual stream leaving block 6 at the last token, its norm, and the gradient of the same metric times 0, which must be exactly zero.",
+  "description": "A gradient and its null: the logit difference's gradient with respect to block 6's output at the last token, its norm, and the gradient of the metric times 0, which must be exactly zero.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"pairs": {"rows": [
     {"example_id": "mary", "input": "When Mary and John went to the store, John gave a drink to", "io": " Mary", "s": " John"},
@@ -239,7 +241,7 @@ mary        0    13   Ġto        When Mary and John went to the store, John gav
 tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave a…  0.5705670714378357  0.0        Tom    Anna  2.5811233520507812
 ```
 
-- **The null must be exactly 0**: a `grad` of the metric's entry with `{"op": "mul", "with": 0}` appended. A `grad` of the wrong entry still gives a plausible map.
+- **The null must be exactly 0**: a `grad` of the metric's entry with `{"op": "mul", "with": 0}` appended. It proves the gradient is of the entry you zeroed and the wiring exact, not that the entry is the metric you report. A central difference at one point checks that, and real patching of the top points the ranking ([check the gradient](../../clab-patching/references/attribution.md#check-the-gradient)).
 - **Not `scale` 0 for the null**: after a metric it is refused as an edit, and alone at the head it zeroes the logits every later entry reads.
 - **Rows do not mix in a forward**, so each row gets its own gradient.
 - **At one site a `grad` reads as a read does**: listed after a write it differentiates the written value.

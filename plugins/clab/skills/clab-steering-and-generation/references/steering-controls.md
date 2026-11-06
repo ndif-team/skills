@@ -53,9 +53,10 @@ last_median         generated_median    prompt_median      prompt_mean        pr
   too long.
 - **The last prompt token and the generated tokens agree within 12%** here (118.5 and 132.4). A write at
   both entries can share one `typical`; where they differ, scale each entry's vector by its own.
-- **Check the difference against it.** Save `norm` of the mean difference before `normalize`. A difference
-  orders of magnitude below `typical` is rounding, and `normalize` turns it into a unit vector that points
-  nowhere in particular. `normalize` leaves an exactly zero difference at zero, which steers nothing.
+- **Check the difference against it.** Save `norm` of the mean difference before `normalize`. In bfloat16 an
+  element rounds by about 2^-8 of its size, so a difference under about 1% of `typical` can be rounding, which
+  `normalize` turns into a unit vector that points nowhere in particular. An exactly zero difference stays
+  zero and steers nothing.
 
 ## Steering a forward: the effect against the drift
 
@@ -65,7 +66,7 @@ unsteered distribution:
 
 ```json
 {
-  "description": "Steering a forward, with its controls. The direction is the mean residual stream at GPT-2's layer 6, last token, over positive sentences less the mean over negative ones, made unit length; the dose is a fraction of the median norm of the steered prompts' own activations there. `effect` is the mean logit of ' great' less ' terrible' at the last token, `drift` the mean KL of the steered next-token distribution from the unsteered one. `renormed` adds the same vector and then puts back each activation's norm. `random` adds a random direction of the same length at the same doses, drawn at three seeds.",
+  "description": "Steering a forward, with its controls. The direction is the mean residual stream at GPT-2's layer 6, last token, over positive sentences less the mean over negative ones, made unit length. The dose is a fraction of the median norm of the steered prompts' own activations there. `effect` is the mean logit of ' great' less ' terrible' at the last token, `drift` the mean KL of the steered next-token distribution from the unsteered one. `renormed` adds the same vector and then puts back each activation's norm. `random` adds a random direction of the same length at the same doses, drawn at three seeds.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {
     "positive": {"rows": [{"input": "I love this movie. It is wonderful."}, {"input": "What a great day, I am so happy."},
@@ -164,48 +165,16 @@ at                      random_effect       random_drift
   0.5 and 1.46 at 1.0.
 - **Save `typical` and `difference_norm` beside the curve.** Here the difference is a fifth of the
   activation's length (17.8 against 88.0).
+- **Holding a direction's coordinate at a value** is the clamp recipe in the `clab-ablation` skill.
 
 ## A dose by layer grid
 
-Sweep the site's `layers` under its own label; it crosses the `dose`. A fragment of `steer_forward.json`'s
-`sites`:
-
-```json
-{"resid": {"component": "layer_output", "layers": {"sweep": [3, 6, 9], "label": "layer"}}, "head": {"component": "logits"}}
-```
-
-Every read of `resid` follows the layer, so each layer steers along its own difference at its own `typical`.
-Saved as `steer_forward_layers.json` without the `renormed` and `random` steps and the steps that read them,
-`clab table out/steer_forward_layers effect drift`, then `typical difference_norm`, give:
-
-```text
-at                       effect              drift
-{"layer":3,"dose":0.0}   2.464017868041992   0.0
-{"layer":3,"dose":0.5}   4.588262557983398   0.18938933312892914
-{"layer":6,"dose":0.0}   2.464017868041992   0.0
-{"layer":6,"dose":0.5}   5.699560165405273   0.23923064768314362
-{"layer":9,"dose":0.0}   2.464017868041992   0.0
-{"layer":9,"dose":0.5}   9.95606803894043    0.3905811309814453
-
-at           typical             difference_norm
-{"layer":3}  63.220176696777344  7.141604900360107
-{"layer":6}  87.97744750976562   17.7718448638916
-{"layer":9}  171.39151000976562  34.83696746826172
-```
-
-Every dose-0 point equals the unsteered run. Compare layers at matched drift, not matched dose: layer 9's
-larger effect comes with a larger drift. Two sweeps of one field that share a label zip into the diagonal
-instead of a grid ([sweeps](../../clab/references/sweeps.md)).
-
-## Clamping
-
-Clamping holds a value instead of adding to it. To hold an activation's coordinate along a direction at a
-value, write `project_out` and then `add` the unit direction at that length. Elementwise `clamp` bounds every
-element instead:
+Sweep the site's `layers` under its own label, and it crosses the `dose`. Every read of the site follows the
+layer, so each layer steers along its own difference at its own `typical`:
 
 ```json
 {
-  "description": "Clamping. `held` sets each activation's coordinate along the unit sentiment direction (GPT-2, layer 6, last token) to `value`: `project_out` removes the coordinate it has, and `add` puts the direction back at that length. `coord` is the coordinate the clean run has, to set values against. `random_held` holds a random unit direction at the same values. `bounded` clamps every element of the site at every token to [-10000, 10000], wider than anything the site holds (`peak`), so it must equal the clean run.",
+  "description": "A layer by dose grid for steering a forward on GPT-2. At each layer the direction is that layer's mean residual stream at the last token over positive sentences less the mean over negative ones, made unit length. It is scaled to the median norm of the prompts' own activations there. The site's `layers` and the write's dose sweep under two labels, so they cross. `effect` is the mean logit of ' great' less ' terrible', `drift` the mean KL from the unsteered distribution, and `clean_effect` the unsteered logit difference.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {
     "positive": {"rows": [{"input": "I love this movie. It is wonderful."}, {"input": "What a great day, I am so happy."},
@@ -217,76 +186,119 @@ element instead:
     "prompts": {"rows": [{"input": "The food at the restaurant was"}, {"input": "My trip to the beach was"},
                          {"input": "The new phone I bought is"}, {"input": "The concert last night was"}]}
   },
-  "sites": {"resid": {"component": "layer_output", "layers": 6}, "head": {"component": "logits"}},
+  "sites": {"resid": {"component": "layer_output", "layers": {"sweep": [3, 6, 9], "label": "layer"}}, "head": {"component": "logits"}},
   "steps": {
     "pos_h": {"kind": "forward", "input": "positive.input", "interventions": {"r": {"site": "resid", "pos": -1}}},
     "neg_h": {"kind": "forward", "input": "negative.input", "interventions": {"r": {"site": "resid", "pos": -1}}},
     "pos_mean": {"kind": "op", "op": "mean", "of": "pos_h.r"},
     "neg_mean": {"kind": "op", "op": "mean", "of": "neg_h.r"},
     "difference": {"kind": "op", "op": "sub", "of": "pos_mean", "with": "neg_mean"},
+    "difference_norm": {"kind": "op", "op": "norm", "of": "difference"},
     "direction": {"kind": "op", "op": "normalize", "of": "difference"},
-    "zero": {"kind": "op", "op": "scale", "of": "difference", "factor": 0.0},
-    "draw": {"kind": "op", "op": "noise", "of": "zero", "scale": 1.0, "seed": 7},
-    "random_unit": {"kind": "op", "op": "normalize", "of": "draw"},
-    "base": {"kind": "forward", "input": "prompts.input", "interventions": {
-      "r": {"site": "resid", "pos": -1}, "all": {"site": "resid", "pos": {"index": ":"}}, "logits": {"site": "head", "pos": -1}}},
-    "coord": {"kind": "op", "op": "dot", "of": "base.r", "with": "direction"},
-    "magnitudes": {"kind": "op", "op": "abs", "of": "base.all"},
-    "peak": {"kind": "op", "op": "max", "of": "magnitudes", "over": ["rows", "pos", "hidden_size"]},
-    "held": {"kind": "forward", "input": "prompts.input", "interventions": {
-      "hold": {"site": "resid", "pos": -1, "ops": [
-        {"op": "project_out", "direction": "direction"},
-        {"op": "add", "with": "direction", "scale": {"sweep": [-20.0, 0.0, 20.0, 40.0], "label": "value"}}]},
+    "base": {"kind": "forward", "input": "prompts.input",
+             "interventions": {"r": {"site": "resid", "pos": -1}, "logits": {"site": "head", "pos": -1}}},
+    "lengths": {"kind": "op", "op": "norm", "of": "base.r"},
+    "typical": {"kind": "op", "op": "median", "of": "lengths"},
+    "unit_dose": {"kind": "op", "op": "scale", "of": "direction", "factor": "typical"},
+    "steered": {"kind": "forward", "input": "prompts.input", "interventions": {
+      "steer": {"site": "resid", "pos": -1,
+                "ops": [{"op": "add", "with": "unit_dose", "scale": {"sweep": [0.0, 0.25, 0.5, 1.0], "label": "dose"}}]},
       "logits": {"site": "head", "pos": -1}}},
-    "random_held": {"kind": "forward", "input": "prompts.input", "interventions": {
-      "hold": {"site": "resid", "pos": -1, "ops": [
-        {"op": "project_out", "direction": "random_unit"},
-        {"op": "add", "with": "random_unit", "scale": {"sweep": [-20.0, 0.0, 20.0, 40.0], "label": "value"}}]},
-      "logits": {"site": "head", "pos": -1}}},
-    "bounded": {"kind": "forward", "input": "prompts.input", "interventions": {
-      "clamp": {"site": "resid", "pos": {"index": ":"}, "ops": [{"op": "clamp", "min": -10000.0, "max": 10000.0}]},
-      "logits": {"site": "head", "pos": -1}}},
-    "ld_clean": {"kind": "op", "op": "logit_diff", "of": "base.logits", "a": {"text": " great"}, "b": {"text": " terrible"}},
-    "ld": {"kind": "op", "op": "logit_diff", "of": "held.logits", "a": {"text": " great"}, "b": {"text": " terrible"}},
-    "random_ld": {"kind": "op", "op": "logit_diff", "of": "random_held.logits", "a": {"text": " great"}, "b": {"text": " terrible"}},
-    "clean_effect": {"kind": "op", "op": "mean", "of": "ld_clean"},
+    "clean_ld": {"kind": "op", "op": "logit_diff", "of": "base.logits", "a": {"text": " great"}, "b": {"text": " terrible"}},
+    "clean_effect": {"kind": "op", "op": "mean", "of": "clean_ld"},
+    "ld": {"kind": "op", "op": "logit_diff", "of": "steered.logits", "a": {"text": " great"}, "b": {"text": " terrible"}},
     "effect": {"kind": "op", "op": "mean", "of": "ld"},
-    "random_effect": {"kind": "op", "op": "mean", "of": "random_ld"},
-    "bounded_kl": {"kind": "op", "op": "kl", "of": "bounded.logits", "against": "base.logits"},
-    "bounded_drift": {"kind": "op", "op": "max", "of": "bounded_kl"}
+    "kl": {"kind": "op", "op": "kl", "of": "steered.logits", "against": "base.logits"},
+    "drift": {"kind": "op", "op": "mean", "of": "kl"}
   },
-  "saves": ["coord", "peak", "clean_effect", "effect", "random_effect", "bounded_drift"]
+  "saves": ["clean_effect", "effect", "drift", "typical", "difference_norm"]
 }
 ```
 
-`clab table out/clamp_direction coord`, `peak clean_effect bounded_drift`, then `effect random_effect`:
+`clab table out/steer_grid effect drift`, then `typical difference_norm`:
 
 ```text
-row  pos  pos_token  input                           value
-0    5    Ġwas       The food at the restaurant was  8.662490844726562
-3    4    Ġwas       The concert last night was      6.308996200561523
+at                       effect              drift
+{"layer":3,"dose":0.0}   2.464017868041992   0.0
+{"layer":3,"dose":0.25}  3.466856002807617   0.050004735589027405
+{"layer":3,"dose":0.5}   4.588262557983398   0.18938933312892914
+{"layer":3,"dose":1.0}   6.064092636108398   0.9432028532028198
+{"layer":6,"dose":0.0}   2.464017868041992   0.0
+{"layer":6,"dose":0.25}  4.283960342407227   0.0722854882478714
+{"layer":6,"dose":0.5}   5.699560165405273   0.23923064768314362
+{"layer":6,"dose":1.0}   7.118005752563477   0.7412769794464111
+{"layer":9,"dose":0.0}   2.464017868041992   0.0
+{"layer":9,"dose":0.25}  6.67633056640625    0.1484648734331131
+{"layer":9,"dose":0.5}   9.95606803894043    0.3905811309814453
+{"layer":9,"dose":1.0}   14.611265182495117  0.8766814470291138
 
-peak              clean_effect       bounded_drift
-2941.27197265625  2.464017868041992  0.0
-
-at               effect                random_effect
-{"value":-20.0}  -0.28934288024902344  2.381826400756836
-{"value":0.0}    1.402557373046875     2.4605369567871094
-{"value":20.0}   3.7410240173339844    2.515045166015625
-{"value":40.0}   5.111673355102539     2.5761489868164062
+at           typical             difference_norm
+{"layer":3}  63.220176696777344  7.141604900360107
+{"layer":6}  87.97744750976562   17.7718448638916
+{"layer":9}  171.39151000976562  34.83696746826172
 ```
 
-- **Set the values against `coord`.** The clean coordinates run from 6.3 to 8.7, so 20 and 40 push past
-  anything the prompts hold and -20 reverses the sign.
-- **The control is a random direction held at the same values**: its effect stays within 0.12 of the clean
-  2.464 at every value, where the sentiment direction spans -0.29 to 5.11.
-- **Holding at 0 is the direction projected out**, an ablation; the `clab-ablation` skill owns that recipe at
-  every layer.
-- **`clamp` bounds each element** to `[min, max]` and takes one bound or both. Read the site first and set the
-  bounds from what it holds: GPT-2's layer 6 reaches 2,941 in magnitude. Bounds outside that range are the
-  null, and `bounded_drift` is exactly 0.0.
-- **Holding an SAE feature or another featurizer's coordinate** goes between an `encode` and its `decode`:
-  the `clab-trained-featurizers` skill.
+- **Every dose-0 point is the null**: `effect` equals `clean_effect`, 2.464, and `drift` is exactly 0.0 at each
+  layer.
+- **Compare layers at matched drift, not matched dose.** Near 0.15 to 0.19 nats, layer 9 at dose 0.25 moves the
+  effect to 6.68 and layer 3 at dose 0.5 to 4.59.
+- **`clab show out/steer_grid` lists the axes `layer, dose`** for `effect` and `drift`, 12 points. Sweeps
+  that share a label are one axis and pair their points instead
+  ([sweeps](../../clab/references/sweeps.md#labels-zip-or-cross)).
+
+## Counts, whole words and a control at one dose
+
+`mean` of a row score is the fraction of replies, and `sum` the count. Two fragments of
+`steer_generation.json`, the skill's main recipe: an entry added to the `steered` step's `interventions`, then
+steps that replace `random` with a control at dose 1.0 alone and count:
+
+```json
+{"cheer_word": {"site": "resid", "pos": {"frame": "1:", "index": -1,
+  "scope": {"text": ["glad", "happy", "delight", "beautiful", "wonderful", "love"], "lower": true, "before": true}}}}
+```
+
+```json
+{
+  "random": {"kind": "generate", "input": "qa.chat", "max_new_tokens": 16, "min_new_tokens": 16, "do_sample": false,
+    "interventions": {
+      "prompt": {"site": "resid", "pos": -1, "ops": [{"op": "add", "with": "random_dose", "scale": 1.0}]},
+      "decode": {"site": "resid", "pos": {"frame": "1:"}, "ops": [{"op": "add", "with": "random_dose", "scale": 1.0}]}}},
+  "cheer_count": {"kind": "op", "op": "sum", "of": "cheer_row"},
+  "random_cheer_count": {"kind": "op", "op": "sum", "of": "random_cheer_row"},
+  "word_row": {"kind": "op", "op": "count", "of": "steered.cheer_word", "over": ["pos"]},
+  "word_count": {"kind": "op", "op": "sum", "of": "word_row"}
+}
+```
+
+Saved as `steer_counts.json` with the new steps and `cheer_row` added to `saves`, `clab table out/steer_counts
+cheer_count word_count random_cheer_count`, then `cheer_row word_row` at dose 1.0:
+
+```text
+at            cheer_count  word_count  random_cheer_count
+{"dose":0.0}  0.0          0.0         1.0
+{"dose":0.5}  5.0          5.0         1.0
+{"dose":1.0}  5.0          3.0         1.0
+{"dose":2.0}  0.0          0.0         1.0
+
+at            example_id  row  chat                                              cheer_row  alignment_missing  word_row
+{"dose":1.0}  japan       1    [{"role":"user","content":"What is the capital …  1.0                           1.0
+{"dose":1.0}  italy       2    [{"role":"user","content":"What is the capital …  1.0        true
+{"dose":1.0}  germany     3    [{"role":"user","content":"What is the capital …  1.0        true
+```
+
+- **A control at one dose takes its own label, or none.** Under the steer's label, `{"sweep": [1.0], "label":
+  "dose"}` is refused: `label 'dose' is also the sweep at steps.steered.interventions.prompt.ops.0.scale, over
+  [0.0, 0.5, 1.0, 2.0]; one label is one axis, whose sweeps pair their points`.
+- **A plain `"scale": 1.0` repeats the control on every `dose` row**, so the counts per dose and the control
+  share one table. Its own label (`rdose`) crosses the axes instead, and every row's key holds both:
+  `{"dose":0.5,"rdose":1.0}`.
+- **`contains` matches substrings**: `delight` scores Italy's and Germany's "I'm delighted" and "I am
+  delighted". A short word scores inside a longer one, as ` dark` does in "darkness" in the skill's scoring recipe.
+- **A scope matches whole words**, so `word_count` is 3 where `cheer_count` is 5. List every form a whole-word
+  read should count (`delighted` beside `delight`).
+- **`count` is 0 on a row the read missed**, printed blank and flagged `alignment_missing`, so `sum` counts the
+  replies. `before` with `index: -1` reads the call that chose the word's last token, which also reaches a word
+  on the row's last generated token.
 
 ## Steering the prompt alone
 

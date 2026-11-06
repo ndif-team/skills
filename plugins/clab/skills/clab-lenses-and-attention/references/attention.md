@@ -1,8 +1,9 @@
 # Reading attention
 
-Where one head looks, the checks that a read is a pattern, the weight on a word that moves by row, and queries
-after RoPE. Every document here loads the model with `"attn_implementation": "eager"`; the stripes over every head
-are in [SKILL.md](../SKILL.md). Each runs on the CPU in seconds.
+Where one head looks, the checks that a read is a pattern, the correct next token at each position of a repeat,
+the weight on a word that moves by row, and queries after RoPE. Every document that reads attention loads the model
+with `"attn_implementation": "eager"`; the stripes over every head are in [SKILL.md](../SKILL.md). Each runs on the
+CPU in seconds.
 
 ## What breaks
 
@@ -112,6 +113,75 @@ r0          0    39   Ġstereo    20   Ġpalm       palm printf bailout heads sm
 `clab table --csv out/attention_pattern run.focus` gives each layer-6 head's entropy at the last query. Head 9
 is at 0.13 to 0.35 nats on the three rows, the other heads at 0.82 to 3.09: a focused head has low entropy.
 
+## The correct next token at each position
+
+On the repeated words each query of the second copy has its own correct next token, the word after it in the first
+copy. One read scores them all against a shifted column: a text column holding, on each row, the tokens the read's
+positions predict. `token_prob` scores the read's position i against the column's token i (the `clab` skill's
+[answer columns](../../clab/references/data.md#answer-columns)).
+
+```json
+{
+  "description": "The correct next token at every position, on the repeated random words of attention_stripes.json. Each row's `next` column is its words 2 to 20: the tokens queries 0 to 18 predict on the first copy, and queries 20 to 38 on the second. `token_prob` scores the read's position i against the column's token i. The first copy is unpredictable; the second can be copied from the first.",
+  "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
+  "data": {
+    "seqs": {"rows": [
+      {"example_id": "r0", "input": " palm printf bailout heads smarter seeded plaster labour salv mystery tropes floral sixty dart indemn dated chats weighed guiding stereo palm printf bailout heads smarter seeded plaster labour salv mystery tropes floral sixty dart indemn dated chats weighed guiding stereo", "next": " printf bailout heads smarter seeded plaster labour salv mystery tropes floral sixty dart indemn dated chats weighed guiding stereo"},
+      {"example_id": "r1", "input": " varies deliber leaps chores buds mamm rulers tended cited motif races lightly voters fascism tackles sanct recal spends heavier bonding varies deliber leaps chores buds mamm rulers tended cited motif races lightly voters fascism tackles sanct recal spends heavier bonding", "next": " deliber leaps chores buds mamm rulers tended cited motif races lightly voters fascism tackles sanct recal spends heavier bonding"},
+      {"example_id": "r2", "input": " swat alleg chap physi wishing aborted wait shall marked grad lousy books estates thumb footage glac decency sudo regener cents swat alleg chap physi wishing aborted wait shall marked grad lousy books estates thumb footage glac decency sudo regener cents", "next": " alleg chap physi wishing aborted wait shall marked grad lousy books estates thumb footage glac decency sudo regener cents"}
+    ]}
+  },
+  "sites": {"head": {"component": "logits"}},
+  "steps": {
+    "run": {
+      "kind": "forward",
+      "input": "seqs.input",
+      "interventions": {
+        "first": {"site": "head", "pos": {"index": "0:19"}},
+        "second": {"site": "head", "pos": {"index": "20:39"}}
+      }
+    },
+    "p_first": {"kind": "op", "op": "token_prob", "of": "run.first", "token": "seqs.next"},
+    "p_second": {"kind": "op", "op": "token_prob", "of": "run.second", "token": "seqs.next"},
+    "mean_first": {"kind": "op", "op": "mean", "of": "p_first"},
+    "mean_second": {"kind": "op", "op": "mean", "of": "p_second"}
+  },
+  "saves": ["p_first", "p_second", "mean_first", "mean_second"]
+}
+```
+
+```bash
+clab run documents/next_token.json
+clab table out/next_token mean_first mean_second
+clab table out/next_token p_second
+```
+
+```text
+mean_first              mean_second
+1.3536184269469231e-05  0.6893020272254944
+```
+
+```text
+example_id  row  pos  pos_token  input                                             next                                              value
+r0          0    20   Ġpalm       palm printf bailout heads smarter seeded plast…   printf bailout heads smarter seeded plaster la…  0.009316667914390564
+r0          0    21   Ġprintf     palm printf bailout heads smarter seeded plast…   printf bailout heads smarter seeded plaster la…  0.15155872702598572
+r0          0    22   Ġbailout    palm printf bailout heads smarter seeded plast…   printf bailout heads smarter seeded plaster la…  0.723340630531311
+r0          0    38   Ġguiding    palm printf bailout heads smarter seeded plast…   printf bailout heads smarter seeded plaster la…  0.9937060475349426
+```
+
+- **The shift:** position 20, the second copy's ` palm`, scores ` printf`. Queries 0 to 18 of the first copy
+  predict the same words, so one column serves both reads.
+- **The first copy is the control:** random words are unpredictable there, 1.4e-5 on average, against 0.69 on the
+  second copy.
+- **A column of another length is refused by row:** the second copy's own 20 words against these 19 positions give
+  `seqs.next row 0: ' palm printf … stereo' is 20 tokens; the read has 19 positions on that row; …`.
+- **An unshifted column of the right length is not refused.** Those 20 words read at queries 20 to 39 score each
+  position against the token it reads: 0.00025, where the shifted column gives 0.69.
+- **Table the two reads apart.** Their positions differ, so `clab table out/next_token p_first p_second` prints
+  a blank line.
+
+Knocking out an induction head and scoring this read is the `clab-ablation` skill's.
+
 ## A word that moves by row
 
 A `key` counted from the start, and an offset from the query, both miss a word at a different position on each
@@ -120,7 +190,7 @@ Its record holds where the word landed on each row, and that position is the wor
 
 ```json
 {
-  "description": "How much the last token attends to the subject, a word at a different position on each row. `pattern` is every head of every layer at the last query, over the whole key axis; `entity` is a marker: a read scoped on the subject's last token that no step names, whose record holds where that token is on each row, the key to index the pattern at.",
+  "description": "How much the last token attends to the subject, a word at a different position on each row. `pattern` is every head of every layer at the last query, over the whole key axis. `entity` is a marker, a read scoped on the subject's last token that no step names. Its record holds where that token is on each row: the key to index the pattern at.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32", "attn_implementation": "eager"},
   "data": {
     "facts": {"rows": [

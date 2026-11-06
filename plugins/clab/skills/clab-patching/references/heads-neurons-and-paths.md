@@ -12,11 +12,9 @@ John gave a drink to" answers ` Mary`, and the counterfactual ("…, Mary gave a
   site each point wrote, in the manifest (below).
 - **An operand from a narrowed site must hold the write's heads in the write's order.** Declare one site and
   name it in both the read and the write, and the two agree by construction.
-- **`layers` on a write is a sweep, not a selector**: a slice on a head write patches that head at every layer
-  at once.
-- **`attention_probabilities` and `attention_queries` need `"attn_implementation": "eager"` in the model
-  block.** Eager moves the last bits downstream (clean IOI −2.936779022216797 against −2.9367809295654297), so
-  compare runs under one implementation.
+- **`attention_probabilities` and `attention_queries` need eager attention**
+  ([sites and interventions](../../clab/references/sites-and-interventions.md#attention-needs-eager));
+  compare runs under one implementation, since eager moves the last bits.
 - **A pattern swapped between prompts of different lengths is refused**, since key k must be the same token on
   both sides:
 
@@ -24,9 +22,9 @@ John gave a drink to" answers ` Mary`, and the counterfactual ("…, Mary gave a
   clab: patched.look_there at layers=9,num_heads=0: operand 'counterfactual.their_pattern' was read on pairs.counterfactual, row 0 of which is 9 tokens; pairs.input has 10 there, so their key axes do not line up
   ```
 
-- **On a gated MLP, `mlp_activation` (`act(gate x)`) and `mlp_neurons` (what the down projection sums) differ.**
-  On `HuggingFaceTB/SmolLM2-135M-Instruct`, layer 20, neurons `"0:768"`, they give −1.0720 and −1.1182. On
-  GPT-2's plain MLP they are equal to the bit. Say which one a result patched.
+- **On a gated MLP, `mlp_activation` (`act(gate x)`) and `mlp_neurons` (what the down projection sums) differ**,
+  and patching one moves the logits differently from patching the other (on SmolLM2-135M-Instruct). On GPT-2's
+  plain MLP the two patches are equal to the bit. Say which one a result patched.
 
 ## One head at a time
 
@@ -86,8 +84,7 @@ what attention adds to the stream. Sweeping `layers` and `num_heads` crosses the
 ```
 
 The clean run puts the indirect object on top on all 8 rows (`clean_top` 1.0; `clean_ld` −2.01 to −4.08, mean
-−2.9367809295654297). The null takes an earlier entry of its own forward as the operand. One `counterfactual`
-forward serves all 144 points; `null` and `patched` run one per point, under a minute on a CPU.
+−2.9367809295654297). The null's operand is an earlier entry of its own forward.
 
 ```text
 $ clab table out/head_patching ld_mean null_mean
@@ -125,14 +122,14 @@ for (layer, head), e in ranked[:5] + ranked[-2:]:
 ```
 
 These are GPT-2's known IOI heads: 7.3, 7.9, 8.6 and 8.10 (S-inhibition) and 9.9 (a name mover) push toward the
-counterfactual's name, and 10.7 and 11.10 (negative name movers) push against it.
+counterfactual's name, and 10.7 and 11.10 (negative name movers) push against it. The signed order separates the
+two; sort by `abs(e)` for the heads that matter most either way, 10.7 first.
 
 **Check where a head write landed.** The compiled entry's `site` at each point is in the manifest:
 
 <!-- test: skip -->
 ```python
 from clab import Plan
-
 for point in Plan.load("out/head_sets").steps["set9"]:
     print(point.at, point.interventions["patch"].site)
 ```
@@ -183,6 +180,7 @@ value
 
 The four S-inhibition heads together move the mean logit difference from −2.94 to +1.99, flipping the answer.
 Their separate effects sum to +3.55 and together they give +4.93: a set's effect is a finding of its own.
+Chosen heads patched one at a time are one site per head ([attribution](attribution.md#confirm-the-top-points)).
 
 ## Neurons
 
@@ -237,15 +235,17 @@ at                                 ld_mean              null_mean
 - **The null equals the clean run** at every block.
 - **Layer 9's MLP at the last token carries part of the answer**: +0.95 of the logit difference, spread over
   every quarter (+0.08 to +0.41 each).
-- To rank single neurons, use attribution ([attribution](attribution.md)) and patch the survivors.
+- **To rank single neurons**, use [attribution](attribution.md#one-prompt-no-counterfactual), on a pair or one
+  prompt. Neurons in several layers are one site per layer, since a `select` applies at every layer it picks.
 
 ## Path patching
 
 Patching head h measures everything h changes downstream, including what later heads make of it. Path patching
 keeps one path, h's effect on the logits through no other head. Read every head's `attention_premix` at the
 last token on the clean prompt (`layers: ":"`). In the patched forward, list a freeze that swaps it back, then
-the patch of head h: entries at one site compose in order, so the patch overrides the freeze at h alone. The
-MLPs and the residual stream recompute.
+the patch of head h. Entries on the same component and layers compose in the order written, whatever their site
+names, so the patch (`one_head`) overrides the freeze (`every_head`) at h alone, and a read listed after both
+sees the patched value. The MLPs and the residual stream recompute.
 
 This fragment is the `sites`, `interventions` and `steps` of `documents/path_patching.json`, whose `model` and
 `data` are those of `documents/head_patching.json`:
@@ -285,8 +285,7 @@ This fragment is the `sites`, `interventions` and `steps` of `documents/path_pat
 
 Each forward's `ld` is averaged in a `mean` step named for it (`clean_mean`, `frozen_mean`, `path_mean`,
 `path_null_mean`, `plain_mean`, `wrong_mean`), and those are the saves. The counterfactual reads
-`every_layer`, and each point of the patch takes the slice labelled with its layer. The freeze is the same at
-every point, so it needs no sweep.
+`every_layer`, and each point of the patch takes the slice labelled with its layer.
 
 ```text
 $ clab table out/path_patching clean_mean frozen_mean

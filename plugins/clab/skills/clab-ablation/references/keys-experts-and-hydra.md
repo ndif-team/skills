@@ -1,4 +1,4 @@
-# Keys, patterns, the hydra document and experts
+# Keys, patterns, the hydra effect and experts
 
 Attention knockout and the hydra effect run on `openai-community/gpt2` and the six IOI prompts of the skill.
 Expert ablation runs on `hf-internal-testing/tiny-random-MixtralForCausalLM`, whose weights are random: its
@@ -14,7 +14,7 @@ need `"attn_implementation": "eager"`.
 
 ```json
 {
-  "description": "Attention knockout on GPT-2's IOI prompts under eager attention: the last token stops attending to the keys at positions 1 and 3 (the two names on every row) at every head of layers 9 to 11, through the scores (-1e9 before the softmax) and through the pattern (zeroed, then each row rescaled to sum to 1). Key 6 (' the' on every row) is the control the task does not read. p reads the pattern after the writes. head_pattern zeroes head 10.7's pattern at the last token and head_premix its premix there.",
+  "description": "Attention knockout on GPT-2's IOI prompts under eager attention. At every head of layers 9 to 11 the last token stops attending to keys 1 and 3, the two names on every row. by_scores writes -1e9 before the softmax; by_pattern zeroes the pattern there and rescales each row to sum to 1. Key 6 (' the' on every row) is the control the task does not read. p reads the pattern after the writes. head_pattern zeroes head 10.7's pattern at the last token and head_premix its premix there.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32",
             "attn_implementation": "eager"},
   "data": {"ioi": {"rows": [
@@ -84,16 +84,17 @@ row  pos  pos_token  input                                             answer  o
 - **Zeroing a head's whole pattern removes what it moves there**: `head_pattern` and `head_premix` agree to
   the bit on every row. Under eager the numbers differ from an sdpa run in the last bits (clean 2.7463226
   here, 2.7463291 under sdpa); compare runs under one implementation.
-- **Under sdpa these components are refused** before any forward: `the nnterp engine does not serve
-  attention_probabilities: read inside the eager attention forward, but this model runs 'sdpa'; load with
-  attn_implementation='eager'`.
+- **Under sdpa these components are refused** before any forward ([eager](../../clab/references/sites-and-interventions.md#attention-needs-eager)).
 
 Reading a pattern, stripes and induction heads are the `clab-lenses-and-attention` skill; swapping in another
 prompt's pattern is the `clab-patching` skill. Components and their axes: `clab describe components`.
 
-## The hydra effect in full
+## The hydra effect
 
-The document the skill's [hydra section](../SKILL.md#the-hydra-effect) reads, with its table there.
+When a component is ablated, later ones can change what they write to make up for it, so the drop in the
+total understates what it did. Measure each later layer's direct effect, clean and ablated, in the same run:
+the logit difference less the logit difference with that layer's attention output subtracted from the final
+residual stream.
 
 ```json
 {
@@ -137,6 +138,25 @@ The document the skill's [hydra section](../SKILL.md#the-hydra-effect) reads, wi
 }
 ```
 
+```text
+$ clab run documents/hydra.json
+$ clab table out/hydra clean_ld ablated_ld de_c de_a
+at                              clean_ld            ablated_ld          de_c                  de_a
+{"fill":"mean9","layer":9}      2.7463290691375732  2.6409759521484375  2.6578826904296875    0.48196282982826233
+{"fill":"mean9","layer":10}     2.7463290691375732  2.6409759521484375  -0.24392573535442352  1.8836288452148438
+{"fill":"mean9","layer":11}     2.7463290691375732  2.6409759521484375  -3.237017869949341    -3.1121113300323486
+{"fill":"clean.a9","layer":9}   2.7463290691375732  2.7463290691375732  2.6578826904296875    2.6578826904296875
+{"fill":"clean.a9","layer":10}  2.7463290691375732  2.7463290691375732  -0.24392573535442352  -0.24392573535442352
+{"fill":"clean.a9","layer":11}  2.7463290691375732  2.7463290691375732  -3.237017869949341    -3.237017869949341
+```
+
+- **Read it as a balance.** The total effect is 2.75 - 2.64 = 0.11. Layer 9's attention lost 2.18 of its
+  direct effect (2.66 to 0.48), and layer 10's attention gained 2.13 (-0.24 to 1.88): it compensates.
+- **The null** (`fill` = `clean.a9`) gives every direct effect its clean value and `ablated_ld` the clean
+  run's, to the bit.
+- **`ablated.a` is read under the ablation**, and a later forward subtracts it: a read inside an intervened
+  forward is an operand like any other. At layer 9 it reads the written mean, listed after the write there.
+- **The direct effect goes through the final norm**, so the layers' direct effects do not sum to the total.
 - **Sweeps that share a label pair their points**, so `fill` in `ablated` and `ablated_off` is one axis, and
   each point's `ablated.a` meets that point's `ablated_off`. `probe`'s `layer` crosses it.
 - **A head's own direct effect** needs its contribution to the stream, which no component holds; this
@@ -152,7 +172,7 @@ add nothing, and nothing renormalizes the others.
 
 ```json
 {
-  "description": "Expert knockout, the forced route, routing usage and entropy on the tiny random Mixtral (2 blocks, 4 experts, 2 per token). At block 0, clean reads at the 15 tokens every prompt has which slots did not choose expert e (ne, swept over the experts), the same mask for id 4, which no slot holds (the null), how many slots chose e per row, each token's routing entropy, and block 1's routing. knockout scales every slot's weight by its mask; null scales by the all-ones mask; forced writes -1e9 into expert e's router logit. Each scores the KL of the last token's next-token distribution from the clean run's. Random weights: the numbers show the mechanics only.",
+  "description": "Expert knockout, the forced route, routing usage and entropy on the tiny random Mixtral (2 blocks, 4 experts, 2 per token). At block 0, clean reads at the 15 tokens every prompt has a mask of the slots that did not choose expert e (ne, swept over the experts). It also reads the same mask for id 4, which no slot holds (the null), how many slots chose e per row, each token's routing entropy, and block 1's routing. knockout scales every slot's weight by its mask; null scales by the all-ones mask; forced writes -1e9 into expert e's router logit. Each scores the KL of the last token's next-token distribution from the clean run's. Random weights: the numbers show the mechanics only.",
   "model": {"key": "hf-internal-testing/tiny-random-MixtralForCausalLM", "revision": "ccb12fe2fc142cb752085506c3db22572290e90c", "dtype": "float32"},
   "data": {"prompts": {"rows": [
     {"input": "When Mary and John went to the store, John gave a drink to"},
@@ -239,6 +259,11 @@ null_kl  entropy
   is uniform (1.377 on average here). It is the routing distribution's only on a softmax router.
 - **Read `expert_weights` for what multiplies each slot**, rather than recomputing it from the logits:
   whether a family renormalizes its top k is the family's.
+- **Read what the experts write** where the question is what an expert adds, not whether it was chosen.
+  `expert_outputs` is each slot's expert output times its weight, `[rows, pos, top_k, hidden_size]`, for
+  what each chosen expert adds to a token. `routed_output` is their sum over `top_k`, without the shared
+  expert, for what the routed experts add together. `shared_expert_output` is the shared expert's own, to
+  split the MLP's write between the two; on a mixture with none, as here, it is refused by name.
 
 Run expert ablations on the nnterp engine, the default; which values each engine serves is the `clab` skill's
 [running and engines](../../clab/references/running-and-engines.md) reference. Components: `clab describe

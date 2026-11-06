@@ -13,7 +13,7 @@ Every key but `kind`, `input` and `interventions` goes to the engine's `generate
 - **`max_new_tokens`** is the most new tokens a row gets; a write over a frame that runs to the row's end (`"2:"`) needs it.
 - **`min_new_tokens`** holds EOS off until a row has that many; equal to `max_new_tokens`, every row makes the same calls.
 - **`eos_token_id`** is the id, or ids, a row stops on; without it, the generation config's.
-- **Options that would change the rows, the value or the calls are refused at compile**: `num_return_sequences`, `num_beams`, `return_dict_in_generate`, `use_cache`, `prefill_chunk_size` (`steps.plain: num_beams 2; it stays 1: beams change the rows each forward call sees, …`).
+- **Options that would change the rows, the value or the calls are refused at compile**, by name: `num_beams` and `num_return_sequences` among them (`steps.plain: num_beams 2; it stays 1: beams change the rows each forward call sees, …`).
 - **A parameter of `generate` itself is refused**: `'generation_config' is a parameter of generate itself, …`; so is a value of the wrong type, `"max_new_tokens": "6"`.
 - **There is no `seed` option**; one the engine rejects fails when the step runs, naming the step.
 - **A generation repeats only at one batch size**, as a forward does ([running and engines](running-and-engines.md#when-two-runs-give-the-same-numbers)).
@@ -42,7 +42,7 @@ A row's calls are the prefill, then one decode call per new token but the last. 
 
 ```json
 {
-  "description": "Greedy generation on GPT-2 read at its calls: the first word's probability at the prefill and every decode call, the probability of each token of the expected word as the call that chose it saw it, the decode calls each row made, the text and whether it holds the word, how many rows the word's scope reached, and a generation that stops at its first comma.",
+  "description": "Greedy generation on GPT-2 read at its calls: the first word's probability at each call, and each expected token's at the call that chose it. Also the calls each row made, the text and whether it holds the word, the rows the scope reached, and a generation stopped at its first comma.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"prompts": {"rows": [
     {"example_id": "eiffel", "input": "The Eiffel Tower is in the city of", "said": " Paris", "first": " Paris"},
@@ -100,8 +100,7 @@ value
 - **`p_first` at `{"frame": ":"}` is one probability per call**, `[3, 6]`: the prefill's last position, then each generated input.
 - **`conf` reads the calls that chose each token of the expected word**: for ` San Francisco`, call 0 chose `ĠSan` at 0.54 and call 1 `ĠFrancisco` at 0.90. Its table is in [positions](positions.md#rows-a-scope-never-reached).
 - **`count` of a read at `{"frame": "1:"}` is the decode calls each row made**: five for six new tokens.
-- **Row 2 never says Moscow**, so `conf` is `alignment_missing` there; the table flags the row and prints no count, though the saved count is 0.
-- **`rows_reached` counts rows**: `count`, `gt` 0, `sum`. A `count` over `["rows", "pos"]` of `conf` gives 3.0, the positions.
+- **Row 2 never says Moscow**, so `conf` is `alignment_missing` there, and `rows_reached` counts the two rows it reached, as [positions](positions.md#rows-a-scope-never-reached) explains.
 
 ### Where the ops run
 
@@ -138,7 +137,7 @@ on through the whole generation, and writes where a row says a word:
 
 ```json
 {
-  "description": "Writes during a greedy generation on GPT-2: the residual stream leaving block 6 scaled down at the prompt's last token and at every decode call, and zeroed at the call fed each row's first word, found as the row generates it.",
+  "description": "Writes during a greedy generation on GPT-2: block 6's output scaled down at the prompt's last token and every decode call, and zeroed at the call fed each row's first word, found as the row generates it.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"prompts": {"rows": [
     {"example_id": "eiffel", "input": "The Eiffel Tower is in the city of", "first": " Paris"},

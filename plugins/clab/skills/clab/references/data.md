@@ -11,7 +11,7 @@ A dataset has exactly one source; two are refused.
 | source | holds | note |
 |---|---|---|
 | `"rows": [...]` | the rows, inline | they travel in the plan and the manifest, so a run's table reads them back from anywhere |
-| `"path": "ioi/train"` | `data/ioi/train.json` under the corpus root, a JSON list of row objects | the corpus root is the nearest directory above the document that holds `data/` |
+| `"path": "ioi/train"` | `data/ioi/train.json` under the corpus root, a JSON list of row objects | the corpus root is in [where output goes](running-and-engines.md#where-output-goes) |
 | `"hf": "<owner>/<name>"` | a hub dataset at a required `revision` (a commit), with `config` and `split` | offline, it loads from the `datasets` cache one online load filled |
 
 A fragment of a `data` block with the two other sources:
@@ -114,7 +114,7 @@ write `"<dataset>.<column>"`, a reference with flags, or a literal:
 
 ```json
 {
-  "description": "How an answer column becomes tokens on GPT-2's byte-level tokenizer: the first word as the model continues the prompt and without its space, a set of words with and without strip and lower, a literal; then the whole answer appended to the prompt and scored token by token.",
+  "description": "How an answer column becomes tokens on GPT-2's byte-level tokenizer: the first word with and without its space, a set with and without strip and lower, and a literal. Then the whole answer appended to the prompt, scored token by token.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"facts": {"rows": [
     {"example_id": "eiffel", "input": "The Eiffel Tower is in the city of", "answer": " Paris",
@@ -179,7 +179,7 @@ no chat template; the fragment below is a `data` block for a checkpoint that has
 - **`template` is passed to the checkpoint's `apply_chat_template` as arguments** wherever a chat of that dataset renders; a `template` on a dataset no step reads as a chat is refused.
 - **Without `add_generation_prompt`** the prompt ends with the template's close of the last message, and `pos: -1` is that close's last token.
 - **With it** the prompt ends with the assistant's header, so a `generate` continues as the assistant: on SmolLM2 the rendering grows from 51 to 55 tokens, ending `<|im_start|> ass istant Ċ`.
-- **A template may write messages the row does not have.** SmolLM2's adds a system message when the chat has none; check the rendering in `run.tokens` (`tokens.json`).
+- **A template may write messages the row does not have.** SmolLM2's adds a system message when the chat has none. Its tokens are positions but no turn, so `{"turn": "system"}` there is refused (`the row has no 'system' message; the template wrote a 'system' header of its own, …`). Check the rendering in `run.tokens` (`tokens.json`).
 - **A template that writes today's date is refused until `template` pins it**, with the pin in the refusal (`{"date_string": "26 Jul 2024"}` on Llama-3.2's).
 - **Nothing in a document turns a text column into a chat.** Write the messages inline from a script, and record the source in `description`.
 

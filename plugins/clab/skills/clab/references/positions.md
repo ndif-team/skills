@@ -17,6 +17,7 @@ selector := int | "<start>:<stop>:<step>" | [int, ...]   # one, a half-open slic
 - **`frame` defaults to 0**, the prefill, a forward's only call; generations add decode calls ([generate](generate.md#frames)).
 - **`index` defaults to `":"`**, every position the scope left; leaving `pos` out reads every prompt token.
 - **A negative int counts from the row's end**; a slice string is Python's (`"-4:-1"`, `"2:"`, `"::2"`); a list keeps its order.
+- **A slice goes inside the object**, `{"index": "0:3"}`; a bare `"pos": "0:3"` is refused (`'0:3' is a string, which is not read as a number`).
 - **A selector that picks nothing on any row** (`"0:0"`, `"5:2"`) is refused at compile.
 - **`index`, `frame` and a scope's `occurrence` may sweep**; the `pos` object itself may not ([sweeps](sweeps.md#what-may-sweep)).
 
@@ -146,6 +147,7 @@ kremlin     2    The Kremlin is in the city of           1.0    67.1487121582031
 
 - **The saved tensor is `[3, 4]`**, NaN past each row's own positions; `clab table` leaves those out rather than printing NaN rows.
 - **Index j along `pos` is the read's j-th position on that row**, not position j: `clab show` prints `[1,2,3,4], [1,2,3], [1]` for `f.landmark`.
+- **A value without rows keeps that index as its `pos`**: a `{"index": "-3:"}` read averaged `"over": ["rows"]` tables `pos` 0, 1, 2, where the rows' positions are 11, 12, 13. The rows' own are in the entry's `positions`.
 - **`index: -1` makes it static**: `f.landmark_last` is one position per row, `[4], [3], [1]`.
 - **`count` over `pos` is each row's own number of positions**, and a `mean` over a ragged read weighs positions, not rows.
 
@@ -167,8 +169,8 @@ pairs with another forward's value when every row's scope holds the same number 
 'index' (-1, or '-2:'), or reduce it`. An open index on both sides is refused at compile:
 `steps.g.interventions.w.ops[0].with: 'f.lm' has no width compile can fix …`.
 
-- **An unscoped `pos` between two prompts pairs index with index.** Counted from the end, `-1` to `-3` pair on prompts that end alike, as the IOI pairs do.
-- **Preflight checks a counted pair only where the two prompts differ in length.** Two prompts of one length pass however their words line up.
+- **An unscoped `pos` between two prompts pairs index with index.** Two prompts of one length pass however their words line up.
+- **On prompts of different lengths a counted index pairs when every token between it and the end it counts from is the same on both**, whatever the two paired tokens are. On a base ending `, John gave a drink to` and a counterfactual one token longer ending `, Mary gave a drink to`, `-1` to `-5` pair, the names at `-5` included. `-6` pairs `,` with `,` and is refused, since `-5` differs; the refusal names the two tokens.
 - **Scope both sides of a patch to the word they share**: `{"scope": {"column": "pairs.entity"}, "index": -1}` on the base and the counterfactual's own column on the other side.
 - **To pair a ragged read, take a static index or reduce it over `pos` first.** An operand from an earlier entry of the same forward may be ragged, since each row pairs with itself ([sites and interventions](sites-and-interventions.md#operands)).
 
@@ -193,15 +195,15 @@ for row, where in enumerate(plan.steps["f"].interventions["s2"].positions["pairs
 A position past the prompt indexes the generated tokens: `tokens[<input>][row] + plan.run.tokens[<step>][row]`.
 Prompts of different lengths put `-1` at different absolute positions per row, so compare tokens, not numbers.
 
+On a swept document `clab show` lists the points unlabelled; [output](output.md#in-python) has the loop that
+checks a read's and a write's positions point by point.
+
 ## Chat turns
 
-`{"scope": {"turn": "<role>", "occurrence": k}}` is the k-th message of that role, its content as the template
-renders it. Rendering a chat column is [data](data.md#chats).
-
-- **The template's markers belong to no turn**, so `index: -1` of a turn is the message's own last token.
-- **Without a scope, `-1` is the template's close of the last message.** On SmolLM2-135M-Instruct that is the newline after `<|im_end|>`, position 50 of a three-message chat, where the second user turn's last token is 48.
-- **A message the template writes, not the row, is positions but no turn.** SmolLM2's template adds a system message when the chat has none, and `{"turn": "system"}` there is refused.
-- **A turn is a frame-0 scope**, and on a text input, not a chat, it is refused.
+`{"scope": {"turn": "<role>", "occurrence": k}}` is the k-th message of that role in the row's chat, its content
+as the template renders it. The template's markers belong to no turn, so `index: -1` of a turn is the message's
+own last token. A turn is a frame-0 scope, refused on a text input. Rendering a chat, `add_generation_prompt`
+and the messages a template writes itself are [data](data.md#chats).
 
 ## Generated tokens
 

@@ -70,27 +70,16 @@ for name in ["ioi_patch", "ioi_layer_sweep"]:                             # docu
 - **Padding is never a position**, so results, positions and tables are laid out alike under all three.
 - **A large gap between a step's `tokens` and `real` in `clab show` is padding.**
 - **A fit's body and evals run at the fit's own `batch_size`**, padded as `--padding` says.
-- **`--readout at-reads`** computes the head only at the positions a forward reads of `logits`. It changes nothing where a forward reads `lm_head_output`, every position, or a `grad` of the logits. It moves the last bits where it acts.
+- **`--readout at-reads`** computes the head only at the positions a forward reads of `logits`. Use it on long rows read at a few positions, where the head over every position is most of a forward's memory. It changes nothing where a forward reads `lm_head_output`, every position, or a `grad` of the logits, and it moves the last bits where it acts.
 
 ## When two runs give the same numbers
 
-One document at one batch size, padding, readout, device and CPU thread count writes byte-identical value files.
-Change one and a row's last bits can move. On `answers.json` (rows of 10 and 9 tokens), `--padding batch
---batch-size 1` moved `p_first` by 7e-7. `--batch-size 1` under the default padding left every file identical,
-and so did `OMP_NUM_THREADS=1`. The run records each setting (`run.batch_size`, `run.padding`, `run.readout`,
-`run.devices`, `run.threads`), and `clab show` prints all but the threads. Set threads with `OMP_NUM_THREADS`.
-Compare two runs file by file:
-
-```bash
-clab run documents/ioi_patch.json --out out/nnterp
-clab run documents/ioi_patch.json --engine hooks --out out/hooks
-clab run documents/ioi_patch.json --engine ndif -o remote=local --out out/ndif
-for e in hooks ndif; do for f in out/nnterp/*; do [ "${f##*/}" = manifest.json ] || cmp "$f" "out/$e/${f##*/}"; done; done
-```
-
-On `ioi_patch.json` `cmp` prints nothing: the three engines write the same bits, and `--readout at-reads` does too.
-The manifest always differs, since it records the engine and the time. What moves bits and how far is the
-`clab-debugging` skill's.
+One document at one batch size, padding, readout, device and CPU thread count writes byte-identical value files;
+change one and a row's last bits can move. The run records each setting (`run.batch_size`, `run.padding`,
+`run.readout`, `run.devices`, `run.threads`), and `clab show` prints all but the threads. `ioi_patch.json` writes
+the same value files, `cmp` byte for byte, on nnterp, on hooks, on ndif under `-o remote=local` and under
+`--readout at-reads`; the manifest always differs, since it records the engine and the time. What moves bits, how
+far, and how to compare two runs are the `clab-debugging` skill's ([reproducing a number](../../clab-debugging/SKILL.md#reproducing-a-number)).
 
 ## Where the model runs
 
@@ -109,7 +98,9 @@ bfloat16, uint8 on cpu`, its logit differences in steps of 0.5 and its null stil
 
 ### `-o tp=N`
 
-`tp` shards the model over N ranks by transformers' tensor parallelism, on the nnterp engine, under torchrun:
+`tp` shards the model over N ranks by transformers' tensor parallelism, on the nnterp engine, under torchrun. Use it
+for a checkpoint that does not fit on one GPU when the run needs nothing refused below; a device map (`--device
+auto`) is the other way to spread one:
 
 ```bash
 torchrun --nproc-per-node=3 --no-python clab run documents/x.json --device cpu -o tp=3
@@ -118,7 +109,7 @@ torchrun --nproc-per-node=3 --no-python clab run documents/x.json --device cpu -
 - **Every rank runs the whole plan**, and rank 0 alone writes and prints; `clab show` reads `tp 3`.
 - **Outside torchrun it is refused**: `tp 2 shards the model over 2 processes, one per rank, that torchrun starts: …; this process is not one of them (WORLD_SIZE is unset)`.
 - **A checkpoint with no tensor-parallel plan is refused**: on GPT-2, `tp 2: openai-community/gpt2 cannot be sharded 2 ways: its config gives no tensor-parallel plan nnsight can gather, or its sizes divide no degree above 1; …`.
-- **The numbers are the unsharded ones to rounding**, not equal to them: SmolLM2-135M-Instruct at `tp=3` on three CPU ranks moves a `token_prob` in its sixth digit.
+- **The numbers are the unsharded ones to rounding**, not to the bit.
 - **Refused under `tp`**: a value the ranks hold in pieces (the attention interior but `attention_premix`, `mlp_activation`), a bitsandbytes `dtype`, `grad`, and `tp` on hooks or ndif.
 
 ## Engines
@@ -157,7 +148,9 @@ vLLM is not run in this skill; these lines are the docs' and `clab describe engi
 - **`max_new_tokens` is required on a generate step**, and other options map onto vLLM's sampling; one with no vLLM name fails before any step runs.
 - **The head is the last position's** in the prefill, `attention_probabilities` and `attention_scores` are recomputed and read-only, and a fit or a `grad` is refused.
 - **Under the default `invariant: true` a run repeats its bits** at any batch size; compare vllm with vllm, and with nnterp on outcomes.
-- **`memory` (0.9) is the GPU fraction vLLM reserves**; the run's own values live outside it on `cuda:0`.
+- **`memory` (0.9) is the GPU fraction vLLM reserves**; the run's own values live outside it on `cuda:0`, so lower it when they run out of memory there.
+- **`max_len` caps prompt plus new tokens** (vLLM's `max_model_len`, by default the checkpoint's); lower it when vLLM cannot fit the full context's cache in its `memory`.
+- **`invariant: false` runs vLLM's fastest kernels**, whose last bits move between runs: only for throughput where outcomes, not bits, are compared.
 
 ## Memory
 
@@ -170,5 +163,7 @@ vLLM is not run in this skill; these lines are the docs' and `clab describe engi
 
 - **`--out` names the directory**; without it, `out/<document name>` under the working directory.
 - **A second run into one directory replaces the files it writes and leaves the others**; give each run its own `--out`.
-- **Data paths and bundle files resolve against the corpus root**: the nearest folder above the document that holds `data/`, else the folder above the document's own. A document of inline rows and no bundles needs neither.
+- **Data paths, bundle files and `load` directories resolve against the corpus root**: the nearest directory above the document that holds `data/`; with none, the directory above the document's own.
+- **So `project/documents/x.json` resolves against `project/`** with no `data/`, and a document at the top of a folder needs an empty `data/` beside it. A document of inline rows that loads nothing needs neither.
+- **Run from the corpus root**, so the default `out/` is where a later `load` or `file_path` looks.
 - **`clab table` reads a file dataset from `data/` under the working directory**, so run it from the corpus root ([output](output.md#tabling-needs-the-rows)).

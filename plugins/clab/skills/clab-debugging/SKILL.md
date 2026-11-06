@@ -1,6 +1,6 @@
 ---
 name: clab-debugging
-description: "Fix a clab document that was refused or gave wrong numbers. Use for a `clab: <where>: <what>` line or a PlanError (unknown field, op or component; names no value produced before this step; an operand of another layout, width or select list; text not in a row's input; an answer of several tokens; layer past the model; needs eager attention) and for which stage refused it. Use when nothing was refused but the numbers look wrong: a null control that differs from the clean run, a gradient null not exactly zero, a scope on the wrong occurrence, alignment_missing rows dropped from a mean, sweeps zipped into a diagonal, a patch equal to the clean run. Use when two runs differ (batch size, padding, readout, threads, device, bfloat16, the float32 rule), to cross-check on the hooks engine, or after running out of memory. Writing a document is the `clab` skill; recipes are clab-patching, clab-ablation, clab-lenses-and-attention, clab-steering-and-generation and clab-trained-featurizers."
+description: "Fix a clab document that was refused or gave wrong numbers. Use for a `clab: <where>: <what>` line or a PlanError, and to tell which stage refused it. Common ones: unknown fields, ops or components, a name no earlier step made, an operand of another layout or width, text not in a row, a multi-token answer, eager attention, a bundle or load that does not match. Use when nothing was refused but the numbers look wrong: a null that differs from the clean run, a scope on the wrong occurrence, rows missing from a mean. So too sweeps zipped into a diagonal, a sweep whose points all equal the first, a patch equal to the clean run. Use when two runs differ (batch size, padding, threads, device, bfloat16), to cross-check engines, or after running out of memory. Writing a document is the `clab` skill; recipes are clab-patching, clab-ablation, clab-lenses-and-attention, clab-steering-and-generation and clab-trained-featurizers."
 ---
 
 # Debugging clab documents
@@ -15,7 +15,7 @@ finds what is wrong when nothing was refused, and makes two runs agree; writing 
 
 - **A refused run leaves the previous output in place.** A refusal writes nothing, so `out/<name>` holds the
   last finished run: after a fix, check that `clab show`'s first line has a new `started` time.
-- **A patch that equals the clean run to the bit is a bug, not a result.** A write whose `ops` lost its edit
+- **A patch that equals the clean run to the bit is a mistake, not a result.** A write whose `ops` lost its edit
   only reads, and a freeze listed after its patch puts the clean value back. Read the entry's `ops` and their
   order at the site ([references/symptoms.md](references/symptoms.md)).
 - **Reading an effect before its null.** Write back what was read, at the same site and `pos`: the null must
@@ -65,9 +65,10 @@ A value read at the head and swapped into the residual stream, refused before th
 clab: steps.patched.interventions.patch.ops[0].with: 'counterfactual.v_cf' is laid out ['rows', 'pos', 'vocab_size']; 'swap' acts on a value laid out ['rows', 'pos', 'hidden_size'], and an operand's axes are among the value's, in its order (those it leaves out it broadcasts over)
 ```
 
-A scope pairs with another forward only where every row's scope holds as many tokens, which clab counts
-after the model loads. An unscoped `pos` on two inputs of different lengths is refused, naming the two tokens it
-would pair; on rows of equal length nothing checks it. Every operand message: [refusals](references/refusals.md#operands).
+A scope pairs with another forward only where every row's scope holds as many tokens, counted after the model
+loads. An unscoped `pos` on inputs of different lengths passes where the tokens after it (before it, for an
+index from the start) are alike on both: the shared end and the one token next to it. Past that it is refused,
+naming both tokens; rows of equal length are never checked ([refusals](references/refusals.md#operands)).
 
 ### A position is not in a row
 
@@ -100,10 +101,9 @@ columns is the `clab` skill's [data reference](../clab/references/data.md).
 
 A read at a position a row lacks is not refused: an open-ended index past a short row, or a decode call a row
 never made. That row is `alignment_missing`: NaN, skipped by every reduction, `—` in `clab show`, flagged in
-`clab table`. A write whose operand is missing on a row it lands on is refused at run
-(`operand 'g.r' holds no value on row 2 (alignment_missing): …`). On GPT-2, a read at `{"index": "8:"}`
-misses the 7-token row: its mean over rows is the mean of the 3 rows it reached, and only a `count` says 3
-([symptoms](references/symptoms.md#rows-a-read-did-not-reach)).
+`clab table`, so a mean over rows covers the rows reached and does not say so. A write whose operand is missing
+on a row it lands on is refused at run (`operand 'g.r' holds no value on row 2 (alignment_missing): …`). Count
+the rows reached as the `clab` skill's [positions reference](../clab/references/positions.md#rows-a-scope-never-reached) says.
 
 ## Wrong numbers, nothing refused
 
@@ -112,13 +112,15 @@ Open `clab show OUT` first. Each part answers one question:
 - **The first line and `served:`**: is this the run you mean (document, engine, batch size, padding, readout,
   `started`), and what dtype did the model run in?
 - **The entry table**: where each read and write landed on each row; `—` is a row it did not reach.
-- **The result table**: each value's sweep `axes` and `shape`; `2 points` where you meant a 2 by 2 grid is
-  two sweeps zipped under one label. In the step table, `tokens` against `real` is the padding.
+- **The result table**: each value's `axes` and `shape`; `2 points` where you meant a 2 by 2 grid is two sweeps
+  zipped under one label.
+- **The step table**: `tokens` against `real` is the padding; a forward whose own write is swept, listed once
+  with `all N points` under `serves`, ran one point for all ([symptoms](references/symptoms.md#sweeps)).
 
 ### The nulls
 
-Each null changes nothing, so its value is known exactly. The four equal-to-clean nulls below gave the clean
-run's logit difference to the bit in one GPT-2 run ([the document](references/symptoms.md#nulls)).
+Each null changes nothing, so its value is known exactly; the four equal-to-clean nulls run in one GPT-2
+document ([symptoms](references/symptoms.md#nulls)) and give the clean run's logit difference to the bit.
 
 | null | written as | must equal | a miss means |
 |---|---|---|---|
@@ -126,10 +128,10 @@ run's logit difference to the bit in one GPT-2 run ([the document](references/sy
 | dose 0 | `add` with `"scale": 0.0`, the first point of a dose sweep | the clean run, to the bit | something else writes at the site |
 | scale 1 | `scale` with `"factor": 1.0` | the clean run, to the bit | something else writes at the site |
 | identity permutation | a `permute` step with `"seed": null`, swapped in | the clean run, to the bit | the permuted read is not the one the write replaces |
-| gradient null | the metric's ops with `{"op": "mul", "with": 0}` appended, and a `grad` of that entry | exactly 0 | the gradient is not of `of` alone |
+| gradient null | the metric's ops with `{"op": "mul", "with": 0}` appended, and a `grad` of that entry | exactly 0 | the gradient is not of the zeroed entry alone |
 | `epochs: 0` | the same fit, training nothing | the draw, which the trained featurizer must beat | the fit learned nothing (`clab-trained-featurizers`) |
 
-The self-swap null beside a patch of layer 6's residual stream at the last token:
+`documents/null_patch.json`, the self-swap null beside a patch of layer 6's residual stream at the last token:
 
 ```json
 {
@@ -182,7 +184,7 @@ The gradient null sits in the gradient's own forward, beside the metric. A fragm
 ```
 
 ```text
-$ clab table out/grad_null taken.metric taken.g taken.g0
+$ clab table out/grad_check taken.metric taken.g taken.g0
 row  pos  pos_token  input                                   cf_answer  base_answer  taken.metric         taken.g             taken.g0
 0    9    Ġof        The Eiffel Tower is in the city of       Rome       Paris       -2.4247055053710938  0.4240272641181946  0.0
 3    8    Ġof        The Brandenburg Gate is in the city of   London     Berlin      -5.286407470703125   0.4044497311115265  0.0
@@ -190,8 +192,10 @@ row  pos  pos_token  input                                   cf_answer  base_ans
 
 **Write the null with `mul`, never `scale`.** `{"op": "scale", "factor": 0}` alone at the head is a write,
 and listed before `metric` it zeroes the logits: `taken.metric`, `taken.g` and `taken.g0` all print `0.0`.
-The null does not catch a `grad` of the wrong metric, which runs and maps that metric; the central
-difference in the `clab-patching` skill does.
+**The null proves the wiring, not the metric.** Exactly 0 proves the gradient is of the entry you zeroed, wired
+exactly; it cannot tell you that entry is the metric you meant. A central difference at one point does ([check
+the gradient](../clab-patching/references/attribution.md#check-the-gradient)), and real patching of the top points
+does for the ranking.
 
 ### Where a scope landed
 
@@ -212,9 +216,8 @@ $ clab show out/scope_occurrence
   base.repeat  —   [9] on all 2 rows
 ```
 
-Position 3 is the first mention and 9 the repeat; `clab table out/scope_occurrence base.first` names the token
-in `pos_token` (`ĠJohn`). On a dataset that mixes kinds, `occurrence: -1` is the query's copy only on rows whose
-query repeats that name: check a row of each kind.
+Position 3 is the first mention and 9 the repeat, `ĠJohn` in `clab table`'s `pos_token`. On a dataset that mixes
+kinds, `occurrence: -1` is the query's copy only on rows whose query repeats that name: check a row of each kind.
 
 Every silent mistake, the check that catches it and its fix: [references/symptoms.md](references/symptoms.md).
 
@@ -226,33 +229,34 @@ files.** Change any of them and a row can move in its last bits:
 | setting | why it moves bits |
 |---|---|
 | `--batch-size` | another batch is a matmul of another shape, which sums in another order |
-| `--padding` (`dataset`, `batch`, `sorted`) | a batch padded to another width is another matmul; under `dataset` the input's longest row sets every row's width |
+| `--padding` (`dataset`, `batch`, `sorted`) | a row padded to another width is another matmul; under `dataset` the input's longest row sets every row's width |
 | `--readout at-reads` | the head runs at the read positions alone, a matmul of another shape |
+| an op in an entry, not an op step | an entry's op runs per batch on that batch's value and a step's on the whole value, so a matmul (`readout`, `encode`) or a long reduction can round otherwise, on the CPU too |
 | thread count (`OMP_NUM_THREADS`) | the CPU splits a matmul's sum by thread |
 | device, machine | other kernels; a bfloat16 `model.dtype` rounds more ([below](#the-float32-rule)) |
 
-The run record holds each setting. `clab show` prints all but the thread count, which is `run.threads` in
-`manifest.json`. The self-swap document under `--padding batch`, where batch size 1 pads no row and 4 pads all
-to 10 tokens:
+The run record holds each setting; `clab show` prints all but the threads, `run.threads` in `manifest.json`,
+which follow the `OMP_NUM_THREADS` the `clab` process inherits (a wrapper that sets its own wins).
+
+**To see a difference, change a row's padded width.** `documents/null_patch.json` ([the nulls](#the-nulls)) has
+rows of 10, 10, 7 and 9 tokens. Under `--padding batch`, batch size 1 pads no row and 4 pads rows 2 and 3 to 10:
 
 ```text
 $ clab run documents/null_patch.json --padding batch --batch-size 1 --out out/bs1
 $ clab run documents/null_patch.json --padding batch --batch-size 4 --out out/bs4
-$ clab run documents/null_patch.json --padding batch --batch-size 4 --out out/bs4_again
 $ for f in out/bs1/*; do [ "${f##*/}" = manifest.json ] || cmp "$f" "out/bs4/${f##*/}"; done
 out/bs1/clean_ld.safetensors out/bs4/clean_ld.safetensors differ: byte 85, line 1
 out/bs1/null_ld.safetensors out/bs4/null_ld.safetensors differ: byte 85, line 1
 out/bs1/patched_ld.safetensors out/bs4/patched_ld.safetensors differ: byte 90, line 1
-$ for f in out/bs4/*; do [ "${f##*/}" = manifest.json ] || cmp "$f" "out/bs4_again/${f##*/}"; done
-$
 ```
 
-Row 3's `clean_ld` is `-5.286415100097656` at batch size 1 and `-5.286407470703125` at 4, and its `null_ld`
-moves with it. The repeat at 4 is byte-identical. Under the default padding these batch sizes agreed with 4
-threads and differed with 8: whether a setting moves bits depends on the machine, so never infer it.
+Row 3's `clean_ld` is `-5.286415100097656` at batch size 1 and `-5.286407470703125` at 4, and its `null_ld` moves
+with it; a second run at 4 is byte-identical to the first. On rows of one length, or under the default padding, no
+row's width changes with the batch size. Whether the batch size alone then moves bits depends on the thread count:
+compare two runs, never infer it.
 
-**To the bit** holds for a rerun at one setting on one machine, for a null against its clean run, and for
-nnterp against hooks on the CPU in float32. Across settings, machines, `tp` or vLLM expect rounding, and a
+**To the bit** holds for a rerun at one setting on one machine, for a null against its clean run, and for nnterp
+against hooks or local ndif on the CPU in float32. Across settings, machines, `tp` or vLLM expect rounding, and a
 fit's trained values can move further, since Adam scales a rounding-sized gradient up to its step size. The
 settings themselves are the `clab` skill's [running reference](../clab/references/running-and-engines.md).
 
@@ -271,15 +275,17 @@ row  pos  pos_token  input                                   cf_answer  base_ans
 The null still equals the clean run, and row 1's float32 effect (-1.487 to -1.421) is gone. Recompute every
 effect you report near the dtype's step in float32.
 
-## Cross-checking with hooks
+## Cross-checking engines
 
-The hooks engine reaches the same modules through plain forward hooks; where it agrees with nnterp, the result
-does not depend on how the model was reached:
+The hooks engine reaches the same modules through plain forward hooks, and `--engine ndif -o remote=local` makes
+the ndif engine's trip in this process with no server. Where both agree with nnterp, the result does not depend
+on how the model was reached:
 
 ```text
 $ clab run documents/null_patch.json --out out/x_nnterp
 $ clab run documents/null_patch.json --engine hooks --out out/x_hooks
-$ for f in out/x_nnterp/*; do [ "${f##*/}" = manifest.json ] || cmp "$f" "out/x_hooks/${f##*/}"; done
+$ clab run documents/null_patch.json --engine ndif -o remote=local --out out/x_ndif
+$ for e in hooks ndif; do for f in out/x_nnterp/*; do [ "${f##*/}" = manifest.json ] || cmp "$f" "out/x_$e/${f##*/}"; done; done
 $
 ```
 
@@ -292,9 +298,3 @@ attention_probabilities: nnterp reads it inside a module's forward …`). Compar
 A step that runs out of CUDA memory stops the run, and is the one refusal that writes output: the steps before
 it are saved and `clab show` prints a `stopped:` line. Rerun with a smaller `--batch-size`, or name and save
 fewer values, since every value a step binds stays on the device until the run ends.
-
-## Where to go next
-
-[references/refusals.md](references/refusals.md): every refusal by first clause, with its stage and fix.
-[references/symptoms.md](references/symptoms.md): wrong numbers nothing refused, with the check for each. The
-`clab` skill's [positions](../clab/references/positions.md) and [output](../clab/references/output.md) references.

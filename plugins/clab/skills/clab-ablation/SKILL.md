@@ -1,6 +1,6 @@
 ---
 name: clab-ablation
-description: Measure what a component contributes by removing it in a clab document, a test of necessity with no counterfactual prompt. Zero, mean, resample (`permute` with `derangement`), optimal-constant (a fitted `constant` featurizer), direction (`project_out` at every layer), noise and clamp ablation of layers, positions, attention heads, keys and experts, scored against a clean forward on the same rows. Use to ask whether the model still works without a layer, head or token; to knock out every head one at a time; for attention knockout (stop a token attending to some keys); for mixture-of-experts expert knockout, forced routing, routing usage and entropy; and for the hydra effect, later layers compensating for an ablation. Carries each recipe's null control and the traps that make an ablation overstate or do nothing. Copying a value from another prompt is clab-patching; trained masks, subspaces and SAEs are clab-trained-featurizers; the document format is the clab skill.
+description: Measure what a component contributes by removing it in a clab document, scored against a clean forward on the same rows: a test of necessity with no counterfactual prompt. Use it to ask whether the model still works without a layer, an attention head, an MLP neuron or a token, or to knock out every head one at a time. Also for neurons zeroed or mean-ablated beside random ones, attention knockout of keys, expert knockout, forced routing and routing usage on a mixture of experts, and the hydra effect. Covers zero, mean, resample (`permute`), optimal-constant, direction, noise and clamp ablation, each with its null control. Copying a value from another prompt is clab-patching, and reading attention patterns or the logit lens is clab-lenses-and-attention. Trained masks, probes and SAEs are clab-trained-featurizers; a refusal or a null that fails is clab-debugging; the document format is the clab skill.
 ---
 
 # Ablation in clab
@@ -12,36 +12,30 @@ the CPU on `openai-community/gpt2` (12 layers of 12 heads, 768 wide), the expert
 An ablation is a write in one forward, scored against a clean forward over the same rows: what the score
 loses is what the component contributed. The kinds differ only in what the write puts in the component's
 place, and that choice decides what the number means. Sites, `pos`, entries, ops, sweeps and fits are the
-[`clab` skill](../clab/SKILL.md)'s; this skill is the recipes and their nulls.
+[`clab` skill](../clab/SKILL.md)'s; this skill is the recipes and their nulls. Beyond the four below,
+[constants, directions and writes](references/constants-directions-and-writes.md) has the optimal constant,
+ragged means, directions, noise, clamp and holding a coordinate; [keys, experts and hydra](references/keys-experts-and-hydra.md)
+has attention knockout, the hydra effect and mixtures of experts.
 
 ## What breaks
 
 - **Zero ablation overstates.** Zeroing GPT-2's last-token residual stream after layer 3 takes the logit
   difference from 2.75 to -1.51; the mean over the rows leaves 2.82. A zero vector is a point no forward
   reaches. Report mean or resample ablation; keep zero as the extreme.
-- **An entry without an edit in `ops` only reads**: a write that lost its `ops` gives the clean numbers.
+- **An entry without an edit in `ops` only reads** (the `clab` skill's list).
 - **A small total effect can hide a large one.** Mean-ablating layer 9's attention at the last token costs
   0.11 of the logit difference, yet its direct effect falls by 2.18: layer 10 makes up 2.13. Measure the
-  [hydra effect](#the-hydra-effect) before calling a component unimportant.
+  [hydra effect](references/keys-experts-and-hydra.md#the-hydra-effect) before calling a component unimportant.
 - **`permute` pairs any two rows.** On these prompts the resample at layer 9 gives 1.22 at seed 0 and -0.41
   at seed 2, where four rows take a donor that names the answer in the other place. Sweep `seed`; a
   constraint on which rows pair is data, a donor prompt in a column read by a forward of its own.
 - **Write `derangement: true` on every resample `permute`.** Without it seed 0 left row 1 its own value, a
   null inside the average.
-- **The optimal constant fits the score it trains on.** Its squared change on six training rows fell to
-  0.003, yet four held-out rows kept 0.65 of a clean 3.46 and their KL from the clean distribution rose.
-  Score it on held-out rows and with `kl` ([the recipe](references/constants-directions-and-writes.md#the-optimal-constant)).
-- **A pattern or its scores need eager attention.** Under sdpa, `attention_probabilities` and
-  `attention_scores` are refused before any forward; put `"attn_implementation": "eager"` in `model`.
-  `attention_premix`, a head's result, needs none.
-- **`renormalize` after a key knockout must say `"norm": "sum"`.** The default `l2` rescales to the L2 norm;
-  with it, rows of the key-knockout pattern summed to as much as 1.47.
-- **Knock an expert out through `expert_weights`, never `expert_indices`.** A write at the ids takes only a
-  `swap` of an id the model has; zero the chosen slots' weights by a mask read in the clean forward
-  ([experts](references/keys-experts-and-hydra.md#expert-knockout)).
-- **Keep a swept edit and a read op on the same sweep in separate entries.** One entry of `project_out`
-  on a swept `direction`, then `cosine` on that sweep, ran the first direction at every point; `clab show`
-  listed the forward once, `serves all 3 points`, where each write point runs its own.
+- **The optimal constant fits the score it trains on**: held-out rows kept 0.65 of a clean 3.46 and their KL
+  rose. Score it on held-out rows and with `kl` ([the recipe](references/constants-directions-and-writes.md#the-optimal-constant)).
+- **`attention_probabilities` and `attention_scores` need eager attention**; `attention_premix` does not ([eager](../clab/references/sites-and-interventions.md#attention-needs-eager)).
+- **Keep a swept edit and a read op on the same sweep in separate entries**: in one entry the first point's
+  forward stands for every point, with no refusal ([`clab-debugging`'s symptoms](../clab-debugging/references/symptoms.md#sweeps)).
 
 ## What to put in its place
 
@@ -54,7 +48,8 @@ place, and that choice decides what the number means. Sites, `pos`, entries, ops
 | direction | `{"op": "project_out", "direction": "d"}` | one direction, the rest kept | a random direction per layer | [reference](references/constants-directions-and-writes.md#a-direction-at-every-layer) |
 | noise | `{"op": "noise", "scale": s, "seed": k}` | some signal, at a dose | `scale` 0: the clean run | [reference](references/constants-directions-and-writes.md#noise-and-clamp) |
 | clamp | `{"op": "clamp", "min": a, "max": b}` | every value past a bound | bounds wider than the values: the clean run | [reference](references/constants-directions-and-writes.md#noise-and-clamp) |
-| keys | `-1e9` at `attention_scores`, or 0 at `attention_probabilities` then `renormalize` | where a query looks | a key the task does not read | [reference](references/keys-experts-and-hydra.md#knocking-out-keys) |
+| hold | `project_out` of a unit direction, then `add` of it at a value | a direction's coordinate, set to one value | a `dot` read after it: the value at every row | [reference](references/constants-directions-and-writes.md#holding-a-coordinate) |
+| keys | `-1e9` at `attention_scores`, or 0 at `attention_probabilities` then `renormalize` with `"norm": "sum"` | where a query looks | a key the task does not read | [reference](references/keys-experts-and-hydra.md#knocking-out-keys) |
 | expert | `scale` of `expert_weights` by a mask; `-1e9` at `router_logits` | an expert's share; or its tokens rerouted | the mask of an id no slot holds: KL 0 | [reference](references/keys-experts-and-hydra.md#expert-knockout) |
 
 ## Zero and mean ablation
@@ -104,17 +99,17 @@ at                               clean_ld            ablated_ld
 {"layer":9,"fill":"clean.acts"}  2.7463290691375732  2.7463290691375732
 ```
 
-- **The clean run answers every row**: `clab table out/zero_vs_mean clean.ld` gives 2.01, 3.10, 3.38, 2.46,
-  3.05 and 2.48, the logit of the answer less that of the other name.
 - **The null is the third `fill`**: writing back what was read equals `clean_ld` to the bit. If it does
   not, the write is not where the read was.
 - **Read the two kinds together.** After layer 3 the zero says the last token carries the task and the mean
   says nothing that varies across the rows is there yet; after layer 9 both say it has arrived. Sweep
   `layers` over every layer to see where.
-- `mean` with no `over` removes the rows and the position: one 768-wide vector per `layer` point,
-  broadcast over the rows. A sweep may hold numbers and names alike, and `score` is a bundle of entries
-  each forward names. A mean over a ragged
-  scope or from another dataset: [the reference](references/constants-directions-and-writes.md#means-over-a-ragged-scope-or-another-dataset).
+- **`mean` with no `over` removes the rows and the positions**: one 768-wide vector per `layer` point,
+  broadcast over every row and position it is written at. A mean per position is `"over": ["rows"]`; it
+  keeps `pos`, so it is written at the static width it was read at, as a resample donor is.
+- A sweep may hold numbers and names alike, and `score` is a bundle of entries each forward names. Means over
+  [a ragged scope or from another dataset](references/constants-directions-and-writes.md#means-over-a-ragged-scope-or-another-dataset)
+  are in the reference; a harvest another document saved comes in by a [`load` step](../clab-trained-featurizers/references/harvest-and-bundles.md#cached-harvests), and a `mean` of it needs no forward.
 
 Ops used: `swap`, `mean`, `logit_diff`; their lists are `clab describe ops`.
 
@@ -169,20 +164,13 @@ at                    clean_ld            resample_ld           null_ld
 ```
 
 - **`"seed": null` is the identity, the null**: `null_ld` equals `clean_ld` to the bit at both layers.
-- **Each seed's π is in the step's record.** Seed 0 drew `[5, 2, 4, 1, 0, 3]` and seed 2 `[1, 3, 0, 4, 5, 2]`:
+- **Each seed's π is in the step's record**, `point.permutation` for each point of
+  `Plan.load("out/resample").steps["donor"]`. Seed 0 drew `[5, 2, 4, 1, 0, 3]` and seed 2 `[1, 3, 0, 4, 5, 2]`:
   the even rows name the answer first and the odd rows second, and seed 2 crosses four rows between them.
   Below zero, the model follows the donor's template and picks the other name.
-- **`derangement` needs two rows**, in the dataset and in every fit minibatch. Positions pair by index at
-  a static width (`-1`, `"-3:"`, whole prompts of one length); a permuted ragged read is refused.
-
-<!-- test: skip -->
-```python
-from clab import Plan
-
-plan = Plan.load("out/resample")
-for point in plan.steps["donor"]:
-    print(point.at, point.permutation)        # at counts along each sweep; permutation[i] is row i's donor
-```
+- **A donor needs a static width and two rows.** Every token of 14-token prompts is `{"index": "0:14"}`. An
+  open `{"index": ":"}` or no `pos` is refused even on prompts of one length (`'donor' has no width compile
+  can fix`), and so is a bare `"0:14"`: a slice goes in an object.
 
 ## Heads one at a time
 
@@ -233,61 +221,74 @@ at                      clean_ld            zero_ld             mean_ld
 {"layer":11,"head":10}  2.7463290691375732  3.357891082763672   3.0663044452667236
 ```
 
-- **The null is a head the task does not use**: 10.5 moves the logit difference by -0.002 under either fill.
+- **The control is a head at the same depth that the task does not use**: 10.5 moves the logit difference
+  by -0.002 under either fill. An early head is a poor control for a mean over positions, which replaces
+  what each position held.
 - **A head can work against the answer**: knocking out 10.7 or 11.10 raises it. Zero still overstates:
   11.0's zero costs 0.25 and its mean 0.02.
 - **The mean is per head**: `clean.z` is read at the swept site, so each point writes its own head's mean.
   A head set at once is a list, `"select": {"num_heads": [6, 9]}`, sorted, since the list is positional.
-- **Zeroing the head's pattern instead** gives the same logits as zeroing its premix, both under eager
-  attention ([keys and patterns](references/keys-experts-and-hydra.md#knocking-out-keys)).
+- **Resample or a constant on one head** take the same site; the constant's `init` must reduce the head axis
+  ([the optimal constant](references/constants-directions-and-writes.md#the-optimal-constant)).
 
-## The hydra effect
+## Neurons
 
-When a component is ablated, later ones can change what they write to make up for it, so the drop in the
-total understates what it did. Measure each later layer's direct effect, clean and ablated: the logit
-difference less the logit difference with that layer's attention output subtracted from the final
-residual stream, in the same run. Three steps of `steps` in the
-[whole document](references/keys-experts-and-hydra.md#the-hydra-effect-in-full), where `attn9` is layer
-9's `attention_output`, `probe` the same component swept over layers 9 to 11, `final` the last `layer_output`:
+A neuron is one index of `mlp_activation`'s `intermediate_size`. Zero or mean-ablate a `select`ed set
+beside random sets of its size from its layer: the sets are one sweep, crossed by `fill`.
 
 ```json
 {
-  "ablated": {"kind": "forward", "input": "ioi.input", "interventions": [{
-    "abl": {"site": "attn9", "pos": -1, "ops": [{"op": "swap", "with": {"sweep": ["mean9", "clean.a9"], "label": "fill"}}]},
-    "a": {"site": "probe", "pos": -1}}, "score"]},
-  "ablated_off": {"kind": "forward", "input": "ioi.input", "interventions": [{
-    "abl": {"site": "attn9", "pos": -1, "ops": [{"op": "swap", "with": {"sweep": ["mean9", "clean.a9"], "label": "fill"}}]},
-    "off": {"site": "final", "pos": -1, "ops": [{"op": "sub", "with": "ablated.a"}]}}, "score"]},
-  "de_ablated": {"kind": "op", "op": "sub", "of": "ablated.ld", "with": "ablated_off.ld"}
+  "description": "Zero and mean ablation of four MLP neurons of GPT-2's layer 6 at the last token, beside three random sets of four from the same layer. The four rank first in the layer by activation times gradient of the logit difference on these six IOI prompts. `fill` sweeps 0.0, the mean over the rows, and the clean read (the null).",
+  "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
+  "data": {"ioi": {"rows": [
+    {"input": "When Mary and John went to the store, John gave a drink to", "answer": " Mary", "other": " John"},
+    {"input": "When Tom and James went to the train station, Tom gave a ball to", "answer": " James", "other": " Tom"},
+    {"input": "When Alice and Bob went to the office, Bob gave a book to", "answer": " Alice", "other": " Bob"},
+    {"input": "When Sarah and David went to the swimming pool, Sarah gave a ring to", "answer": " David", "other": " Sarah"},
+    {"input": "When Anna and Mark went to the beach, Mark gave a gift to", "answer": " Anna", "other": " Mark"},
+    {"input": "When Lisa and Paul went to the movie theater, Lisa gave a letter to", "answer": " Paul", "other": " Lisa"}
+  ]}},
+  "sites": {
+    "neurons": {"component": "mlp_activation", "layers": 6, "select": {"intermediate_size": {"sweep": [
+      [1645, 1811, 2314, 2864], [165, 1060, 1577, 1723], [258, 550, 1044, 2334], [231, 347, 375, 1478]], "label": "set"}}},
+    "head": {"component": "lm_head_output"}
+  },
+  "interventions": {"score": {"ld": {"site": "head", "pos": -1, "ops": [{"op": "logit_diff", "a": "ioi.answer", "b": "ioi.other"}]}}},
+  "steps": {
+    "clean": {"kind": "forward", "input": "ioi.input", "interventions": ["score", {"n": {"site": "neurons", "pos": -1}}]},
+    "mean": {"kind": "op", "op": "mean", "of": "clean.n"},
+    "ablated": {"kind": "forward", "input": "ioi.input", "interventions": [
+      {"abl": {"site": "neurons", "pos": -1, "ops": [{"op": "swap", "with": {"sweep": [0.0, "mean", "clean.n"], "label": "fill"}}]}},
+      "score"]},
+    "clean_ld": {"kind": "op", "op": "mean", "of": "clean.ld"},
+    "ablated_ld": {"kind": "op", "op": "mean", "of": "ablated.ld"}
+  },
+  "saves": ["clean.n", "clean_ld", "ablated_ld"]
 }
 ```
 
 ```text
-$ clab table out/hydra clean_ld ablated_ld de_c de_a
-at                              clean_ld            ablated_ld          de_c                  de_a
-{"fill":"mean9","layer":9}      2.7463290691375732  2.6409759521484375  2.6578826904296875    0.48196282982826233
-{"fill":"mean9","layer":10}     2.7463290691375732  2.6409759521484375  -0.24392573535442352  1.8836288452148438
-{"fill":"mean9","layer":11}     2.7463290691375732  2.6409759521484375  -3.237017869949341    -3.1121113300323486
-{"fill":"clean.a9","layer":9}   2.7463290691375732  2.7463290691375732  2.6578826904296875    2.6578826904296875
-{"fill":"clean.a9","layer":10}  2.7463290691375732  2.7463290691375732  -0.24392573535442352  -0.24392573535442352
-{"fill":"clean.a9","layer":11}  2.7463290691375732  2.7463290691375732  -3.237017869949341    -3.237017869949341
+$ clab table out/neuron_ablation clean_ld ablated_ld
+at                                              clean_ld            ablated_ld
+{"set":[1645,1811,2314,2864],"fill":0.0}        2.7463290691375732  2.1083984375
+{"set":[1645,1811,2314,2864],"fill":"mean"}     2.7463290691375732  2.749048948287964
+{"set":[1645,1811,2314,2864],"fill":"clean.n"}  2.7463290691375732  2.7463290691375732
+{"set":[165,1060,1577,1723],"fill":0.0}         2.7463290691375732  2.74395751953125
+{"set":[258,550,1044,2334],"fill":0.0}          2.7463290691375732  2.7366535663604736
+{"set":[231,347,375,1478],"fill":0.0}           2.7463290691375732  2.748163938522339
 ```
 
-- **Read it as a balance.** The total effect is 2.75 - 2.64 = 0.11. Layer 9's attention lost 2.18 of its
-  direct effect (2.66 to 0.48), and layer 10's attention gained 2.13 (-0.24 to 1.88): it compensates.
-- **The null** (`fill` = `clean.a9`) gives every direct effect its clean value and `ablated_ld` the clean
-  run's, to the bit.
-- **`ablated.a` is read under the ablation**, and a later forward subtracts it: a read inside an intervened
-  forward is an operand like any other. At layer 9 it reads the written mean, listed after the write there.
-- **The direct effect goes through the final norm**, so the layers' direct effects do not sum to the total.
-
-## Where the rest is
-
-- [`references/constants-directions-and-writes.md`](references/constants-directions-and-writes.md): the
-  optimal constant, means over a ragged scope or from another dataset, a direction at every layer, noise
-  and clamp.
-- [`references/keys-experts-and-hydra.md`](references/keys-experts-and-hydra.md): attention knockout of
-  keys and patterns, the hydra document whole, and expert knockout, forced routes, usage and entropy.
+- **The null is the third `fill`**: writing `clean.n` back equals `clean_ld` to the bit at every set.
+- **The four are on for every row**, between 0.5 and 2.6 (`clab table out/neuron_ablation clean.n`). Zeroing
+  them costs 0.64; their mean costs nothing (+0.003): nothing that varies across these rows passes there.
+- **Activation × gradient estimates the zero ablation**, so it ranks always-on neurons first; the gradient
+  times the activation less its mean estimates the mean ablation (the `clab-patching` skill's shortcut).
+- **The control is the random sets**: at most 0.01 under zero, 0.002 under the mean. A `select` holds fixed
+  ids, so draw the sets outside the document and write them in sorted.
+- **Zero is not a resting neuron's value**: GELU's floor is -0.17, and seven of the twelve random neurons
+  read below -0.1 on every row.
+- **Neurons in several layers need a site per layer**: a `select` list applies at every layer of its site.
+- **On a gated MLP** `mlp_activation` is the gate alone; mean-ablate `mlp_neurons`, what the down projection sums.
 
 ## Which skill for the neighbouring questions
 
@@ -295,5 +296,5 @@ at                              clean_ld            ablated_ld          de_c    
   [sweeps](../clab/references/sweeps.md) and [sites and interventions](../clab/references/sites-and-interventions.md).
 - Copying a value in from a counterfactual prompt, path patching, attribution: the `clab-patching` skill.
 - Where a head looks, attention patterns and stripes, the logit lens: the `clab-lenses-and-attention` skill.
-- A trained mask over heads, DAS, SAE feature ablation: the `clab-trained-featurizers` skill.
+- A trained mask over heads, DAS, a probe's direction, SAE feature ablation: the `clab-trained-featurizers` skill.
 - A null that does not equal the clean run, two runs that differ, a refusal: the `clab-debugging` skill.

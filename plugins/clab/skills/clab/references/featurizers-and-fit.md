@@ -11,7 +11,7 @@ constant the `clab-ablation` skill's. This page is the fields and the mechanics.
 | kind | pick it to | fields | ops | drawn as |
 |---|---|---|---|---|
 | `subspace` | swap or edit a rank-`k` share of a value | `k`, `parametrization`, `seed` | encode, decode, apply | a uniformly random rank-`k` subspace |
-| `gate` | learn which units, or which heads of every layer, carry a behaviour | `over`, `temperature` | apply (and encode without `over`) | every unit on |
+| `gate` | learn which units, or which heads of every layer, carry a behaviour | `over`, `temperature` | encode, decode, apply; with `over`, apply alone | every unit on |
 | `pca` | edit along a harvest's top principal directions | `k` | encode, decode, apply | never: only the bundle a `pca` op wrote |
 | `sae` | read or edit a sparse dictionary's latents | `latents`, `activation`, `k`, `centered`, `site`, `seed` | encode, decode, apply | a dictionary of `latents` from `seed` |
 | `linear` | ask whether a label column is linearly decodable | `classes` | encode | `W` and `b` zero |
@@ -39,19 +39,16 @@ prints each kind's fields and the math of its ops.
 
 ## A published sparse autoencoder
 
-An `sae` with a `file_path` to a safetensors file with no clab header (SAELens and Gemma Scope's layout: `W_enc`,
-`W_dec`, `b_enc`, `b_dec`, and `threshold` for a JumpReLU) needs three fields the file cannot carry:
+An `sae` whose `file_path` names a published safetensors file (SAELens and Gemma Scope's layout) states the three
+fields the file cannot carry, `activation`, `centered` and the `site` it was trained at:
 
 ```json
 {"dictionary": {"kind": "sae", "file_path": "artifacts/sae_layer6.safetensors",
                 "activation": "jumprelu", "centered": false, "site": {"component": "layer_output", "layers": 6}}}
 ```
 
-- **`activation`**: `jumprelu` where the file holds a `threshold`, else `relu`, or `topk` with `k`.
-- **`centered`**: whether the encoder subtracts `b_dec` first; Gemma Scope's do not.
-- **`site`**: where the release says it was trained, inline with one layer; every use is checked against it.
-- **Refused by name**: a field left out, a JumpReLU file stated as `relu`, shapes that disagree with the site's width, a use at another site, a `.npz`.
-- **Not refused**: a wrong `centered`, a TopK file stated as `relu`, a wrong layer in `site`, or `site` written as the entries' own site name. Compare the mean L0 over every token after BOS with the release's.
+A wrong `centered`, `activation` or layer runs unrefused; what each field means, what is refused and the mean-L0
+check are the `clab-trained-featurizers` skill's ([published dictionaries](../../clab-trained-featurizers/references/sae.md#splice-in-a-published-dictionary)).
 
 ## The fit step
 
@@ -60,17 +57,21 @@ An `sae` with a `file_path` to a safetensors file with no clab header (SAELens a
 | `train` | the declared featurizers it trains |
 | `objective` | `{term: weight}`, minimized; a term is a body op, averaged over every axis, or a trained featurizer's scalar (`<featurizer>.mask`, `.reconstruction`, `.l1`) |
 | `epochs`, `batch_size`, `seed` | passes over the training rows, minibatch rows, the draw and shuffle seed |
-| `optimizer` | `{"name": "adamw" or "adam" or "sgd", "lr": ..., "weight_decay": ...}` |
+| `optimizer` | `{"name": "adamw" or "adam" or "sgd", "lr": ..., "weight_decay": ...}`; `weight_decay` defaults to 0 |
 | `early_stop` | `{"metric": <body op>, "mode": "max" or "min", "patience": N}`; the best epoch's tensors are restored |
 | `eval` | `{<name>: {<dataset>: <dataset read in its place>}}`; `{}` is the data it trained on |
 | `steps` | the body: its own steps, run on each minibatch with gradients on |
+
+- **Pick `adamw`**: it and `adam` move each parameter by about `lr` a step whatever the gradient's scale, and at `weight_decay` 0 they are one optimizer. `sgd` steps by `lr` times the gradient, so its `lr` depends on the objective's scale.
+- **`weight_decay` pulls the trained tensors toward zero** each step; leave it at 0 unless held-out scores fall while training scores rise.
+- **`early_stop` ends a fit once a body op stops improving**, which saves the epochs after a plateau. It judges the training rows, not held-out ones, so it is no guard against overfitting; to compare fits, sweep `epochs`.
 
 `documents/fit_probe.json` harvests the last token at block 6 once, trains a probe on the harvest beside an
 `epochs: 0` point, and scores held-out rows through the trained probe after the fit:
 
 ```json
 {
-  "description": "The fit step's fields on a linear probe: harvest the residual stream leaving block 6 at the last token once, train a probe of the topic column on that harvest with no model call, beside an epochs-0 point, and score the held-out rows through the trained probe after the fit.",
+  "description": "The fit step on a linear probe: harvest block 6's last-token output once, train a probe of the topic column on it beside an epochs-0 point, and score held-out rows through the trained probe.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {
     "train": {"rows": [
@@ -147,6 +148,7 @@ What the run does:
 
 ### The body and its costs
 
+- **A body's steps run in the order their keys are written**, as a document's do: generated JSON whose dict order shifts is refused with `names no value produced before this step`.
 - **A value made before the fit with a row per example of a body dataset is a harvest.** Read what does not depend on the training before the fit, once; this body makes no model call at all.
 - **A harvest of another dataset than the body's is refused**, since a minibatch's ids would pair its rows with others.
 - **An eval cannot read a harvest's dataset as another**: `{"held_out": {"train": "test"}}` here is refused with `… evaluate on 'test' in steps after the fit, which reach what it trained as 'fit.probe'`, as `held` does.
@@ -245,7 +247,7 @@ Its `held_acc` is 1.0, the trained run's. The header, read with `safetensors.saf
 {'classes': '["person", "place"]', 'component': 'layer_output', 'document': 'probe_train', 'format': 'clab/1', 'kind': 'linear', 'layer': '6', 'model.dtype': 'float32', 'model.key': 'openai-community/gpt2', 'model.revision': '607a30d783dfa663caf39e06633721c8d4cfcd7e', 'width': '768'}
 ```
 
-- **`file_path` resolves against the corpus root**: the nearest folder above the document that holds `data/`, else the folder above the document's own. Keep documents in `documents/` and bundles beside it.
+- **`file_path` resolves against the corpus root** ([where output goes](running-and-engines.md#where-output-goes)): `project/` in the layout above, which needs no `data/`.
 - **The header is checked before anything runs**: the kind, the model's `key`, `revision` and `dtype`, the component and layer at every use, and the width once the model loads. A use at block 5 is refused: `featurizers.probe.file_path: artifacts/probe/fit.probe.safetensors: header 'layer' is '6'; this document uses 'probe' at layer_output layer 5 (held.scores)`.
 - **A field the header records may be left out** of the loading document (a subspace's `k`, a lora's `rank`), and one given must match; a probe's `classes` column is required and checked: another class list is refused, quoting both.
 - **A missing file is refused at compile**: `artifacts/nope.safetensors does not exist under the corpus root; run the document that writes it first`.

@@ -106,7 +106,7 @@ row  pos  pos_token  input                                             value
 | what you see | what it is | the check | the fix |
 |---|---|---|---|
 | a read or write on the first mention of a word, not the one you meant | `occurrence` defaults to 0, the first; occurrences are whole words (`Sara` is not inside `Sarah`) | `pos_token` and the positions in `clab show` | `"occurrence": -1` for the last, `1` for the second, `":"` for every one |
-| a teacher-forced answer scored at an earlier mention in the prompt | the default occurrence finds the prompt's copy first | the positions of the scored read | `"occurrence": -1`, the appended copy |
+| a teacher-forced score looks plausible but was read at the prompt's own mention of the answer | the default occurrence finds the prompt's copy first | the scored read's positions in `clab show` on a row whose prompt also names the answer: they must follow the prompt | `"occurrence": -1`, the appended copy |
 | a patch scoped with `"occurrence": -1` gives a plausible curve on a mixed dataset | the last occurrence is the query's copy on some rows and the context's on others | the positions on a row of each kind | a scope that names the same role on every row |
 | a window swap between two inputs moved other tokens than you meant | one unscoped `pos` pairs index with index; rows of equal length are not checked, whatever their tokens | both entries' positions and tokens | a scope on each side naming its own text |
 | a read over every token includes a chat template's markers or a BOS | every input token is a position; GPT-2 has no BOS, so position 0 is the first word | `pos_token` at `pos` 0 | `{"index": "1:"}` on a model with a BOS; a `turn` scope in a chat |
@@ -119,7 +119,7 @@ Scoped reads and positions are the `clab` skill's [positions reference](../../cl
 
 ## Gradients
 
-The gradient of the metric beside the gradient of the same metric times 0:
+`documents/grad_check.json`, the gradient of the metric beside the gradient of the same metric times 0:
 
 ```json
 {
@@ -150,7 +150,7 @@ The gradient of the metric beside the gradient of the same metric times 0:
 |---|---|---|---|
 | after adding a gradient null, the metric is 0 on every row and every gradient is exactly 0 | `{"op": "scale", "factor": 0}` alone at the head is a write; listed before the metric it zeroes the logits (all three values printed `0.0` on GPT-2) | is the null's entry an edit? | the metric's ops with `{"op": "mul", "with": 0}` appended |
 | a `grad` entry is exactly zero on every row, null or not | its `of` does not depend on the value at its site (a layer's pattern does not depend on its `attention_values`) | which site `of` is computed from | an `of` the site feeds |
-| a gradient map is nonzero, plausible, and does not predict patching | `of` names another differentiable entry, which runs and maps that entry | a central difference of the metric against the gradient, once per document | the `of` you meant; the check is in the `clab-patching` skill |
+| a gradient map is nonzero, plausible, and does not predict patching | `of` names another differentiable entry, which runs and maps that entry; the `mul 0` null proves only that the gradient is of the entry zeroed, wired exactly | a central difference at one point ([check the gradient](../../clab-patching/references/attribution.md#check-the-gradient)); for the ranking, real patching of the top points | the `of` you meant |
 | an attribution map misses a component patching shows restores the answer | the gradient is first order, and one patch restoring the whole answer is far from linear | real patching of the components you report | confirm with patching (`clab-patching`) |
 
 ## Sweeps
@@ -158,86 +158,19 @@ The gradient of the metric beside the gradient of the same metric times 0:
 | what you see | what it is | the check | the fix |
 |---|---|---|---|
 | a grid of two sweeps came back as its diagonal | two sweeps with no `label` on fields of one name share the field's name as label, and one label is one axis | `clab show`'s result line: two `layers` sweeps of 2 values each read `layers  2 points, each [4,1]` | its own `label` on each: the same document reads `read_layer, write_layer  4 points, each [4,1]` |
-| a `mean` or `sum` came back with one number per layer | a reduction keeps a `layers` axis unless `over` names it | the result's `dims` in `clab show` | `"over": ["rows", "layers"]` |
+| a `mean` or `sum` came back with one number per layer | a reduction keeps a `layers` axis unless `over` names it | the result's `dims` in `clab show` | `"over": ["layers", "rows", "pos"]` on a `[layers, rows, pos]` value |
+| a swept write gives the first point's numbers at every point, and its score has no sweep axis | one entry uses the sweep twice, an edit and then a read op (`swap` then `cosine` on one swept operand): the forward runs at the first point and serves all, unrefused | `clab show`'s step table lists that forward once, `all 2 points` under `serves`, though its own write is swept | the swept edit in one entry and the read op in a second entry at the site |
 | a swept step's saved read is one tensor, not one per point | a result is keyed by the sweep axes its own value depends on | the result's `axes` in `clab show` | read it as one value; sweeps are the `clab` skill's [sweeps reference](../../clab/references/sweeps.md) |
 
 ## Rows a read did not reach
 
-A read at an open-ended index reaches no token of a row shorter than its start:
-
-```json
-{
-  "description": "A read at every position from 8 on: row 2 is 7 tokens, so the read reaches no token of it. Its row is alignment_missing, its value NaN, and the mean over rows is the mean of the three rows it reached; count of the per-row mean over rows says how many those are.",
-  "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
-  "data": {"pairs": {"rows": [
-    {"input": "The Eiffel Tower is in the city of"},
-    {"input": "The Colosseum is in the city of"},
-    {"input": "Big Ben is in the city of"},
-    {"input": "The Brandenburg Gate is in the city of"}
-  ]}},
-  "steps": {
-    "base": {"kind": "forward", "input": "pairs.input", "interventions": {
-      "tail": {"site": {"component": "layer_output", "layers": 6}, "pos": {"index": "8:"}, "ops": [{"op": "norm"}]}
-    }},
-    "per_row": {"kind": "op", "op": "mean", "of": "base.tail", "over": ["pos"]},
-    "overall": {"kind": "op", "op": "mean", "of": "per_row", "over": ["rows"]},
-    "reached": {"kind": "op", "op": "count", "of": "per_row", "over": ["rows"]}
-  },
-  "saves": ["base.tail", "per_row", "overall", "reached"]
-}
-```
-
-```text
-$ clab show out/missing_rows
-  entry      at  positions
-  base.tail  —   [8,9], [8,9], —, [8]
-$ clab table out/missing_rows per_row reached
-row  input                                   per_row            reached  alignment_missing
-0    The Eiffel Tower is in the city of      92.8487548828125   3.0
-1    The Colosseum is in the city of         94.78115844726562  3.0
-2    Big Ben is in the city of                                  3.0      true
-3    The Brandenburg Gate is in the city of  92.677490234375    3.0
-```
-
-`overall` is 93.43579864501953, the mean of rows 0, 1 and 3; nothing in it says row 2 is absent. A `count`
-over `rows` and `pos` of `base.tail` itself is 5.0, the positions, not the rows: count a per-row value.
-
-A generation misses rows the same way, at a decode call a row never made. With a stop token that two rows
-reach early:
-
-```json
-{
-  "description": "A greedy generation that stops at the first comma, with a read at decode call 3. Rows that stop before that call are alignment_missing there.",
-  "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
-  "data": {"prompts": {"rows": [
-    {"input": "The capital of France is"},
-    {"input": "My favourite colour is"},
-    {"input": "The Eiffel Tower is in the city of"},
-    {"input": "Big Ben is in the city of"}
-  ]}},
-  "steps": {
-    "g": {"kind": "generate", "input": "prompts.input", "max_new_tokens": 6, "do_sample": false, "eos_token_id": 11,
-          "interventions": {"v": {"site": {"component": "layer_output", "layers": 6}, "pos": {"frame": 3, "index": 0}, "ops": [{"op": "norm"}]}}},
-    "said": {"kind": "op", "op": "detokenize", "of": "g"}
-  },
-  "saves": ["g", "said", "g.v"]
-}
-```
-
-```text
-$ clab table out/gen_missing g.v
-row  pos  pos_token  call  input                               value              alignment_missing
-0    7    Ġof        3     The capital of France is            82.49337005615234
-1    6    Ġof        3     My favourite colour is              77.4403305053711
-2                          The Eiffel Tower is in the city of                     true
-3                          Big Ben is in the city of                              true
-```
-
-`said` reads ` Paris` and ` New York` on rows 2 and 3: each stopped at its comma, before call 3.
+A read that misses a row (an open index past a short row, a decode call the row never made) leaves it
+`alignment_missing` and out of every reduction. The mechanism and the count of rows reached are the `clab`
+skill's [positions reference](../../clab/references/positions.md#rows-a-scope-never-reached).
 
 | what you see | what it is | the check | the fix |
 |---|---|---|---|
-| an accuracy or mean covers fewer rows than the dataset, or some rows are NaN | the read missed those rows, which every reduction skips | `—` in `clab show`; a `count` over `rows` of a per-row value | an index every row holds; in a generation `min_new_tokens`, or `{"frame": -1, "index": -1}` |
+| an accuracy or mean covers fewer rows than the dataset, or some rows are NaN | the read missed those rows, which every reduction skips | `—` in `clab show`, then the count in the positions reference | an index every row holds; in a generation `min_new_tokens`, or `{"frame": -1, "index": -1}` |
 | a steered generation's mean effect looks diluted | a write over decode calls that never landed on a row leaves that row unsteered | the write's positions, as for a read | count the write's missing rows too |
 | `contains` and a scope disagree on how many rows said a word | `contains` is a substring test; a scope matches whole words | the rows each counts | count whole words with a scope over the decode calls |
 | `{"frame": -1}` read every prompt token on some rows | on a row whose first generated token was EOS, the last call is the prefill | the positions on that row | `{"frame": -1, "index": -1}` |
@@ -289,7 +222,7 @@ Answer columns are the `clab` skill's [data reference](../../clab/references/dat
 | what you see | what it is | the check | the fix |
 |---|---|---|---|
 | small effects at every head of a bfloat16 sweep, early layers included | bfloat16 rounding of the model's own forward; GPT-2's bfloat16 logit differences move in steps of 0.5 | `served:` in `clab show`; the same points in float32 | recompute the points you report in float32 |
-| the last bits of a value differ between two runs | another batch size, padding, readout, thread count or device | the run records: `clab show`'s first line, `run.threads` in `manifest.json` | compare runs at one setting ([SKILL.md](../SKILL.md#reproducing-a-number)) |
+| the last bits of a value differ between two runs | another batch size, padding, readout, thread count or device, or an op moved between an entry and an op step | the run records: `clab show`'s first line, `run.threads` in `manifest.json`; the two documents | compare runs at one setting and one form ([SKILL.md](../SKILL.md#reproducing-a-number)) |
 | one row's last bits moved when the dataset changed (`take`, `skip`, a split) | under the default padding the input's longest row sets every batch's width | the step's `tokens` against `real` | compare on the same rows |
 | an apply document differs from its fit's eval in the last bits | the fit's body runs at the fit's own `batch_size` | the two batch sizes | run the apply document at the fit's `batch_size` |
 | two runs of one `generate` step said different things | options a step leaves out come from the checkpoint's generation config, which may sample, unseeded | the step's options | `"do_sample": false` |
@@ -299,7 +232,7 @@ Answer columns are the `clab` skill's [data reference](../../clab/references/dat
 | what you see | what it is | the check | the fix |
 |---|---|---|---|
 | a step after a fit scores like an untrained featurizer | the bare name is the declared draw; the trained one is `<fit>.<name>` | compare with the fit's `epochs: 0` point: equal means the draw | name `<fit>.<name>` |
-| a published SAE's latents, reconstruction or L0 look wrong | `site`, `centered` and `activation` are the document's word, unchecked against the file | its mean L0 over every token after BOS against the release's | state them from the release, the layer inline in `site` |
+| a published SAE's latents, reconstruction or L0 look wrong | `centered`, a TopK file's `activation` and the layer in `site` are the document's word, unchecked against the file | its mean L0 over every token after BOS against the release's | state them from the release, the layer inline in `site` ([sae](../../clab-trained-featurizers/references/sae.md#splice-in-a-published-dictionary)) |
 | splicing an SAE in moved the output with no edit | `apply` replaces the value with the reconstruction, dropping the error term | the spliced run against the clean run | an `encode` … `decode` bracket, which keeps the error |
 | an adapter or an always-on write changed the prompt and not the generated tokens | in a `generate` step a `pos` without a `frame` is the prefill only | the entry's positions | `"frame": ":"` |
 

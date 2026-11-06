@@ -34,7 +34,8 @@ mean_patched` one row per point, keyed in `at` (the full table is in the clab sk
 | a generate step's options | `max_new_tokens` |
 
 - **Each value is a number, a string, a boolean or a list of them.** To vary a `pos` object, sweep a scalar inside it.
-- **Refused**: `kind`, `op`, `site`, `component`, `input`, `of`, `featurizer`, `train`, `interventions`, `saves`, `file_path`, a featurizer's `over`, a scope's `column`, the optimizer's `name`, and anything under `model` or `data`: `sites.resid.component: a sweep cannot stand for 'component'`.
+- **Refused**: the names that choose what runs (`kind`, `op`, `site`, `component`, `input`, `of`, `train`, `interventions`, `saves`, `file_path`, a scope's `column`), a featurizer's `over`, the optimizer's `name`, and anything under `model` or `data`: `sites.resid.component: a sweep cannot stand for 'component'`.
+- **A sweep cannot stand for `featurizer`**: to compare a trained direction with random ones, write one entry per featurizer.
 - **Two datasets**: write the steps twice, one set per dataset.
 - **Two checkpoints or revisions**: a run loads one model, so write one document per revision and join their tables in Python.
 - **Two scope columns**: one entry per column.
@@ -86,8 +87,8 @@ at                 value
 $ clab show out/src_dst_cross
   ...
   step            at           serves        seconds  memory  forwards  tokens  real
-  counterfactual  src=6        all 2 points  0.062    —       1         56      56
-  patched         src=6,dst=6  —             0.106    —       1         56      56
+  counterfactual  src=6        all 2 points  …        —       1         56      56
+  patched         src=6,dst=6  —             …        —       1         56      56
   ...
   result   step     dims  axes      shape
   mean_ld  mean_ld        src, dst  4 points, each []
@@ -114,12 +115,13 @@ at            value
 - **Check the `axes` column of `clab show` before trusting a grid**: a grid that zipped has one axis where you expected two.
 - **One label over different values is refused**: `sites.head2.layers: label 'layers' is also the sweep at sites.resid.layers, over [0, 1]; one label is one axis, …; give one of them its own label to cross them`.
 - **A label is letters, digits and underscores**, since a coordinate is written `<label>=<value>`.
+- **Scattered points are not one axis.** Five chosen (layer, head) pairs under one label are refused as one label over different values. Cross the layers and heads they use and read the cells you want, or write one site per pair.
 - **A write's `pos` sweep wants its own label** (`"label": "patch_pos"`), so its coordinate is not confused with the table's `pos` column.
 
 ## What a sweep costs
 
 - **Points that differ only in what they read share one forward**: `counterfactual` above runs once for both `src` points (`serves all 2 points`).
-- **Each point that changes a write, an operand or an option runs its own forward**: `patched` runs four.
+- **Each point that changes a write, an operand or an option runs its own forward**: `patched` runs four. A swept edit and a read op on the same sweep in one entry do not, and run the first point only ([what breaks](../SKILL.md#what-breaks)).
 - **The layer sweep above runs 26 forwards**: one `clean` and one `counterfactual` forward serve all twelve points, and `null` and `patched` run twelve each.
 - **A value is made once per point on the axes it depends on** (its `axes` in `clab show`); a read that depends on none is one value.
 - **A large grid grows the manifest and compile time** faster than the points; split it into documents by layer range.
@@ -146,7 +148,7 @@ A swept save holds one value per point, keyed by its coordinate, its value on ea
 | where | key | example |
 |---|---|---|
 | `clab table`, `plan.table`: column `at` | an object | `{"src":6,"dst":8}` |
-| `plan.results[name]` | the value for one axis; a tuple in axis order for several | `8`, `(6, 8)` |
+| `plan.results[name]` | a plain dict: the value for one axis, a tuple in axis order for several | `8`, `(6, 8)` |
 | output files, `clab show`, `plan.run.costs`, `plan.run.tokens` | `label=value` joined by commas | `src=6,dst=8` |
 
 <!-- test: skip -->
@@ -155,6 +157,7 @@ from clab import Plan
 
 plan = Plan.load("out/src_dst_cross")
 plan.sweeps                              # {'src': Axis(values=[6, 8]), 'dst': Axis(values=[6, 8])}
+list(plan.results["mean_ld"])            # [(6, 6), (6, 8), (8, 6), (8, 8)]
 plan.results["mean_ld"][(6, 8)]          # tensor(-0.3986)
 Plan.load("out/ioi_layer_sweep").results["mean_patched"][8]   # tensor(3.0534)
 ```

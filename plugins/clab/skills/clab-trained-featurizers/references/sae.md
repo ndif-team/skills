@@ -44,7 +44,7 @@ The document states the three fields the file cannot: `activation`, `centered` a
 <!-- test: skip -->
 ```json
 {
-  "description": "Splice a published JumpReLU SAE into GPT-2. The file holds W_enc, W_dec, b_enc, b_dec and threshold and no clab header, so the document states what the release says: its activation, whether its encoder subtracts b_dec (centered), and its layer, inline. mean_l0 over every token after the first is the number to compare with the release's; kl is KL(clean || spliced) at the last token.",
+  "description": "Splice a published JumpReLU SAE into GPT-2. The file holds W_enc, W_dec, b_enc, b_dec and threshold and no clab header. The document states what the release says: its activation, whether its encoder subtracts b_dec (centered), and its layer, inline. mean_l0 over every token after the first is the number to compare with the release's; kl is KL(clean || spliced) at the last token.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"text": {"rows": [
     {"input": "The cat sat on the mat and looked out of the window."},
@@ -88,18 +88,24 @@ Refused before the model loads, by name:
 - a field left out (`... is a published sae, which says neither how it encodes nor where it was trained`);
 - `relu` on a file with a `threshold` (`... holds a JumpReLU threshold; its activation is 'jumprelu', not
   'relu'`), and `jumprelu` on one without;
-- a use at another layer than `site` (`featurizer 'dictionary' was trained at layer_output layer 0 (its
-  site); this use is layer_output layer 1`);
-- shapes that disagree with each other or the site's width.
+- shapes that disagree with each other (`W_dec is [500, 768]; with W_enc [768, 512] it is [latents 512, width
+  768]`).
+
+Refused once the weights load:
+
+- a use at another layer than `site` (`featurizer 'dictionary' was trained at layer_output layer 5 (its
+  site); this use is layer_output layer 6`);
+- a file whose width is not the site's (`has no clab header and is 700 wide; this document uses 'dictionary'
+  at layer_output, whose width is 768`).
 
 Run, and give wrong numbers:
 
 - **A wrong `centered`.** `sae_train.json`'s dictionary, resaved with `save_file` and no metadata plus a
   zero `threshold`, loads as this document's file. It gives mean L0 21.7 stated `centered: false` and 24.625
   stated `true`, as it was trained; the `true` run equals the clab bundle's on the same rows to the bit.
-- **A TopK file stated as `relu`.** It keeps every positive pre-activation. On a random 16-to-32 fixture that is
-  17.4 latents per token where `topk` keeps 4. On a GPT-2 dictionary trained with `k: 16` it is 15.0 against
-  14.6, so an L0 at or below `k` does not prove the activation right: read it from the release.
+- **A TopK file stated as `relu`.** It keeps every positive pre-activation. The TopK dictionary below, resaved
+  with no metadata, gives mean L0 15.0 stated `relu` and 14.6 stated `topk` over this document's four
+  sentences. An L0 at or below `k` does not prove the activation right: read it from the release.
 - **A wrong layer in `site`**, or `site` written as the name of the entries' site, which moves with it.
 
 ## Train a dictionary
@@ -110,7 +116,7 @@ draw:
 
 ```json
 {
-  "description": "Train a 768 -> 512 sparse autoencoder on GPT-2's layer 5 output, every token after the first (whose norm is about 35 times the rest's). The harvest runs once; the body only encodes it, so the fit makes no model call. mse and mean_l0 are body ops, so the eval reports them for the trained dictionary and an epochs: 0 run reports them for its draw.",
+  "description": "Train a 768 -> 512 sparse autoencoder on GPT-2's layer 5 output, every token after the first (an outlier in norm). The harvest runs once; the body only encodes it, so the fit makes no model call. mse and mean_l0 are body ops, so the eval reports them for the trained dictionary and an epochs: 0 run reports them for its draw.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"text": {"rows": [
     {"input": "If today is Monday, tomorrow is Tuesday."},
@@ -174,9 +180,9 @@ value
   body's `encode` read. Their history, `fit.history.dictionary.reconstruction`, falls from 5208 after the
   first epoch to 173.5 after the fiftieth, which equals the eval's `mse`.
 - **The decoder rows are put back to unit norm** after every optimizer step.
-- **A TopK dictionary** is `{"kind": "sae", "latents": 512, "activation": "topk", "k": 16}`: mean L0 14.1,
-  `mse` 168.3 on these rows. A drawn `jumprelu` is refused (`a 'jumprelu' sae's threshold is a published
-  file's; load one with 'file_path'`).
+- **A TopK dictionary** is `{"kind": "sae", "latents": 512, "activation": "topk", "k": 16}`: `fit.train.mean_l0`
+  14.1 and `fit.train.mse` 168.3, over the 16 training sentences. A drawn `jumprelu` is refused (`a
+  'jumprelu' sae's threshold is a published file's; load one with 'file_path'`).
 - **The trained file**, `out/sae_train/fit.dictionary.safetensors`, holds `W_enc` `[768, 512]`, `b_enc`
   `[512]`, `W_dec` `[512, 768]` and `b_dec` `[768]`, with a header recording `activation`, `centered` and
   `latents`. A document loading it writes `{"kind": "sae", "file_path": ...}` alone.
@@ -224,12 +230,16 @@ row  pos  pos_token   input                               value
 latents 497 and 376 on all seven rows, and latent 0 on none. A `top_k` over a value with no rows axis does not
 table (`has no rows to table: it is laid out ['k'] ...; read it from plan.results`).
 
-Zero one latent per sweep point inside the bracket, and score the answer against the clean forward:
+- **Run `fires` before choosing a null latent**, in a published file too: pick one whose count is 0 at the
+  positions the ablation writes. Where every latent fires on your prompts, a dead one needs other prompts.
+
+Zero one latent per sweep point inside the bracket. Score the answer against the clean forward, and, with no
+answer column needed, the whole distribution:
 
 <!-- test: skip -->
 ```json
 {
-  "description": "Zero one latent of the trained dictionary at the day token, one per sweep point, inside an encode and its decode, which keep the error term; score the answer's probability against the clean forward's. Latent 0 never fires there: its point must equal the clean run.",
+  "description": "Zero one latent of the trained dictionary at the day token, one per sweep point, inside an encode and its decode, which keep the error term. Score the answer's probability against the clean forward's, the KL from the clean logits and the largest logit change. Latent 0 never fires there: its point must equal the clean run.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"days": {"rows": [
     {"input": "If today is Monday, tomorrow is", "answer": " Tuesday"},
@@ -254,9 +264,14 @@ Zero one latent per sweep point inside the bracket, and score the answer against
     "p_zeroed": {"kind": "op", "op": "token_prob", "of": "zeroed.logits", "token": "days.answer"},
     "delta": {"kind": "op", "op": "sub", "of": "p_zeroed", "with": "p_clean"},
     "mean_delta": {"kind": "op", "op": "mean", "of": "delta"},
-    "mean_clean": {"kind": "op", "op": "mean", "of": "p_clean"}
+    "mean_clean": {"kind": "op", "op": "mean", "of": "p_clean"},
+    "kl": {"kind": "op", "op": "kl", "of": "clean.logits", "against": "zeroed.logits"},
+    "mean_kl": {"kind": "op", "op": "mean", "of": "kl"},
+    "shift": {"kind": "op", "op": "sub", "of": "zeroed.logits", "with": "clean.logits"},
+    "abs_shift": {"kind": "op", "op": "abs", "of": "shift"},
+    "max_shift": {"kind": "op", "op": "max", "of": "abs_shift", "over": ["rows", "pos", "vocab_size"]}
   },
-  "saves": ["mean_clean", "mean_delta", "delta"]
+  "saves": ["mean_clean", "mean_delta", "mean_kl", "max_shift"]
 }
 ```
 
@@ -265,15 +280,20 @@ clab run documents/sae_ablation.json
 clab table out/sae_ablation mean_clean
 value
 0.22559413313865662
-clab table out/sae_ablation mean_delta
-at                value
-{"features":497}  0.0915023684501648
-{"features":376}  -0.13322243094444275
-{"features":0}    0.0
+clab table out/sae_ablation mean_delta mean_kl max_shift
+at                mean_delta            mean_kl              max_shift
+{"features":497}  0.0915023684501648    0.4922812581062317   33.44483947753906
+{"features":376}  -0.13322243094444275  0.20359280705451965  4.266571044921875
+{"features":0}    0.0                   0.0                  0.0
 ```
 
 Zeroing latent 376 lowers the answer's probability by 0.133 on average, from 0.226; zeroing 497 raises it by
-0.092. Latent 0, which never fires there, changes it by exactly 0 on every row: the bracket's null.
+0.092. Latent 0, which never fires there, changes every score by exactly 0: the bracket's null.
+
+- **`kl` needs no answer column.** KL(clean ‖ ablated) at the last token ranks 497 above 376 (0.49 against
+  0.20 nats): 497 moves the whole distribution more while it moves this answer less.
+- **A reduction of logits names `vocab_size` in its `over`.** By default `max` removes rows and positions only,
+  and `max_shift` without it is one value per token of the vocabulary, `[50257]` at each point.
 `{"op": "scale", "factor": 5.0}` in place of the `swap` amplifies a latent; `{"op": "add", "with": 1.0}`
 adds to it. A list, `{"features": [376, 497]}`, zeroes several together.
 

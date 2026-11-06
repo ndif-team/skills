@@ -1,12 +1,11 @@
-# Constants, means, directions, noise and clamp
+# Constants, means, directions, noise, clamp and holds
 
-The fills beyond zero, mean and resample, each as a complete document on `openai-community/gpt2` and the six
-IOI prompts of the skill (clean logit difference 2.75 over the rows), with its null and the number it gave.
-Each runs in seconds on a CPU.
+The fills beyond zero, mean and resample, each as a complete document on `openai-community/gpt2` and the IOI
+prompts of the skill (clean logit difference 2.75), with its null and its numbers; each runs in seconds on a CPU.
 
 ## The optimal constant
 
-Use it to ask how much of a component's value is this input's own: one vector trained to stand in for the
+Use it to ask how much of a component's value is this input's own. One vector trained to stand in for the
 value at every row keeps whatever is not, and the score it still loses is what no constant can supply. A
 `constant` featurizer holds one vector of the site's width; `init` draws it, a fit trains it, and `apply`
 writes it in place of the value. The fit's fields are the `clab` skill's
@@ -82,20 +81,24 @@ at             epochs  value
 
 - **The null is the `epochs: 0` point**: the untrained constant is mean ablation, to the bit, in both the
   logit difference (0.260) and the KL (0.614). Outside a fit the bare `c` is the same draw.
-- **The trained constant learned the six rows, not the task.** Its mean squared change on the training rows
-  fell from 3.49 after the first epoch to 0.0027 after the twentieth. On the held-out rows it keeps 0.65
-  of a clean 3.46, against mean ablation's 0.26, and moves the rest of the distribution more (KL 0.89
-  against 0.61).
-- **Read the remaining loss on held-out rows and beside a second measure.** A constant trained on one score
-  can hold it by distorting everything else; `kl` against the clean logits shows that.
-- **`init` is one vector laid out on the site's last axis**, made by a step before the featurizer's first
-  use: a `mean` of a read at the site over every other axis. `"init": 0` is zero ablation the same way.
-- **The vector is shared across every axis but the last.** At a site that keeps several heads, each takes
-  the same vector; a constant per head is a site per head, `"select": {"num_heads": [h]}`, each with its own.
+- **The trained constant learned the six rows, not the task.** Its mean squared change on them fell from 3.49
+  after the first epoch to 0.0027 after the twentieth. On the held-out rows it keeps 0.65 of a clean 3.46,
+  against mean ablation's 0.26, and moves the rest of the distribution more (KL 0.89 against 0.61).
+- **`init` names one vector laid out on the site's last axis**, here the step `mean`, made before the
+  featurizer's first use: a `mean` of a read at the site over every other axis. `"init": 0` is zero ablation
+  the same way.
 - **`fit.c` is the trained constant, the bare `c` its draw.** Saved, `fit.c` is a bundle holding `vector`;
   loading and saving bundles is the `clab-trained-featurizers` skill.
 - **Table `fit.history.sq` on its own.** Beside a per-row value its `epochs` axis crosses the rows, one
   line per row and epoch.
+- **The vector is shared across every axis but the last**, so a constant per head is a site per head,
+  `"select": {"num_heads": [h]}`. That read keeps `num_heads`, and its plain `mean` is refused as `init`
+  (`'mean' is laid out ['num_heads', 'head_dim']`): reduce the head axis too, a fragment of `steps` that
+  `"init": "c_init"` names:
+
+```json
+{"c_init": {"kind": "op", "op": "mean", "of": "clean.z", "over": ["rows", "pos", "num_heads"]}}
+```
 
 The kind's fields: `clab describe featurizers`.
 
@@ -107,7 +110,7 @@ vector, which a write at the same ragged scope broadcasts over each row's own to
 
 ```json
 {
-  "description": "Mean ablation over a ragged scope: every token of each row's place in GPT-2's residual stream after layer 3, replaced by the mean over every place token of the six rows (per_token) or by the mean of each row's own mean (per_row), and the logit difference scored.",
+  "description": "Mean ablation over a ragged scope: every token of each row's place in GPT-2's residual stream after layer 3. per_token writes the mean over every place token of the six rows, per_row the mean of each row's own mean; the logit difference is scored.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"ioi": {"rows": [
     {"input": "When Mary and John went to the store, John gave a drink to", "answer": " Mary", "other": " John", "place": " store"},
@@ -155,7 +158,6 @@ value
   `pos` first, then over the rows; here the two means differ by a norm of 5.0.
 - **This is a part of the prompt the task does not read**: the logit difference moves by +0.06 and +0.03,
   nothing like the 2.75 at stake.
-- **A row whose scope text is not in its prompt is refused by name** before any forward.
 
 **A mean from another dataset.** A `mean` has no rows axis, so it writes into any dataset's rows. The
 optimal-constant document above does it: `held_mean` swaps the mean harvested on `ioi` into `held`'s rows.
@@ -231,13 +233,14 @@ at                   clean_ld            ablated_ld          worst_cos
 - **One direction per layer.** `h_first.acts` is read at `layers: ":"`, so `mean` keeps its `layers` axis
   and `contrast` is `[12, 768]`; at layer L the write takes the slice labelled L. For one direction at
   every layer, reduce the layers too, `"over": ["layers", "rows", "pos"]`.
-- **The check reads what is left along the direction**: at most 8e-8 of cosine, so the write is where the
-  direction was. `project_out` normalises the direction, so its length does not matter.
+- **The check reads what is left along the direction**, in an entry of its own ([what breaks](../SKILL.md#what-breaks)):
+  at most 8e-8 of cosine, so the write is where the direction was. `project_out` normalises the direction,
+  so its length does not matter.
 - **The control is a random direction per layer**, drawn by `noise` on zeros: it moves the score +0.20,
   where the contrast direction costs 0.74. The plain mean direction, which every row shares, costs 2.21.
-- **The check is an entry of its own.** In the write's entry, a `cosine` after `project_out` on the same
-  sweep ran the first direction at every point.
 - A direction read at fewer layers than the write is made at is refused before any forward.
+- **A probe's direction is not a value** `project_out` takes. Save it as a rank-1 `subspace` bundle and
+  remove it through that: the `clab-trained-featurizers` skill's [probes reference](../../clab-trained-featurizers/references/probes-and-lora.md).
 
 ## Noise and clamp
 
@@ -288,8 +291,7 @@ every value. The `clean` forward also reads the magnitudes that set the doses.
 $ clab table out/noise_and_clamp clean_ld noisy_ld
 at                      clean_ld            noisy_ld
 {"scale":0.0,"seed":1}  2.7463290691375732  2.7463290691375732
-{"scale":0.0,"seed":2}  2.7463290691375732  2.7463290691375732
-{"scale":0.0,"seed":3}  2.7463290691375732  2.7463290691375732
+...
 {"scale":1.5,"seed":1}  2.7463290691375732  3.2704620361328125
 {"scale":1.5,"seed":2}  2.7463290691375732  2.5854721069335938
 {"scale":1.5,"seed":3}  2.7463290691375732  2.5263073444366455
@@ -298,7 +300,7 @@ at                      clean_ld            noisy_ld
 {"scale":6.0,"seed":3}  2.7463290691375732  2.4574038982391357
 $ clab table out/noise_and_clamp first_max rest_max norm9 clamped_ld clamp_null_ld
 first_max          rest_max           norm9               clamped_ld          clamp_null_ld
-2458.553466796875  37.67317199707031   166.64654541015625  2.6074612140655518  2.7463290691375732
+2458.553466796875  37.67317199707031  166.64654541015625  2.6074612140655518  2.7463290691375732
 ```
 
 - **Scale 0 is the null**: the clean run to the bit at every seed.
@@ -311,7 +313,86 @@ first_max          rest_max           norm9               clamped_ld          cl
 - **The clamp at 100 cuts one value class only**: the first token's massive activation (2459 at layer 2,
   where every other token stays under 38). It costs 0.14 of the logit difference; bounds at 3000 cut
   nothing and equal the clean run.
-- **Reduce over rows in a step**, as `first_max` does: a reduction over rows inside an entry is refused,
-  since an entry sees one batch.
+
+### Holding a coordinate
+
+To hold a value's coordinate along a direction at a value, `project_out` the unit direction, then `add` it
+back at that length: `{"op": "add", "with": "at"}` with `at` a step's scaled direction, or `{"op": "add",
+"with": "unit", "scale": v}`. Here every row is held at one template's name-order coordinate:
+
+```json
+{
+  "description": "Holding a direction's coordinate at a value, on GPT-2's IOI prompts at layer 9's last token. The direction is the unit difference of the mean stream of the prompts that name the answer first and of those that name it second. held projects it out of every row and adds it back at the first group's mean coordinate, or the second's; after reads the coordinate left.",
+  "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
+  "data": {
+    "first": {"rows": [
+      {"input": "When Mary and John went to the store, John gave a drink to", "answer": " Mary", "other": " John"},
+      {"input": "When Alice and Bob went to the office, Bob gave a book to", "answer": " Alice", "other": " Bob"},
+      {"input": "When Anna and Mark went to the beach, Mark gave a gift to", "answer": " Anna", "other": " Mark"}
+    ]},
+    "second": {"rows": [
+      {"input": "When Tom and James went to the train station, Tom gave a ball to", "answer": " James", "other": " Tom"},
+      {"input": "When Sarah and David went to the swimming pool, Sarah gave a ring to", "answer": " David", "other": " Sarah"},
+      {"input": "When Lisa and Paul went to the movie theater, Lisa gave a letter to", "answer": " Paul", "other": " Lisa"}
+    ]},
+    "ioi": {"rows": [
+      {"input": "When Mary and John went to the store, John gave a drink to", "answer": " Mary", "other": " John"},
+      {"input": "When Alice and Bob went to the office, Bob gave a book to", "answer": " Alice", "other": " Bob"},
+      {"input": "When Anna and Mark went to the beach, Mark gave a gift to", "answer": " Anna", "other": " Mark"},
+      {"input": "When Tom and James went to the train station, Tom gave a ball to", "answer": " James", "other": " Tom"},
+      {"input": "When Sarah and David went to the swimming pool, Sarah gave a ring to", "answer": " David", "other": " Sarah"},
+      {"input": "When Lisa and Paul went to the movie theater, Lisa gave a letter to", "answer": " Paul", "other": " Lisa"}
+    ]}
+  },
+  "sites": {"l9": {"component": "layer_output", "layers": 9}, "head": {"component": "lm_head_output"}},
+  "steps": {
+    "h_first": {"kind": "forward", "input": "first.input", "interventions": {"r": {"site": "l9", "pos": -1}}},
+    "h_second": {"kind": "forward", "input": "second.input", "interventions": {"r": {"site": "l9", "pos": -1}}},
+    "m_first": {"kind": "op", "op": "mean", "of": "h_first.r"},
+    "m_second": {"kind": "op", "op": "mean", "of": "h_second.r"},
+    "contrast": {"kind": "op", "op": "sub", "of": "m_first", "with": "m_second"},
+    "unit": {"kind": "op", "op": "normalize", "of": "contrast"},
+    "c_first": {"kind": "op", "op": "dot", "of": "m_first", "with": "unit"},
+    "c_second": {"kind": "op", "op": "dot", "of": "m_second", "with": "unit"},
+    "at_first": {"kind": "op", "op": "scale", "of": "unit", "factor": "c_first"},
+    "at_second": {"kind": "op", "op": "scale", "of": "unit", "factor": "c_second"},
+    "clean": {"kind": "forward", "input": "ioi.input", "interventions": {
+      "r": {"site": "l9", "pos": -1},
+      "ld": {"site": "head", "pos": -1, "ops": [{"op": "logit_diff", "a": "ioi.answer", "b": "ioi.other"}]}}},
+    "coord": {"kind": "op", "op": "dot", "of": "clean.r", "with": "unit"},
+    "held": {"kind": "forward", "input": "ioi.input", "interventions": {
+      "hold": {"site": "l9", "pos": -1, "ops": [{"op": "project_out", "direction": "unit"},
+                                               {"op": "add", "with": {"sweep": ["at_first", "at_second"], "label": "at"}}]},
+      "after": {"site": "l9", "pos": -1, "ops": [{"op": "dot", "with": "unit"}]},
+      "ld": {"site": "head", "pos": -1, "ops": [{"op": "logit_diff", "a": "ioi.answer", "b": "ioi.other"}]}}}
+  },
+  "saves": ["c_first", "c_second", "coord", "clean.ld", "held.ld", "held.after"]
+}
+```
+
+```text
+$ clab table out/hold_coordinate coord clean.ld held.ld
+at                  row  pos  pos_token  input                                             coord                answer  other   clean.ld            held.ld
+{"at":"at_first"}   0    13   Ġto        When Mary and John went to the store, John gave…  37.67071533203125     Mary    John   2.0063858032226562  2.0174789428710938
+{"at":"at_first"}   1    13   Ġto        When Alice and Bob went to the office, Bob gave…  39.87980651855469     Alice   Bob    3.3816299438476562  3.2701492309570312
+{"at":"at_first"}   2    13   Ġto        When Anna and Mark went to the beach, Mark gave…  36.27251052856445     Anna    Mark   3.048126220703125   3.1407241821289062
+{"at":"at_first"}   3    14   Ġto        When Tom and James went to the train station, T…  -14.355535507202148   James   Tom    3.0953598022460938  1.5794219970703125
+{"at":"at_first"}   4    14   Ġto        When Sarah and David went to the swimming pool,…  -17.320711135864258   David   Sarah  2.4641342163085938  -1.2577667236328125
+{"at":"at_first"}   5    14   Ġto        When Lisa and Paul went to the movie theater, L…  -21.73158073425293    Paul    Lisa   2.4823379516601562  -1.5134429931640625
+{"at":"at_second"}  0    13   Ġto        When Mary and John went to the store, John gave…  37.67071533203125     Mary    John   2.0063858032226562  -0.17346954345703125
+{"at":"at_second"}  1    13   Ġto        When Alice and Bob went to the office, Bob gave…  39.87980651855469     Alice   Bob    3.3816299438476562  -0.13166046142578125
+{"at":"at_second"}  2    13   Ġto        When Anna and Mark went to the beach, Mark gave…  36.27251052856445     Anna    Mark   3.048126220703125   0.2547454833984375
+...
+```
+
+- **The check is `after`**: `clab table out/hold_coordinate held.after` gives every row the target,
+  `c_first` 37.94 or `c_second` -17.80, to 1e-5.
+- **A row held at the other template's value loses the answer.** At `at_first` the second template's rows
+  fall to 1.58, -1.26 and -1.51; at `at_second` the first template's fall to -0.17, -0.13 and 0.25. A row
+  held near its own coordinate moves by at most 0.23 (row 5 at `at_second`, 2.48 to 2.26).
+- **Set the value against `coord`**, the clean coordinate: 36 to 40 on one template, -14 to -22 on the other.
+- **Held at 0 it is the direction projected out**; held at the rows' mean coordinate it is a mean ablation
+  along one direction. An SAE feature or another featurizer's coordinate is held between its `encode` and
+  `decode`: the `clab-trained-featurizers` skill.
 
 Edits and reductions: `clab describe ops`.

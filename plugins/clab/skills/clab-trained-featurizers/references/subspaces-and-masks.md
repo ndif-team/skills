@@ -71,8 +71,8 @@ The spread across draws, 2.447 to 2.474 nats, is the null every trained point cl
 
 A declared subspace with no `file_path` is drawn from its seed where the run starts. `das_apply.json` with
 `{"kind": "subspace", "k": 4, "seed": {"sweep": [0, 1, 2]}}` in place of the loaded `rot` scores three draws
-with no training at all: 0/7 at every seed, mean ce 2.474, 2.471 and 2.447. Seed 0's per-row `ce` equals
-`das.json`'s `ctl` to the bit, so the bare-name control and a declared draw are one control.
+with no training at all: 0/7 at every seed, mean ce 2.474, 2.471 and 2.447. Seed 0 is `das.json`'s draw, the
+one control of [What breaks](../SKILL.md#what-breaks).
 
 ### Principal directions
 
@@ -147,14 +147,14 @@ for weight, gate in plan.results["fit.mask"].items():
 | 5.0 | 30 | 0.0 |
 
 `ctl_acc`, the bare `mask` with every unit on, is 1.0: the full-vector interchange. Four directions carry the
-day where no small set of units does, so DAS and DBM answer different questions about one site. The four
-fits run in under a minute on a CPU. The swept `fit.mask` file holds a gate per weight; rerun at one weight to
-save a loadable gate.
+day where no small set of units does, so DAS and DBM answer different questions about one site. Each fit
+takes seconds on a CPU. The swept `fit.mask` file holds a gate per weight; rerun at one weight to save a
+loadable gate.
 
 ## Head masking: which heads the indirect object needs
 
 Head patching moves one head at a time. Head masking trains a gate with one unit per head of every layer,
-all at once: a head that is off takes its value from a corrupt prompt, the objective keeps the clean logit
+all at once. A head that is off takes its value from a corrupt prompt, the objective keeps the clean logit
 difference, and an L1 weight turns heads off. Clean prompts are GPT-2's indirect-object task, where it gives
 the indirect object (IO) over the subject (S); a corrupt prompt replaces the second subject with a third name:
 
@@ -202,8 +202,8 @@ the indirect object (IO) over the subject (S); a corrupt prompt replaces the sec
 - **`over: ["layers", "num_heads"]`** at `attention_premix` over every layer lays `theta` out `[12, 12]`, one
   unit per head, broadcast over `head_dim`. At layer L the write takes row L of the mask.
 - **`apply` with `with`** writes `h·m + corrupt·(1−m)`: the clean value where a head is on, the corrupt one
-  where it is off, each exactly. Write it this way: the same interpolation as a `sub`, `apply`, `add` chain rounds, and its untrained
-  null misses the clean logit difference by 7.6e-6.
+  where it is off, each exactly. Write it this way: the same interpolation as a `sub`, `apply`, `add` chain
+  rounds, and its untrained null misses the clean logit difference in its last bits.
 - **The corrupt read and the write meet position for position**, at the static window `0:14`, on prompts that
   all tokenize to 14 tokens with one-token names.
 - **`sq`, the squared change from the clean logit difference, is the objective**; `mean_ld` is reported.
@@ -243,7 +243,7 @@ for weight, gate in plan.results["fit.heads"].items():
 At weight 3.0 it keeps 42 heads. At 30.0, 14 of 144 heads hold the logit difference at 2.60 against the clean
 3.08. Among them are heads the published indirect-object circuit of GPT-2 small names: duplicate-token heads
 0.1 and 3.0, induction head 5.5, S-inhibition heads 7.3, 7.9, 8.6 and 8.10, and name movers 9.9 and 10.0.
-The four fits run in under a minute on a CPU.
+Each fit takes seconds on a CPU.
 
 ### Its nulls
 

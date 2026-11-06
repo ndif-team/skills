@@ -2,9 +2,7 @@
 
 A `linear` featurizer is a probe, `h W + b`, one score per class; it only encodes. A `lora` is a low-rank
 adapter at one site; it only applies. Both train in a fit through the frozen model. Each kind's fields are the
-`clab` skill's [featurizers-and-fit reference](../../clab/references/featurizers-and-fit.md); positions are
-its [positions reference](../../clab/references/positions.md), and generation options its
-[generate reference](../../clab/references/generate.md).
+`clab` skill's [featurizers-and-fit reference](../../clab/references/featurizers-and-fit.md).
 
 ## What breaks here
 
@@ -15,14 +13,14 @@ its [positions reference](../../clab/references/positions.md), and generation op
   lower class id, so its accuracy is the share of rows whose label sorts first.
 - **Hold out what the probe must generalise over.** A probe trained and scored on the same cities reads token
   identity; one scored on unseen cities reads the property.
-- **Decodable is not used.** Test use with an interchange along the probe's span, beside random subspaces of
-  the same rank ([below](#use-a-probe-causally)).
+- **Decodable is not used.** Patch or ablate along the probe's span, beside drawn subspaces of the same rank
+  ([below](#use-a-probe-causally)).
 - **An adapter stands for a weight change, so it acts at every position**: `{"index": ":"}`, the first
   position included. Narrowed to the last token it is an activation edit there.
 - **In a generation, write the adapter at `"frame": ":"`.** A `pos` with no `frame` is the prefill only, and
   every decode call runs unadapted.
 - **Hold out what the adapter must transfer to.** An adapter trained on five days and scored on the other two
-  learns those five answers: its held-out cross entropy rises from 2.4-4.8 to 11-14 nats.
+  learns those five answers, and its held-out cross entropy rises.
 
 ## A probe per layer
 
@@ -35,44 +33,26 @@ which is the city's last token, and trains on 24 cities of four countries:
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {
     "train": {"rows": [
-      {"input": "I live in Paris", "country": "France"},
-      {"input": "I live in Rome", "country": "Italy"},
-      {"input": "I live in Tokyo", "country": "Japan"},
-      {"input": "I live in Berlin", "country": "Germany"},
-      {"input": "I live in Lyon", "country": "France"},
-      {"input": "I live in Milan", "country": "Italy"},
-      {"input": "I live in Osaka", "country": "Japan"},
-      {"input": "I live in Munich", "country": "Germany"},
-      {"input": "I live in Marseille", "country": "France"},
-      {"input": "I live in Naples", "country": "Italy"},
-      {"input": "I live in Kyoto", "country": "Japan"},
-      {"input": "I live in Hamburg", "country": "Germany"},
-      {"input": "I live in Toulouse", "country": "France"},
-      {"input": "I live in Turin", "country": "Italy"},
-      {"input": "I live in Yokohama", "country": "Japan"},
-      {"input": "I live in Frankfurt", "country": "Germany"},
-      {"input": "I live in Nice", "country": "France"},
-      {"input": "I live in Venice", "country": "Italy"},
-      {"input": "I live in Nagoya", "country": "Japan"},
-      {"input": "I live in Cologne", "country": "Germany"},
-      {"input": "I live in Bordeaux", "country": "France"},
-      {"input": "I live in Florence", "country": "Italy"},
-      {"input": "I live in Kobe", "country": "Japan"},
-      {"input": "I live in Stuttgart", "country": "Germany"}
+      {"input": "I live in Paris", "country": "France"}, {"input": "I live in Rome", "country": "Italy"},
+      {"input": "I live in Tokyo", "country": "Japan"}, {"input": "I live in Berlin", "country": "Germany"},
+      {"input": "I live in Lyon", "country": "France"}, {"input": "I live in Milan", "country": "Italy"},
+      {"input": "I live in Osaka", "country": "Japan"}, {"input": "I live in Munich", "country": "Germany"},
+      {"input": "I live in Marseille", "country": "France"}, {"input": "I live in Naples", "country": "Italy"},
+      {"input": "I live in Kyoto", "country": "Japan"}, {"input": "I live in Hamburg", "country": "Germany"},
+      {"input": "I live in Toulouse", "country": "France"}, {"input": "I live in Turin", "country": "Italy"},
+      {"input": "I live in Yokohama", "country": "Japan"}, {"input": "I live in Frankfurt", "country": "Germany"},
+      {"input": "I live in Nice", "country": "France"}, {"input": "I live in Venice", "country": "Italy"},
+      {"input": "I live in Nagoya", "country": "Japan"}, {"input": "I live in Cologne", "country": "Germany"},
+      {"input": "I live in Bordeaux", "country": "France"}, {"input": "I live in Florence", "country": "Italy"},
+      {"input": "I live in Kobe", "country": "Japan"}, {"input": "I live in Stuttgart", "country": "Germany"}
     ]},
     "test": {"rows": [
-      {"input": "I live in Lille", "country": "France"},
-      {"input": "I live in Bologna", "country": "Italy"},
-      {"input": "I live in Sapporo", "country": "Japan"},
-      {"input": "I live in Dresden", "country": "Germany"},
-      {"input": "I live in Nantes", "country": "France"},
-      {"input": "I live in Genoa", "country": "Italy"},
-      {"input": "I live in Hiroshima", "country": "Japan"},
-      {"input": "I live in Leipzig", "country": "Germany"},
-      {"input": "I live in Strasbourg", "country": "France"},
-      {"input": "I live in Palermo", "country": "Italy"},
-      {"input": "I live in Fukuoka", "country": "Japan"},
-      {"input": "I live in Hanover", "country": "Germany"}
+      {"input": "I live in Lille", "country": "France"}, {"input": "I live in Bologna", "country": "Italy"},
+      {"input": "I live in Sapporo", "country": "Japan"}, {"input": "I live in Dresden", "country": "Germany"},
+      {"input": "I live in Nantes", "country": "France"}, {"input": "I live in Genoa", "country": "Italy"},
+      {"input": "I live in Hiroshima", "country": "Japan"}, {"input": "I live in Leipzig", "country": "Germany"},
+      {"input": "I live in Strasbourg", "country": "France"}, {"input": "I live in Palermo", "country": "Italy"},
+      {"input": "I live in Fukuoka", "country": "Japan"}, {"input": "I live in Hanover", "country": "Germany"}
     ]}
   },
   "sites": {"stream": {"component": "layer_output", "layers": {"sweep": [0, 2, 4, 8, 11]}}},
@@ -101,13 +81,9 @@ clab table out/probe fit.held_out.acc
 at                         value
 {"layers":0,"epochs":0}    0.25
 {"layers":0,"epochs":30}   0.5
-{"layers":2,"epochs":0}    0.25
 {"layers":2,"epochs":30}   0.8333333134651184
-{"layers":4,"epochs":0}    0.25
 {"layers":4,"epochs":30}   0.9166666865348816
-{"layers":8,"epochs":0}    0.25
 {"layers":8,"epochs":30}   1.0
-{"layers":11,"epochs":0}   0.25
 {"layers":11,"epochs":30}  0.9166666865348816
 ```
 
@@ -118,57 +94,59 @@ at                         value
 - **The `held_out` eval** reads `test` wherever the body says `train`: the input, the target and the classes
   scored. The class list stays the training column's, and a held-out label outside it is refused before any
   forward.
-- **Ten fits run in under a minute on a CPU**, each with a forward per minibatch. A swept fit's `fit.probe`
-  holds a probe per point, which no featurizer loads: fit the layer you keep unswept to save one.
+- **Each fit takes seconds on a CPU**, with a forward per minibatch. A swept fit's `fit.probe` holds a probe
+  per point, which no featurizer loads: fit the layer you keep unswept to save one.
 
 ## Many probes in one fit
 
 One forward per minibatch can serve many probes: one `linear` featurizer, one entry and one objective term per
 probe. A probe's parameters appear in its own term alone, so it trains as it would alone. `probe.json` with
-its two sweeps replaced by these, at `"epochs": 30`:
+everything but its `description`, `model` and `data` replaced by this:
 
 ```json
 {
   "sites": {"l4": {"component": "layer_output", "layers": 4}, "l8": {"component": "layer_output", "layers": 8}},
   "featurizers": {"p4": {"kind": "linear", "classes": "train.country"}, "p8": {"kind": "linear", "classes": "train.country"}},
-  "train": ["p4", "p8"],
-  "objective": {"ce4": 1.0, "ce8": 1.0},
   "steps": {
-    "read": {"kind": "forward", "input": "train.input", "interventions": {
-      "p4": {"site": "l4", "pos": -1, "ops": [{"op": "encode", "featurizer": "fit.p4"}]},
-      "p8": {"site": "l8", "pos": -1, "ops": [{"op": "encode", "featurizer": "fit.p8"}]}}},
-    "ce4": {"kind": "op", "op": "cross_entropy", "of": "read.p4", "target": "train.country"},
-    "ce8": {"kind": "op", "op": "cross_entropy", "of": "read.p8", "target": "train.country"},
-    "hit4": {"kind": "op", "op": "match", "of": "read.p4", "expected": "train.country"},
-    "hit8": {"kind": "op", "op": "match", "of": "read.p8", "expected": "train.country"},
-    "acc4": {"kind": "op", "op": "mean", "of": "hit4"},
-    "acc8": {"kind": "op", "op": "mean", "of": "hit8"}
-  }
+    "fit": {
+      "kind": "fit", "train": ["p4", "p8"], "objective": {"ce4": 1.0, "ce8": 1.0},
+      "epochs": 30, "batch_size": 8, "seed": 0, "optimizer": {"name": "adam", "lr": 0.01},
+      "eval": {"held_out": {"train": "test"}},
+      "steps": {
+        "read": {"kind": "forward", "input": "train.input", "interventions": {
+          "p4": {"site": "l4", "pos": -1, "ops": [{"op": "encode", "featurizer": "fit.p4"}]},
+          "p8": {"site": "l8", "pos": -1, "ops": [{"op": "encode", "featurizer": "fit.p8"}]}}},
+        "ce4": {"kind": "op", "op": "cross_entropy", "of": "read.p4", "target": "train.country"},
+        "ce8": {"kind": "op", "op": "cross_entropy", "of": "read.p8", "target": "train.country"},
+        "hit4": {"kind": "op", "op": "match", "of": "read.p4", "expected": "train.country"},
+        "hit8": {"kind": "op", "op": "match", "of": "read.p8", "expected": "train.country"},
+        "acc4": {"kind": "op", "op": "mean", "of": "hit4"},
+        "acc8": {"kind": "op", "op": "mean", "of": "hit8"}
+      }
+    }
+  },
+  "saves": ["fit.held_out.acc4", "fit.held_out.acc8", "fit.held_out.ce4", "fit.held_out.ce8"]
 }
 ```
 
-The root `sites` and `featurizers`, and inside the fit `train`, `objective` and `steps`, replace their
-counterparts. `fit.held_out.acc4` is 0.917 and `fit.held_out.acc8` 1.0, and each probe's `fit.held_out.ce`
-equals the swept document's at that layer to the bit. Build a document of many probes in Python as a dict;
-`early_stop` judges one body op and ends the fit for every probe at once, so leave it out.
+`fit.held_out.acc4` is 0.917 and `fit.held_out.acc8` 1.0, and each probe's held-out `ce` equals the swept
+document's at that layer to the bit. Build a document of many probes in Python as a dict; `early_stop` judges
+one body op and ends the fit for every probe at once, so leave it out.
 
 ## Use a probe causally
 
-A probe is not an operand, and a `linear` featurizer has no `decode`, so no op writes along it. To test
-whether the model uses what a probe reads, save its span as a `subspace` bundle and run an interchange
-through it. This probe reads the day at `das.json`'s site, layer 5 at the day token:
+`project_out` takes a value and a `linear` featurizer has no `decode`, so the way to patch, ablate or project
+out along a probe's direction is a `subspace` bundle of its weights (the `clab-ablation` skill sends a probe
+here). This probe reads the day at `das.json`'s site, layer 5 at the day token:
 
 ```json
 {
   "description": "A probe for the day at GPT-2's layer 5 output at the day token, the site das.json trains its rotation at; saved, unswept, so its weights can be read back.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"days": {"rows": [
-    {"input": "If today is Monday, tomorrow is", "day": "Monday"},
-    {"input": "If today is Tuesday, tomorrow is", "day": "Tuesday"},
-    {"input": "If today is Wednesday, tomorrow is", "day": "Wednesday"},
-    {"input": "If today is Thursday, tomorrow is", "day": "Thursday"},
-    {"input": "If today is Friday, tomorrow is", "day": "Friday"},
-    {"input": "If today is Saturday, tomorrow is", "day": "Saturday"},
+    {"input": "If today is Monday, tomorrow is", "day": "Monday"}, {"input": "If today is Tuesday, tomorrow is", "day": "Tuesday"},
+    {"input": "If today is Wednesday, tomorrow is", "day": "Wednesday"}, {"input": "If today is Thursday, tomorrow is", "day": "Thursday"},
+    {"input": "If today is Friday, tomorrow is", "day": "Friday"}, {"input": "If today is Saturday, tomorrow is", "day": "Saturday"},
     {"input": "If today is Sunday, tomorrow is", "day": "Sunday"}
   ]}},
   "sites": {"target": {"component": "layer_output", "layers": 5}},
@@ -191,8 +169,9 @@ through it. This probe reads the day at `das.json`'s site, layer 5 at the day to
 }
 ```
 
-`fit.train.acc` is 1.0. From the corpus root, after the run, this writes the span of its class differences
-(rank 6) as a subspace bundle with the header clab writes:
+`fit.train.acc` is 1.0. From the corpus root, after the run, this writes the span of its class differences as
+a subspace bundle with the header clab writes. The span's rank is the classes less one: 6 here, and for a
+two-class probe the one direction `W[:, 1] - W[:, 0]`, normalised.
 
 <!-- test: skip -->
 ```python
@@ -209,17 +188,63 @@ save_file({"basis": span}, "out/day_probe/span.safetensors", metadata={
     "k": str(span.shape[1]), "parametrization": "cayley", "document": "probe_span"})
 ```
 
-`das_apply.json` (in [SKILL.md](../SKILL.md)) with `rot` replaced by `{"kind": "subspace", "file_path":
-"out/day_probe/span.safetensors"}` swaps the probe's span from the counterfactual into the base:
+To patch along it, `das_apply.json` (in [SKILL.md](../SKILL.md)) takes `{"kind": "subspace", "file_path":
+"out/day_probe/span.safetensors"}` as `rot`. To ablate along it, a `swap` to 0 inside the bracket removes what
+lies along the span and keeps the rest, as `project_out` would along each of its directions:
 
-| subspace swapped at layer 5, day token | rank | held-out acc | mean ce |
+<!-- test: skip -->
+```json
+{
+  "description": "Ablate the day probe's span at GPT-2's layer 5 output at the day token: encode through the span bundle, set its coordinates to 0, decode. A second entry reads what is left along the span; the null is the bracket with no edit, which must equal the clean run.",
+  "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
+  "data": {"days": {"rows": [
+    {"input": "If today is Monday, tomorrow is", "answer": " Tuesday"}, {"input": "If today is Tuesday, tomorrow is", "answer": " Wednesday"},
+    {"input": "If today is Wednesday, tomorrow is", "answer": " Thursday"}, {"input": "If today is Thursday, tomorrow is", "answer": " Friday"},
+    {"input": "If today is Friday, tomorrow is", "answer": " Saturday"}, {"input": "If today is Saturday, tomorrow is", "answer": " Sunday"},
+    {"input": "If today is Sunday, tomorrow is", "answer": " Monday"}
+  ]}},
+  "sites": {"target": {"component": "layer_output", "layers": 5}, "head": {"component": "lm_head_output"}},
+  "featurizers": {"span": {"kind": "subspace", "file_path": "out/day_probe/span.safetensors"}},
+  "steps": {
+    "clean": {"kind": "forward", "input": "days.input", "interventions": {
+      "logits": {"site": "head", "pos": -1, "ops": [{"op": "token_prob", "token": "days.answer"}]}}},
+    "null": {"kind": "forward", "input": "days.input", "interventions": {
+      "kept": {"site": "target", "pos": -4, "ops": [{"op": "encode", "featurizer": "span"}, {"op": "decode", "featurizer": "span"}]},
+      "logits": {"site": "head", "pos": -1, "ops": [{"op": "token_prob", "token": "days.answer"}]}}},
+    "ablated": {"kind": "forward", "input": "days.input", "interventions": {
+      "abl": {"site": "target", "pos": -4, "ops": [{"op": "encode", "featurizer": "span"}, {"op": "swap", "with": 0.0},
+                                                   {"op": "decode", "featurizer": "span"}]},
+      "left": {"site": "target", "pos": -4, "ops": [{"op": "encode", "featurizer": "span"}]},
+      "logits": {"site": "head", "pos": -1, "ops": [{"op": "token_prob", "token": "days.answer"}]}}},
+    "p_clean": {"kind": "op", "op": "mean", "of": "clean.logits"},
+    "p_null": {"kind": "op", "op": "mean", "of": "null.logits"},
+    "p_ablated": {"kind": "op", "op": "mean", "of": "ablated.logits"},
+    "left_abs": {"kind": "op", "op": "abs", "of": "ablated.left"},
+    "worst_left": {"kind": "op", "op": "max", "of": "left_abs", "over": ["rows", "pos", "features"]}
+  },
+  "saves": ["p_clean", "p_null", "p_ablated", "worst_left"]
+}
+```
+
+```text
+clab run documents/probe_ablate.json
+clab table out/probe_ablate p_clean p_null p_ablated worst_left
+p_clean              p_null               p_ablated            worst_left
+0.22559413313865662  0.22559413313865662  0.12499908357858658  7.718801498413086e-06
+```
+
+| subspace at layer 5, day token | rank | patched in: held-out acc, mean ce | projected out: mean P(answer) |
 |---|---|---|---|
-| the probe's span | 6 | 1.0 | 1.707 |
-| a drawn subspace, seeds 0, 1, 2 | 6 | 0.0 at each | 2.462, 2.470, 2.440 |
-| DAS, trained (`das.json`) | 4 | 1.0 | 1.093 |
+| the probe's span | 6 | 1.0, 1.707 | 0.125 |
+| a drawn subspace, seeds 0, 1, 2 | 6 | 0.0 at each; 2.462, 2.470, 2.440 | 0.243, 0.218, 0.223 |
+| DAS, trained (`das.json`'s `fit.rot`) | 4 | 1.0, 1.093 | 0.104 |
 
-The probe's directions are used: swapping them moves the answer where random directions of the same rank do
-not. The drawn rows are `das_apply.json` with `{"kind": "subspace", "k": 6, "seed": {"sweep": [0, 1, 2]}}`.
+- **The probe's directions are used.** Projected out, they take the answer's probability from 0.226 to 0.125;
+  drawn subspaces of the same rank move it by under 0.02.
+- **The null is the bracket with no edit**, `p_null`, equal to `p_clean` to the bit; `left`, the span's
+  coordinates after the write, is at most 7.7e-6.
+- **The drawn rows** put `{"kind": "subspace", "k": 6, "seed": {"sweep": [0, 1, 2]}}` in place of the loaded
+  span. A sweep cannot stand for an op's `featurizer` (refused by name), so each bundle is a document of its own.
 
 ## LoRA: train an adapter
 
@@ -232,21 +257,15 @@ phrasing and scored on another:
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {
     "train": {"rows": [
-      {"input": "If today is Monday, tomorrow is", "target": " Wednesday"},
-      {"input": "If today is Tuesday, tomorrow is", "target": " Thursday"},
-      {"input": "If today is Wednesday, tomorrow is", "target": " Friday"},
-      {"input": "If today is Thursday, tomorrow is", "target": " Saturday"},
-      {"input": "If today is Friday, tomorrow is", "target": " Sunday"},
-      {"input": "If today is Saturday, tomorrow is", "target": " Monday"},
+      {"input": "If today is Monday, tomorrow is", "target": " Wednesday"}, {"input": "If today is Tuesday, tomorrow is", "target": " Thursday"},
+      {"input": "If today is Wednesday, tomorrow is", "target": " Friday"}, {"input": "If today is Thursday, tomorrow is", "target": " Saturday"},
+      {"input": "If today is Friday, tomorrow is", "target": " Sunday"}, {"input": "If today is Saturday, tomorrow is", "target": " Monday"},
       {"input": "If today is Sunday, tomorrow is", "target": " Tuesday"}
     ]},
     "test": {"rows": [
-      {"input": "Today is Monday, so tomorrow will be", "target": " Wednesday"},
-      {"input": "Today is Tuesday, so tomorrow will be", "target": " Thursday"},
-      {"input": "Today is Wednesday, so tomorrow will be", "target": " Friday"},
-      {"input": "Today is Thursday, so tomorrow will be", "target": " Saturday"},
-      {"input": "Today is Friday, so tomorrow will be", "target": " Sunday"},
-      {"input": "Today is Saturday, so tomorrow will be", "target": " Monday"},
+      {"input": "Today is Monday, so tomorrow will be", "target": " Wednesday"}, {"input": "Today is Tuesday, so tomorrow will be", "target": " Thursday"},
+      {"input": "Today is Wednesday, so tomorrow will be", "target": " Friday"}, {"input": "Today is Thursday, so tomorrow will be", "target": " Saturday"},
+      {"input": "Today is Friday, so tomorrow will be", "target": " Sunday"}, {"input": "Today is Saturday, so tomorrow will be", "target": " Monday"},
       {"input": "Today is Sunday, so tomorrow will be", "target": " Tuesday"}
     ]}
   },
@@ -290,10 +309,7 @@ value
 
 - **The null is a clean forward.** `B` is drawn as zeros, so the untrained adapter is the model. At
   `"epochs": 0` the held-out `ce` equals `clean_ce` to the bit, row for row, and `fit.held_out.acc` is 0.0.
-- **Trained, it transfers to the other phrasing**: 7/7 held out, mean cross entropy 4.16 down to 0.165.
-- **The scale is `alpha / rank`**, 2 here. The bundle, `out/lora_train/fit.lora.safetensors`, holds `A`
-  `[768, 4]` and `B` `[4, 768]`, its header `rank` and `alpha`.
-- **One adapter at a site that picks several layers is shared.** Sweep `layers` for one adapter per layer.
+- **Trained, it transfers to the other phrasing**: 7/7 held out, mean `ce` 4.16 to 0.165, at `alpha / rank` 2.
 
 ## Apply it in chosen steps
 
@@ -306,12 +322,9 @@ A step that names the bundle runs the adapted model; one that does not runs the 
   "description": "The apply half of lora_train.json: the adapter loaded from its bundle (rank and alpha from the header) and declared once as the named bundle of entries 'adapted'. A step that names it runs the adapted model; one that does not runs the model.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {"test": {"rows": [
-    {"input": "Today is Monday, so tomorrow will be", "target": " Wednesday"},
-    {"input": "Today is Tuesday, so tomorrow will be", "target": " Thursday"},
-    {"input": "Today is Wednesday, so tomorrow will be", "target": " Friday"},
-    {"input": "Today is Thursday, so tomorrow will be", "target": " Saturday"},
-    {"input": "Today is Friday, so tomorrow will be", "target": " Sunday"},
-    {"input": "Today is Saturday, so tomorrow will be", "target": " Monday"},
+    {"input": "Today is Monday, so tomorrow will be", "target": " Wednesday"}, {"input": "Today is Tuesday, so tomorrow will be", "target": " Thursday"},
+    {"input": "Today is Wednesday, so tomorrow will be", "target": " Friday"}, {"input": "Today is Thursday, so tomorrow will be", "target": " Saturday"},
+    {"input": "Today is Friday, so tomorrow will be", "target": " Sunday"}, {"input": "Today is Saturday, so tomorrow will be", "target": " Monday"},
     {"input": "Today is Sunday, so tomorrow will be", "target": " Tuesday"}
   ]}},
   "sites": {"target": {"component": "layer_output", "layers": 5}, "head": {"component": "lm_head_output"}},
@@ -346,8 +359,7 @@ row  input                                    value
 2    Today is Wednesday, so tomorrow will be   Friday, Saturday or
 ```
 
-- **`adapted_ce` equals `lora_train.json`'s `fit.held_out.ce` to the bit**: the same rows through the same
-  adapter. Mean 0.165 adapted against 4.160 clean.
+- **`adapted_ce` equals `lora_train.json`'s `fit.held_out.ce` to the bit**, mean 0.165 against 4.160 clean.
 - **`frame: ":"` keeps the adapter on at every decode call.** With it at the prefill only (`prefill_only`),
   the first token is the same and 5 of 7 continuations differ.
 
@@ -355,20 +367,14 @@ row  input                                    value
 
 An adapter on a projection reads the projection's input and adds to its output: `with` names the input, an
 entry of the same forward at a site the forward reaches first. On layer 5's attention output projection it
-reads `attention_premix` and adds at `attention_output`. `lora_train.json` with these sites and this body
-forward, the rest unchanged:
+reads `attention_premix` and adds at `attention_output`. `lora_train.json` with the root sites `premix`
+(`attention_premix`, layer 5) and `o_proj` (`attention_output`, layer 5) beside `head`, and this body step:
 
 ```json
-{
-  "sites": {"premix": {"component": "attention_premix", "layers": 5},
-            "o_proj": {"component": "attention_output", "layers": 5},
-            "head": {"component": "lm_head_output"}},
-  "adapted": {"kind": "forward", "input": "train.input", "interventions": {
-    "x": {"site": "premix", "pos": {"index": ":"}},
-    "adapt": {"site": "o_proj", "pos": {"index": ":"},
-              "ops": [{"op": "apply", "featurizer": "fit.lora", "with": "adapted.x"}]},
-    "logits": {"site": "head", "pos": -1}}}
-}
+{"adapted": {"kind": "forward", "input": "train.input", "interventions": {
+  "x": {"site": "premix", "pos": {"index": ":"}},
+  "adapt": {"site": "o_proj", "pos": {"index": ":"}, "ops": [{"op": "apply", "featurizer": "fit.lora", "with": "adapted.x"}]},
+  "logits": {"site": "head", "pos": -1}}}}
 ```
 
 It reaches 7/7 held out, mean cross entropy 0.182. `adapted.x` is `[rows, pos, num_heads, head_dim]`, and
@@ -377,13 +383,8 @@ It reaches 7/7 held out, mean cross entropy 0.182. `adapted.x` is `[rows, pos, n
 named bundle, and a bare `"with": "x"` means that bundle's `x`:
 
 ```json
-{
-  "adapted": {
-    "x": {"site": "premix", "pos": {"frame": ":", "index": ":"}},
-    "adapt": {"site": "o_proj", "pos": {"frame": ":", "index": ":"},
-              "ops": [{"op": "apply", "featurizer": "lora", "with": "x"}]}
-  }
-}
+{"adapted": {"x": {"site": "premix", "pos": {"frame": ":", "index": ":"}},
+             "adapt": {"site": "o_proj", "pos": {"frame": ":", "index": ":"}, "ops": [{"op": "apply", "featurizer": "lora", "with": "x"}]}}}
 ```
 
 A forward that names it gives the fit's `fit.held_out.ce` to the bit. Refused before any forward, the last

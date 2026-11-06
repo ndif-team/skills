@@ -1,6 +1,6 @@
 ---
 name: clab-patching
-description: Find which layer, position, attention head, MLP neuron, path or attention pattern carries a behaviour, with a clab document that swaps a counterfactual prompt's value into a base prompt. Covers interchange (activation) patching, denoising and noising, corrupt-and-restore (causal tracing), the layer-by-position map, head and head-set patching, neuron patching, path patching (to the logits or a later head's query), attention-pattern patching, and attribution patching (gradient times the counterfactual difference) to rank every head with one backward. Includes the self-swap null, the exactly-zero gradient null, scoping both prompts of a pair, windows, IIA (`match`), logit difference, `token_prob`, `kl`, `js`, `cosine`, and IOI-style name pairs. Ablation (zero, mean, resample) is `clab-ablation`; DAS is `clab-trained-featurizers`; the format is `clab`; a refusal or failing null is `clab-debugging`.
+description: Find which layer, position, attention head, MLP neuron, path or attention pattern carries a behaviour, with a clab document that swaps a counterfactual prompt's value into a base prompt. Covers interchange (activation) patching, denoising and noising, corrupt-and-restore (causal tracing), the layer-by-position map, head, head-set and neuron patching, path patching, attention-pattern patching and patching into a generation. Attribution patching ranks every head, position or neuron with one backward, with or without a counterfactual. Includes the self-swap null, the gradient checks, scoped pairs, windows, IIA (`match`), logit difference, `token_prob`, `kl`, `js`, `cosine` and IOI name pairs. Removing a component is `clab-ablation`; DAS is `clab-trained-featurizers`; a lens or an attention pattern is `clab-lenses-and-attention`; steering is `clab-steering-and-generation`; the format is `clab`; a refusal or failing null is `clab-debugging`.
 ---
 
 # Patching with clab
@@ -11,28 +11,27 @@ the CPU on `openai-community/gpt2` (float32, 12 layers of 12 heads), each in sec
 Patching asks whether a value carries what decides the answer. Read it on a counterfactual prompt, swap it into
 the base prompt at the same place, and score the base run. In clab that is a forward that reads, a forward
 whose entry writes with `swap`, and metric steps after them; every recipe here carries the null that proves
-the wiring.
+the wiring. Clean values into a corrupted base (denoising) ask what restores the answer, and corrupted values
+into a clean base (noising) what breaks it: one document, with the two inputs exchanged.
 
 ## What breaks
 
-- **An entry without an edit in `ops` only reads.** A patch written without `"ops": [{"op": "swap", "with":
-  "<step>.<entry>"}]` runs and returns the clean numbers.
+- **An entry without an edit in `ops` only reads** (the `clab` skill's list).
 - **A patch without its null proves nothing.** Read the base's own value at the patch's site and `pos`, swap it
   back in a forward of its own, and check its scores equal the clean run's to the bit. A gap means the read and
   the write are not the same selection: fix the document before reading any effect.
 - **Both prompts of a pair belong in one dataset.** A counterfactual read on a dataset of its own is refused as
   an operand (`'counterfactual.v_cf' of 'cfs'; an op takes one dataset's rows`). Put it in a column of the base
   rows and run its forward on that column.
-- **A counted `pos` between two prompts pairs index with index.** On rows of different lengths the run refuses
-  a pair it cannot vouch for and names the two tokens. On rows of equal length nothing checks it. Scope each
-  side on its own word: `{"scope": {"column": "pairs.day"}, "index": -1}` on the base, `pairs.cf_day` on the
-  counterfactual.
+- **A counted `pos` between two prompts pairs index with index.** On prompts of different lengths `-k` passes
+  where their last k−1 tokens match, and is refused past that, naming the two tokens; prompts of one length are
+  never checked. Scope each side on its own word: `{"scope": {"column": "pairs.day"}, "index": -1}` on the base,
+  `pairs.cf_day` on the counterfactual.
 - **A `layers` slice or list on a write patches every layer it picks at once.** Sweep `layers` to patch one
   layer per point.
 - **A swept write `pos` against an unswept read writes the one read value at every point.** Sweep the read's
   `pos` over the same values under the same `label`.
-- **Two sweeps of one field zip unless each has its own `label`.** Sweeps of different fields (`layers`,
-  `num_heads`) cross. Check the `axes` column of `clab show` before trusting a grid.
+- **Two sweeps of one field zip unless each has its own `label`** (the `clab` skill's list).
 - **A swept `pos`'s coordinate is not the table's `pos` column.** `at` holds the swept value; `pos` is where
   the tabled read landed. Label the patch's sweep (`"label": "patch_pos"`) to keep the two apart.
 - **`match` alone hides a graded effect.** It stays 0 until the top token flips: at layer 7, the last position
@@ -41,8 +40,10 @@ the wiring.
   so a layer sweep at `-1` measures how late the answer can still be swapped in, not where it is computed.
 - **A freeze listed after the patch it protects overwrites it**, every point equals the clean run, and the
   nulls still pass ([heads, neurons and paths](references/heads-neurons-and-paths.md)).
-- **A `grad` of the wrong entry gives a plausible map.** Carry the null whose gradient must be exactly zero
-  ([attribution](references/attribution.md)).
+- **The `mul 0` null proves the wiring, not the metric.** Its gradient is exactly 0 when the `grad` is of the
+  entry you zeroed and the wiring is exact; it cannot tell you that entry is the metric you meant to report. The
+  central difference at one point does ([check the gradient](references/attribution.md#check-the-gradient)),
+  and real patching of the top points does for the ranking.
 - **An answer column is the token the model continues with, leading space included** (`" Tuesday"`); the
   `clab` skill's [data reference](../clab/references/data.md) has the rule.
 
@@ -267,10 +268,12 @@ Read the corners and the nulls before the middle:
   last token. That band is what the map localizes.
 
 The map counts positions, which pairs one word with the same word only because both prompts come from one
-template and tokenize to 7 tokens. Check `clab show`'s positions before trusting a counted map, and on pairs of
-different lengths map by scope ([pairs, scopes and maps](references/pairs-scopes-and-maps.md)). How labels zip
-and cross, a point's cost and reading by coordinate are the `clab` skill's
-[sweeps reference](../clab/references/sweeps.md).
+template and tokenize to 7 tokens. On pairs of different lengths, sweep negative indices inside the ending the
+prompts share, or map by scope ([pairs, scopes and maps](references/pairs-scopes-and-maps.md)). Check that each
+point's write landed where its reads did: `clab show` groups a swept entry's points by where they landed,
+without their coordinates, and `Plan.load` gives each point's positions beside its `at` (the `clab` skill's
+[output reference](../clab/references/output.md#in-python)). Labels, a point's cost and reading by coordinate
+are its [sweeps reference](../clab/references/sweeps.md).
 
 ## The other recipes
 
@@ -279,6 +282,7 @@ and cross, a point's cost and reading by coordinate are the `clab` skill's
 | the word has several tokens, or the prompts differ in length | scope both sides, `index: -1` | [pairs, scopes and maps](references/pairs-scopes-and-maps.md) |
 | does a span of positions carry it jointly | a window, `{"index": "-4:-1"}` | [pairs, scopes and maps](references/pairs-scopes-and-maps.md) |
 | restore clean states into a noised run (causal tracing) | corrupt and restore | [pairs, scopes and maps](references/pairs-scopes-and-maps.md) |
+| what the patched model goes on to say, or an answer of several tokens | patching into a generation | [pairs, scopes and maps](references/pairs-scopes-and-maps.md#patching-into-a-generation) |
 | how far the whole prediction or the stream moved | `kl`, `js`, `cosine` | [pairs, scopes and maps](references/pairs-scopes-and-maps.md) |
 | patching and another experiment against one clean run | named bundles | [pairs, scopes and maps](references/pairs-scopes-and-maps.md) |
 | which attention head, or which set of heads | `attention_premix` with `select` on `num_heads` | [heads, neurons and paths](references/heads-neurons-and-paths.md) |
@@ -286,9 +290,11 @@ and cross, a point's cost and reading by coordinate are the `clab` skill's
 | a head's direct effect, or its effect on a later head's query | path patching | [heads, neurons and paths](references/heads-neurons-and-paths.md) |
 | where a head looks, apart from what it moves | attention-pattern patching | [heads, neurons and paths](references/heads-neurons-and-paths.md) |
 | rank every head or position with one backward | attribution patching | [attribution](references/attribution.md) |
+| rank neurons on one prompt, with no counterfactual | activation × gradient, `top_k` over layers and neurons | [attribution](references/attribution.md#one-prompt-no-counterfactual) |
+| patch the top points of a map, or chosen heads at several layers | one entry per point, one site per head | [attribution](references/attribution.md#confirm-the-top-points) |
 
-Neighbouring tasks live elsewhere. Removing a component (zero, mean or resample ablation, head knockout) is
-`clab-ablation`. A trained rotation or mask of a subspace (DAS, DBM) is `clab-trained-featurizers`. Reading an
-attention pattern or a logit lens is `clab-lenses-and-attention`. A refusal, or a null that does not equal the
-clean run, is `clab-debugging`. The lists are on the machine: `clab describe components` for sites,
-`clab describe ops` for metrics and edits, `clab describe pos` for positions.
+Neighbouring tasks live elsewhere. Removing a component (zero, mean or resample ablation, head knockout, a
+random-neuron control) is `clab-ablation`. A trained rotation or mask of a subspace (DAS, DBM) is
+`clab-trained-featurizers`. Reading an attention pattern or a logit lens is `clab-lenses-and-attention`. Adding a
+direction, and scoring what a generation says, is `clab-steering-and-generation`. A refusal, or a null that does
+not equal the clean run, is `clab-debugging`. The lists are `clab describe components`, `ops` and `pos`.
