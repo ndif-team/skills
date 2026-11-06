@@ -5,7 +5,7 @@ description: Measure what a component contributes by removing it in an nnspec do
 
 # Ablation in nnspec
 
-Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
+Verified on nnspec `bb1c38a` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `openai-community/gpt2` (12 layers of 12 heads, 768 wide), the expert ones on
 `hf-internal-testing/tiny-random-MixtralForCausalLM`, in seconds each.
 

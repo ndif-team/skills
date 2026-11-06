@@ -5,7 +5,7 @@ description: Find which layer, position, attention head, MLP neuron, path or att
 
 # Patching with nnspec
 
-Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
+Verified on nnspec `bb1c38a` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `openai-community/gpt2` (float32, 12 layers of 12 heads), each in seconds to under a minute.
 
 Patching asks whether a value carries what decides the answer. Read it on a counterfactual prompt, swap it into

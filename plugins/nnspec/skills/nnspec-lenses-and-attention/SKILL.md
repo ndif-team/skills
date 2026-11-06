@@ -5,7 +5,7 @@ description: "Find the layer where a model's prediction forms, and where its att
 
 # Lenses and attention patterns
 
-Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on the
+Verified on nnspec `bb1c38a` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on the
 CPU in seconds on `openai-community/gpt2` (12 layers of 12 heads, no BOS), one on
 `HuggingFaceTB/SmolLM2-135M-Instruct`.
 

@@ -10,7 +10,7 @@ document holds the checkpoint, the data, the forwards and generations, the reads
 components, the ops that score them, and what to save. `nnspec run` runs it in one nnsight session, naming
 components in nnterp's vocabulary, and writes each saved value to a directory that `nnspec table` prints as rows.
 
-Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
+Verified on nnspec `bb1c38a` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `openai-community/gpt2` in seconds, with their rows inline.
 
 ## Install and check

@@ -5,7 +5,7 @@ description: Steer a model with a direction and score what it generates, as nnsp
 
 # Steering and generation experiments in nnspec
 
-Verified on nnspec `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
+Verified on nnspec `bb1c38a` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `HuggingFaceTB/SmolLM2-135M-Instruct` (every generation and chat) and `openai-community/gpt2`
 (steering a forward), in seconds.
 
