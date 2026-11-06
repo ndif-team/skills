@@ -183,7 +183,7 @@ vLLM is not run in this skill; these lines are the docs' and `clab describe engi
 
 - **`--out` names the directory**; without it, `out/<document name>` under the working directory.
 - **A second run into one directory replaces the files it writes and leaves the others**; give each run its own `--out`.
-- **Data paths, bundle files and `load` directories resolve against the corpus root**: the nearest directory above the document that holds `data/`; with none, the directory above the document's own.
+- **Data paths, bundle files and `load` directories resolve against the corpus root**: the nearest directory holding `data/`, from the document's own directory up; with none, the directory above the document's own.
 - **So `project/documents/x.json` resolves against `project/`** with no `data/`, and a document at the top of a folder needs an empty `data/` beside it. A document of inline rows that loads nothing needs neither.
 - **Run from the corpus root**, so the default `out/` is where a later `load` or `file_path` looks.
 - **`clab table` reads a file dataset from `data/` under the working directory**, so run it from the corpus root ([output](output.md#tabling-needs-the-rows)).

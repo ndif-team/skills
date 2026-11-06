@@ -153,8 +153,8 @@ kremlin     2    The Kremlin is in the city of           1.0    67.1487121582031
 
 ## Pairing with another forward
 
-An operand read in one forward and written in another pairs position by position, the i-th with the i-th, so
-its width must be one number on every row.
+Two values of different reads pair position by position, the i-th with the i-th, whether one forward or two
+made them, so the width must be one number on every row.
 
 | read `pos` | pairs with a write in another forward |
 |---|---|

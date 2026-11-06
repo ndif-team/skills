@@ -42,7 +42,7 @@ Each of these runs without a refusal and costs a conclusion.
 These are refused, and the fix is not obvious from the message:
 
 - **`does not exist under the corpus root`.** `file_path` and a load's `from` resolve against the nearest
-  folder above the document that holds `data/`, else the folder above the document's own
+  folder holding `data/`, from the document's own folder up, else the folder above the document's own
   ([the rule](../clab/references/running-and-engines.md#where-output-goes)); run, show and table from it.
 - **Two training runs into one output directory keep only the last manifest.** The first run's values then
   table as `'held_acc' was not saved; add it to saves`. Leave each training run its own `out/<document>/` and
