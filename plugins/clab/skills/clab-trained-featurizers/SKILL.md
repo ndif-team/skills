@@ -5,7 +5,7 @@ description: Find which subspace, units or heads carry a variable by training th
 
 # Trained featurizers
 
-Verified on clab `830182f` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
+Verified on clab `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `openai-community/gpt2` (12 layers of 12 heads, 768 wide), each in seconds to a minute.
 
 A featurizer is a space or a function declared under `featurizers` and used from an entry's `ops` with

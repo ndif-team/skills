@@ -5,7 +5,7 @@ description: "Fix a clab document that was refused or gave wrong numbers. Use fo
 
 # Debugging clab documents
 
-Verified on clab `830182f` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run
+Verified on clab `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run
 on the CPU on `openai-community/gpt2` (float32, 12 layers of 12 heads, no BOS token), in seconds each.
 
 A run either refuses, printing one `clab:` line and writing nothing, or finishes. This skill reads a refusal,

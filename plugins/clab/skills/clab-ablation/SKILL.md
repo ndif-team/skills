@@ -5,7 +5,7 @@ description: Measure what a component contributes by removing it in a clab docum
 
 # Ablation in clab
 
-Verified on clab `830182f` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
+Verified on clab `dca9630` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `openai-community/gpt2` (12 layers of 12 heads, 768 wide), the expert ones on
 `hf-internal-testing/tiny-random-MixtralForCausalLM`, in seconds each.
 

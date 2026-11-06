@@ -33,7 +33,7 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install "transformers>=5" pytest "nnsight>=0.8.2" safetensors pydantic accelerate "datasets>=4"
           pip install "nnterp @ git+https://github.com/ndif-team/nnterp@e5d0f8e755c6c04ce7c84eeab2832e2ef8dfce20"
-          pip install --no-deps "clab @ git+https://github.com/JadenFiotto-Kaufman/clab@830182f"
+          pip install --no-deps "clab @ git+https://github.com/JadenFiotto-Kaufman/clab@dca963015bd8d6cbd849a1768d1b009fba261c0b"
       - run: pytest -q tests/test_documents.py
 
   code-blocks:
