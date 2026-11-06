@@ -21,9 +21,9 @@
       "description": "Self-hosting NDIF, the server behind nnsight's remote=True - standing one up with docker run, compose, or the ndif CLI; deploying, pinning and sizing models; troubleshooting; and changing the server itself"
     },
     {
-      "name": "clab",
-      "source": "./plugins/clab",
-      "description": "Interpretability experiments as JSON documents with clab - writing and running a document on nnterp, hooks, NDIF or vLLM, reading it back, and the recipes: patching, ablation, lenses and attention, steering and generation, trained featurizers (DAS, DBM, head masks, SAEs, probes, LoRA), and debugging a refusal or wrong numbers"
+      "name": "nnspec",
+      "source": "./plugins/nnspec",
+      "description": "Interpretability experiments as JSON documents with nnspec - writing and running a document on nnterp, hooks, NDIF or vLLM, reading it back, and the recipes: patching, ablation, lenses and attention, steering and generation, trained featurizers (DAS, DBM, head masks, SAEs, probes, LoRA), and debugging a refusal or wrong numbers"
     }
   ]
 }

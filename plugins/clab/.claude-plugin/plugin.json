@@ -1,8 +1,0 @@
-{
-  "name": "clab",
-  "version": "0.1.0",
-  "description": "Interpretability experiments on transformer language models as JSON documents with clab - writing a document (model, data, sites, reads and writes, ops, sweeps, saves), running it on nnterp, hooks, NDIF or vLLM, reading a run back, and the recipes: activation, head, neuron, path and attribution patching; zero, mean, resample, constant and expert ablation; logit and tuned lenses and attention patterns; steering and generation experiments; DAS, DBM, head masking, SAEs, probes and LoRA trained inside a run; and what to do when a run refuses or the numbers are wrong",
-  "author": {
-    "name": "NDIF Team"
-  }
-}
