@@ -183,11 +183,24 @@ What the run does:
 | `<fit>.<eval>.<step>.<entry>` | a body entry's value in that eval |
 | `<fit>.history.<op>` | each body op's mean after each epoch, `[epochs run]` (`fit.history.ce`) |
 | `<fit>.history.<featurizer>.<scalar>` | a gate's or an sae's scalar after each epoch |
+| `<fit>.<featurizer>.<tensor>` | one of the trained featurizer's tensors, a value, as the fit left it (`fit.probe.W`) |
+| `<featurizer>.<tensor>` | one of the declared featurizer's tensors, as drawn or loaded (`dictionary.W_dec`) |
 
 - **After the fit, the bare name is the declared featurizer as drawn, never trained.** With `"featurizer": "probe"` in `held`, the same run gives `held_acc` 0.5, one value for both points: the untrained probe.
 - **Inside the body both names are the one being trained.**
 - **Every body op gets a history**, in the objective or not, so put an aggregate you want to watch in the body.
 - **A history has one entry per epoch run**: fewer under `early_stop`, none at `epochs: 0`.
+
+A featurizer's tensors are its bundle's, by name, each a value laid out on axis names: a probe's `W`
+`[hidden_size, classes]` and `b` `[classes]`, an sae's `W_dec` `[features, hidden_size]`, a subspace's `basis`
+`[hidden_size, features]`. The `clab-trained-featurizers` skill's [bundle table](../../clab-trained-featurizers/references/harvest-and-bundles.md#what-a-run-writes)
+lists every kind's.
+
+- **`hidden_size` is the last axis of the first site a step before the name uses the featurizer at.** A name before any such step is refused: `'probe.W' is a tensor of 'probe', laid out on the last axis of the site it is used at, and no step before this one encodes or applies 'probe' at a site; …`.
+- **Inside the fit that trains it, a tensor is no value yet**: `'fit.probe.W' is a tensor of 'fit.probe', which this fit trains: it is a value once the fit ends, …`.
+- **The bare name's tensors are the draw's**: `probe.W` after the fit is all zeros.
+- **A name the kind does not hold is refused, listing those it does**: `'fit.probe.U' names no tensor of 'fit.probe', a linear, whose tensors are W, b`. So is an `affine`'s `W`, two axes under one name: save the affine whole, as its bundle.
+- **`select` takes one class, latent or column** of a tensor ([ops](ops.md#transform)); an sae's `W_dec` row 376, summed over `features`, is a `[hidden_size]` vector of norm 1.
 
 ## `epochs: 0` is the null
 

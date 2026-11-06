@@ -51,8 +51,8 @@ with safe_open("out/das/fit.rot.safetensors", "pt") as f:
 
 A swept fit writes one file whose keys carry each point's coordinate (`mask.mask=1.0/theta`). No featurizer
 loads it; rerun the document unswept at the point you keep. A hand-made bundle loads if it has the tensors
-and the header a clab one has: a probe's direction as a `subspace` is in
-[probes-and-lora.md](probes-and-lora.md#use-a-probe-causally). A file with no header is a published one, and
+and the header a clab one has, as a multi-class probe's span saved as a `subspace` does
+([probes-and-lora.md](probes-and-lora.md#use-a-probe-causally)). A file with no header is a published one, and
 only an `sae` reads it ([sae.md](sae.md#splice-in-a-published-dictionary)).
 
 ## What a load is checked against

@@ -13,7 +13,7 @@ adapter at one site; it only applies. Both train in a fit through the frozen mod
   lower class id, so its accuracy is the share of rows whose label sorts first.
 - **Hold out what the probe must generalise over.** A probe trained and scored on the same cities reads token
   identity; one scored on unseen cities reads the property.
-- **Decodable is not used.** Patch or ablate along the probe's span, beside drawn subspaces of the same rank
+- **Decodable is not used.** Project the probe's direction out beside a random direction
   ([below](#use-a-probe-causally)).
 - **An adapter stands for a weight change, so it acts at every position**: `{"index": ":"}`, the first
   position included. Narrowed to the last token it is an activation edit there.
@@ -139,127 +139,101 @@ one body op and ends the fit for every probe at once, so leave it out.
 
 ## Use a probe causally
 
-`project_out` takes a value and a `linear` featurizer has no `decode`, so the way to patch, ablate or project
-out along a probe's direction is a `subspace` bundle of its weights (the `clab-ablation` skill sends a probe
-here). This probe reads the day at `das.json`'s site, layer 5 at the day token:
+A trained probe's tensors are values: `fit.probe.W`, `[hidden_size, classes]`, and `fit.probe.b`, `[classes]`,
+as the fit left them. A two-class probe's direction is `W[:, 1] - W[:, 0]`: two `select`s of `classes`, each
+summed over it, then a `sub`. `project_out` takes it in the same document (the `clab-ablation` skill sends a
+probe here). This one trains a sentiment probe on GPT-2's layer 10 output at the last token of 12 reviews and
+projects its direction out of 8 held-out ones:
 
 ```json
 {
-  "description": "A probe for the day at GPT-2's layer 5 output at the day token, the site das.json trains its rotation at; saved, unswept, so its weights can be read back.",
+  "description": "A two-class sentiment probe's direction, projected out of GPT-2's layer 10 output in one document. The fit trains a linear probe on 12 reviews' last-token stream; its weight fit.probe.W is a value, [hidden_size, classes], whose classes sort negative then positive. Two selects of classes, each summed over it, and a sub give W[:, 1] - W[:, 0]. On 8 held-out reviews, projected removes it at every position, swept as fill against a random direction (standard normal, seed 0) and the zero direction, the null, which leaves the clean run. margin is the mean logit of each row's answer less the other sentiment's.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
-  "data": {"days": {"rows": [
-    {"input": "If today is Monday, tomorrow is", "day": "Monday"}, {"input": "If today is Tuesday, tomorrow is", "day": "Tuesday"},
-    {"input": "If today is Wednesday, tomorrow is", "day": "Wednesday"}, {"input": "If today is Thursday, tomorrow is", "day": "Thursday"},
-    {"input": "If today is Friday, tomorrow is", "day": "Friday"}, {"input": "If today is Saturday, tomorrow is", "day": "Saturday"},
-    {"input": "If today is Sunday, tomorrow is", "day": "Sunday"}
-  ]}},
-  "sites": {"target": {"component": "layer_output", "layers": 5}},
-  "featurizers": {"probe": {"kind": "linear", "classes": "days.day"}},
-  "steps": {
-    "fit": {
-      "kind": "fit", "train": ["probe"], "objective": {"ce": 1.0},
-      "epochs": 30, "batch_size": 7, "seed": 0, "optimizer": {"name": "adam", "lr": 0.01},
-      "eval": {"train": {}},
-      "steps": {
-        "read": {"kind": "forward", "input": "days.input", "interventions": {
-          "scores": {"site": "target", "pos": -4, "ops": [{"op": "encode", "featurizer": "fit.probe"}]}}},
-        "ce": {"kind": "op", "op": "cross_entropy", "of": "read.scores", "target": "days.day"},
-        "hit": {"kind": "op", "op": "match", "of": "read.scores", "expected": "days.day"},
-        "acc": {"kind": "op", "op": "mean", "of": "hit"}
-      }
-    }
+  "data": {
+    "train": {"rows": [
+      {"input": "I loved this film. Overall, the movie was", "label": "positive", "answer": " good", "other": " bad"},
+      {"input": "I hated this film. Overall, the movie was", "label": "negative", "answer": " bad", "other": " good"},
+      {"input": "The acting was superb and the story moving. Overall, the movie was", "label": "positive", "answer": " good", "other": " bad"},
+      {"input": "The acting was wooden and the story dull. Overall, the movie was", "label": "negative", "answer": " bad", "other": " good"},
+      {"input": "A delightful, funny and warm picture. Overall, the movie was", "label": "positive", "answer": " good", "other": " bad"},
+      {"input": "A boring, clumsy and joyless picture. Overall, the movie was", "label": "negative", "answer": " bad", "other": " good"},
+      {"input": "Brilliant direction and a wonderful cast. Overall, the movie was", "label": "positive", "answer": " good", "other": " bad"},
+      {"input": "Awful direction and a miscast lead. Overall, the movie was", "label": "negative", "answer": " bad", "other": " good"},
+      {"input": "I enjoyed every minute of it. Overall, the movie was", "label": "positive", "answer": " good", "other": " bad"},
+      {"input": "I was bored from start to finish. Overall, the movie was", "label": "negative", "answer": " bad", "other": " good"},
+      {"input": "A beautiful and touching story. Overall, the movie was", "label": "positive", "answer": " good", "other": " bad"},
+      {"input": "An ugly and pointless story. Overall, the movie was", "label": "negative", "answer": " bad", "other": " good"}
+    ]},
+    "test": {"rows": [
+      {"input": "The best film I have seen this year. Overall, the movie was", "label": "positive", "answer": " good", "other": " bad"},
+      {"input": "The worst film I have seen this year. Overall, the movie was", "label": "negative", "answer": " bad", "other": " good"},
+      {"input": "Clever, charming and great fun. Overall, the movie was", "label": "positive", "answer": " good", "other": " bad"},
+      {"input": "Tedious, shallow and far too long. Overall, the movie was", "label": "negative", "answer": " bad", "other": " good"},
+      {"input": "A moving and joyful ending. Overall, the movie was", "label": "positive", "answer": " good", "other": " bad"},
+      {"input": "A dull and lifeless ending. Overall, the movie was", "label": "negative", "answer": " bad", "other": " good"},
+      {"input": "Smart writing and lovely music. Overall, the movie was", "label": "positive", "answer": " good", "other": " bad"},
+      {"input": "Lazy writing and awful music. Overall, the movie was", "label": "negative", "answer": " bad", "other": " good"}
+    ]}
   },
-  "saves": ["fit.train.acc", "fit.probe"]
-}
-```
-
-`fit.train.acc` is 1.0. From the corpus root, after the run, this writes the probe's span as a subspace bundle
-with the header clab writes, and three random bases of the same rank as its control. The span's rank is the
-classes less one: 6 here, and for two classes the one direction `W[:, 1] - W[:, 0]`, normalised.
-
-<!-- test: skip -->
-```python
-import torch
-from safetensors import safe_open
-from safetensors.torch import save_file
-
-with safe_open("out/day_probe/fit.probe.safetensors", "pt") as f:
-    W, header = f.get_tensor("W"), f.metadata()                        # [768, classes]: one column per class
-if W.shape[1] == 2:                                                    # one direction, toward the second class
-    span = ((W[:, 1] - W[:, 0]) / (W[:, 1] - W[:, 0]).norm())[:, None]
-else:                                                                  # the class differences: rank classes - 1
-    span = torch.linalg.qr(W - W.mean(1, keepdim=True)).Q[:, :W.shape[1] - 1]
-bases = {"span": span}
-for seed in range(3):                                                  # random bases of the same rank
-    bases[f"random{seed}"] = torch.linalg.qr(torch.randn(span.shape, generator=torch.Generator().manual_seed(seed))).Q
-keep = ["model.key", "model.revision", "model.dtype", "component", "layer", "width"]
-for name, basis in bases.items():
-    save_file({"basis": basis.contiguous()}, f"out/day_probe/{name}.safetensors", metadata={
-        **{k: header[k] for k in keep}, "format": "clab/1", "kind": "subspace",
-        "k": str(basis.shape[1]), "parametrization": "cayley", "document": "probe_span"})
-```
-
-To patch along it, `das_apply.json` (in [SKILL.md](../SKILL.md)) takes `{"kind": "subspace", "file_path":
-"out/day_probe/span.safetensors"}` as `rot`. To ablate along it, a `swap` to 0 inside the bracket removes what
-lies along the span and keeps the rest, as `project_out` would along each of its directions:
-
-<!-- test: skip -->
-```json
-{
-  "description": "Ablate the day probe's span at GPT-2's layer 5 output at the day token: encode through the span bundle, set its coordinates to 0, decode. A second entry reads what is left along the span; the null is the bracket with no edit, which must equal the clean run.",
-  "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
-  "data": {"days": {"rows": [
-    {"input": "If today is Monday, tomorrow is", "answer": " Tuesday"}, {"input": "If today is Tuesday, tomorrow is", "answer": " Wednesday"},
-    {"input": "If today is Wednesday, tomorrow is", "answer": " Thursday"}, {"input": "If today is Thursday, tomorrow is", "answer": " Friday"},
-    {"input": "If today is Friday, tomorrow is", "answer": " Saturday"}, {"input": "If today is Saturday, tomorrow is", "answer": " Sunday"},
-    {"input": "If today is Sunday, tomorrow is", "answer": " Monday"}
-  ]}},
-  "sites": {"target": {"component": "layer_output", "layers": 5}, "head": {"component": "lm_head_output"}},
-  "featurizers": {"span": {"kind": "subspace", "file_path": "out/day_probe/span.safetensors"}},
+  "sites": {"stream": {"component": "layer_output", "layers": 10}, "head": {"component": "lm_head_output"}},
+  "featurizers": {"probe": {"kind": "linear", "classes": "train.label"}},
   "steps": {
-    "clean": {"kind": "forward", "input": "days.input", "interventions": {
-      "logits": {"site": "head", "pos": -1, "ops": [{"op": "token_prob", "token": "days.answer"}]}}},
-    "null": {"kind": "forward", "input": "days.input", "interventions": {
-      "kept": {"site": "target", "pos": -4, "ops": [{"op": "encode", "featurizer": "span"}, {"op": "decode", "featurizer": "span"}]},
-      "logits": {"site": "head", "pos": -1, "ops": [{"op": "token_prob", "token": "days.answer"}]}}},
-    "ablated": {"kind": "forward", "input": "days.input", "interventions": {
-      "abl": {"site": "target", "pos": -4, "ops": [{"op": "encode", "featurizer": "span"}, {"op": "swap", "with": 0.0},
-                                                   {"op": "decode", "featurizer": "span"}]},
-      "left": {"site": "target", "pos": -4, "ops": [{"op": "encode", "featurizer": "span"}]},
-      "logits": {"site": "head", "pos": -1, "ops": [{"op": "token_prob", "token": "days.answer"}]}}},
-    "p_clean": {"kind": "op", "op": "mean", "of": "clean.logits"},
-    "p_null": {"kind": "op", "op": "mean", "of": "null.logits"},
-    "p_ablated": {"kind": "op", "op": "mean", "of": "ablated.logits"},
-    "left_abs": {"kind": "op", "op": "abs", "of": "ablated.left"},
-    "worst_left": {"kind": "op", "op": "max", "of": "left_abs", "over": ["rows", "pos", "features"]}
+    "harvest": {"kind": "forward", "input": "train.input", "interventions": {"h": {"site": "stream", "pos": -1}}},
+    "fit": {"kind": "fit", "train": ["probe"], "objective": {"ce": 1.0},
+            "epochs": 50, "batch_size": 12, "seed": 0, "optimizer": {"name": "adam", "lr": 0.01},
+            "steps": {
+              "scores": {"kind": "op", "op": "encode", "featurizer": "fit.probe", "of": "harvest.h"},
+              "ce": {"kind": "op", "op": "cross_entropy", "of": "scores", "target": "train.label"},
+              "hit": {"kind": "op", "op": "match", "of": "scores", "expected": "train.label"}}},
+    "positive": {"kind": "op", "op": "select", "of": "fit.probe.W", "select": {"classes": 1}},
+    "positive_w": {"kind": "op", "op": "sum", "of": "positive", "over": ["classes"]},
+    "negative": {"kind": "op", "op": "select", "of": "fit.probe.W", "select": {"classes": 0}},
+    "negative_w": {"kind": "op", "op": "sum", "of": "negative", "over": ["classes"]},
+    "direction": {"kind": "op", "op": "sub", "of": "positive_w", "with": "negative_w"},
+    "zero": {"kind": "op", "op": "mul", "of": "direction", "with": 0.0},
+    "random": {"kind": "op", "op": "noise", "of": "zero", "scale": 1.0, "seed": 0},
+    "clean": {"kind": "forward", "input": "test.input", "interventions": {
+      "scores": {"site": "stream", "pos": -1, "ops": [{"op": "encode", "featurizer": "fit.probe"}]},
+      "ld": {"site": "head", "pos": -1, "ops": [{"op": "logit_diff", "a": "test.answer", "b": "test.other"}]}}},
+    "projected": {"kind": "forward", "input": "test.input", "interventions": {
+      "out": {"site": "stream", "pos": {"index": ":"},
+              "ops": [{"op": "project_out", "direction": {"sweep": ["direction", "random", "zero"], "label": "fill"}}]},
+      "ld": {"site": "head", "pos": -1, "ops": [{"op": "logit_diff", "a": "test.answer", "b": "test.other"}]}}},
+    "held_hit": {"kind": "op", "op": "match", "of": "clean.scores", "expected": "test.label"},
+    "held_acc": {"kind": "op", "op": "mean", "of": "held_hit"},
+    "clean_margin": {"kind": "op", "op": "mean", "of": "clean.ld"},
+    "margin": {"kind": "op", "op": "mean", "of": "projected.ld"}
   },
-  "saves": ["p_clean", "p_null", "p_ablated", "worst_left"]
+  "saves": ["fit.history.hit", "held_acc", "clean_margin", "margin"]
 }
 ```
 
 ```text
-clab run documents/probe_ablate.json
-clab table out/probe_ablate p_clean p_null p_ablated worst_left
-p_clean              p_null               p_ablated            worst_left
-0.22559413313865662  0.22559413313865662  0.12499908357858658  7.718801498413086e-06
+clab run documents/probe_direction.json
+clab table out/probe_direction held_acc clean_margin
+held_acc  clean_margin
+1.0       1.0175151824951172
+clab table out/probe_direction margin
+at                    value
+{"fill":"direction"}  0.4754676818847656
+{"fill":"random"}     1.0189380645751953
+{"fill":"zero"}       1.0175151824951172
 ```
 
-| subspace at layer 5, day token | rank | patched in: held-out acc, mean ce | projected out: mean P(answer) |
-|---|---|---|---|
-| the probe's span | 6 | 1.0, 1.707 | 0.125 |
-| a drawn subspace, seeds 0, 1, 2 | 6 | 0.0 at each; 2.462, 2.470, 2.440 | 0.243, 0.218, 0.223 |
-| `random0` to `random2` from the snippet | 6 | not run | 0.222, 0.216, 0.234 |
-| DAS, trained (`das.json`'s `fit.rot`) | 4 | 1.0, 1.093 | 0.104 |
-
-- **The probe's directions are used.** Projected out, they take the answer's probability from 0.226 to 0.125;
-  drawn subspaces of the same rank move it by under 0.02.
-- **The null is the bracket with no edit**, `p_null`, equal to `p_clean` to the bit; `left`, the span's
-  coordinates after the write, is at most 7.7e-6.
-- **The controls are random directions of the same rank.** The drawn rows put `{"kind": "subspace", "k": 6,
-  "seed": {"sweep": [0, 1, 2]}}` in place of `span`, in one document. A random bundle loads like `span`, one
-  document each, since a sweep cannot stand for `file_path` or an op's `featurizer`. For two classes these are
-  random unit directions, and `project_out` normalises its direction, so a random direction of the probe
-  direction's norm is the same control as a unit one.
+- **The probe's direction is used.** It reads the held-out sentiment on 8 of 8 rows, and projected out it
+  takes the margin from 1.018 to 0.475; a random direction moves it by 0.001.
+- **The null is the zero direction**: `project_out` leaves every vector as it is along it, so its margin is
+  the clean run's to the bit.
+- **`select` keeps `classes` at size 1, labelled with the class it kept**, and the `sum` over it drops the
+  axis exactly: `direction` equals `W[:, 1] - W[:, 0]` read from the saved bundle, to the bit.
+- **A `sub` of the two selects without the sums is refused**: `'negative' holds classes [0], and the value it
+  acts on holds [1]; …`.
+- **The classes sort**, `negative` before `positive`, so `direction` points toward positive.
+- **Name a tensor after the fit that trains it**: inside it the body is refused (`'fit.probe.W' is a tensor of
+  'fit.probe', which this fit trains: …`), and the bare `probe.W` after it is the draw, all zeros.
+- **A probe of more than two classes has a span, not one direction.** Take the class differences the question
+  needs, a `select` pair and a `sub` each. To patch along the whole span, save its orthonormal basis as a
+  `subspace` bundle with a clab header ([harvest-and-bundles.md](harvest-and-bundles.md#what-a-run-writes)).
 
 ## LoRA: train an adapter
 

@@ -1,6 +1,6 @@
 ---
 name: clab-trained-featurizers
-description: Find which subspace, units or heads carry a variable by training them inside a clab run, or test what a trained or published featurizer encodes. Use it for distributed alignment search (DAS), the trained-subspace form of an interchange, and boundless masking (DBM), each beside PCA and random subspaces of matched rank. Use it for head masking with a gate per head, and for sparse autoencoders: splicing in a SAELens or Gemma Scope file, L0, latent ablation, max-activating examples, training one. Also for a linear probe per layer and patching or ablating along its direction, a LoRA trained through the frozen model, and a harvest or bundle saved once and loaded elsewhere. Plain activation patching and interchange are clab-patching; the tuned lens clab-lenses-and-attention; the optimal constant clab-ablation; a refused bundle or load, or numbers that look wrong, clab-debugging; the fit step's fields the clab skill.
+description: Find which subspace, units or heads carry a variable by training them inside a clab run, or test what a trained or published featurizer encodes. Use it for distributed alignment search (DAS), the trained-subspace form of an interchange, and boundless masking (DBM), each beside PCA and random subspaces of matched rank. Use it for head masking with a gate per head, and for sparse autoencoders: splicing in a SAELens or Gemma Scope file, L0, latent ablation, max-activating examples, training one. Also for a linear probe per layer and projecting its direction out, a LoRA trained through the frozen model, and a harvest or bundle saved once and loaded elsewhere. Plain activation patching and interchange are clab-patching; the tuned lens clab-lenses-and-attention; the optimal constant clab-ablation; a refused bundle or load, or numbers that look wrong, clab-debugging; the fit step's fields the clab skill.
 ---
 
 # Trained featurizers
@@ -34,8 +34,8 @@ Each of these runs without a refusal and costs a conclusion.
   SAE's drops the error term. An interchange or a latent ablation is the bracket, which keeps everything else.
 - **A featurizer at a site that picks several layers is one shared featurizer.** Sweep the site's `layers`
   for one per layer. Only a gate or an affine with `layers` in its `over` holds units per layer.
-- **A probe that decodes a variable does not show the model uses it.** Patch or ablate along its direction,
-  a `subspace` bundle of its weights ([probes](references/probes-and-lora.md#use-a-probe-causally)).
+- **A probe that decodes a variable does not show the model uses it.** Project its direction out of the
+  stream, `fit.probe.W`'s two columns' difference ([probes](references/probes-and-lora.md#use-a-probe-causally)).
 - **GPT-2's first position is an outlier**: a `norm` of its layer 5 output is many times any later position's.
   Harvest from position 1 (`{"index": "1:"}`) for a PCA or a dictionary, or position 0 takes a direction.
 
@@ -244,7 +244,7 @@ disagrees with the loading document is refused before the model loads, naming th
 | what a trained subspace has to beat | a drawn `subspace`; a loaded `pca` | [controls](references/subspaces-and-masks.md#controls-of-matched-rank) |
 | which interpretable features are active, and what an edit of one does | `sae` | [sae.md](references/sae.md) |
 | whether a property is linearly decodable, and where | `linear` | [probes](references/probes-and-lora.md#a-probe-per-layer) |
-| patch, ablate or project out along a probe's direction | a `subspace` bundle of its weights | [probes](references/probes-and-lora.md#use-a-probe-causally) |
+| project out a probe's direction | `fit.probe.W`, two `select`s and a `sub` | [probes](references/probes-and-lora.md#use-a-probe-causally) |
 | what a low-rank weight change learns, on in some steps | `lora` | [LoRA](references/probes-and-lora.md#lora-train-an-adapter) |
 | reuse a harvest, fit with no forward | a `load` step | [cached harvests](references/harvest-and-bundles.md#cached-harvests) |
 | a full linear map per layer (tuned lens) | `affine` | the `clab-lenses-and-attention` skill |
@@ -260,6 +260,6 @@ Every kind's fields and ops are in `clab describe featurizers`; the fit and load
 - [sae.md](references/sae.md): a published file's layout and the three fields it needs, L0 and splice KL,
   ranking and ablating latents, max-activating examples, training a dictionary and loading it.
 - [probes-and-lora.md](references/probes-and-lora.md): a probe per layer and its floor, many probes in one
-  fit, a probe's direction patched and ablated, LoRA trained, applied in chosen steps, and across sites.
+  fit, a probe's direction as a value, projected out, LoRA trained, applied in chosen steps, and across sites.
 - [harvest-and-bundles.md](references/harvest-and-bundles.md): bundle files, headers and the checks;
   `load` a saved harvest, fit on it with no forward, and harvest in shards.

@@ -238,8 +238,8 @@ at                   clean_ld            ablated_ld          worst_cos
 - **The control is a random direction per layer**, drawn by `noise` on zeros: it moves the score +0.20,
   where the contrast direction costs 0.74. The plain mean direction, which every row shares, costs 2.21.
 - A direction read at fewer layers than the write is made at is refused before any forward.
-- **A probe's direction is not a value** `project_out` takes. Save it as a rank-1 `subspace` bundle and
-  remove it through that: the `clab-trained-featurizers` skill's [probes reference](../../clab-trained-featurizers/references/probes-and-lora.md).
+- **A probe's direction is a value** `project_out` takes: two `select`s of `fit.probe.W` and a `sub`, in the
+  `clab-trained-featurizers` skill's [probes reference](../../clab-trained-featurizers/references/probes-and-lora.md#use-a-probe-causally).
 
 ## Noise and clamp
 
