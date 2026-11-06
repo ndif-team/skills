@@ -20,8 +20,9 @@ Each runs on the CPU in seconds, on `openai-community/gpt2` except the generatio
   Prompts of one length are never checked, whatever tokens share an index. Past the boundary, scope each side.
 - **A whole-word scope pairs only where every row's word is the same number of tokens**, and is refused
   naming each row's count ([positions](../../clab/references/positions.md#pairing-with-another-forward)).
-- **An open `pos` (`{"index": ":"}`) from another forward pairs with nothing**, even on prompts of one length.
-  Write the width: `{"index": "0:7"}` on 7-token prompts.
+- **An open `{"index": ":"}` from another forward pairs only on prompts of one length.** On 7-token prompts it
+  patches as `{"index": "0:7"}` does, to the bit. Where the lengths differ it is refused before any forward,
+  naming a span every row holds: `… read a static span every row holds ('index': '0:7', or '-7:'), or reduce it`.
 - **A restore is read against the corruption it undoes, so both steps must corrupt alike.** Declare the noise
   once in a root bundle and pull it into every step that corrupts; its draw depends only on `seed`, the row and
   the position.

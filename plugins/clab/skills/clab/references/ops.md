@@ -76,7 +76,7 @@ layer  value
 - **An entry acts at each layer in turn**, so a reduction over `layers` belongs in a step; `lens_by_layer` keeps one number per layer by default.
 - **A reduction over `pos` alone may stay in the entry**, and only its result leaves the model.
 - **A mean ablation's mean is an op step before the forward that swaps it in**; moved after, the entry has no edit and only reads.
-- **An op step over two values needs both at one width.** Two reads of one forward at an open `pos` (`{"index": ":"}`) are refused even there; read them at a static index.
+- **An op step over two reads needs both at one width**, two reads of one forward too. Two `{"index": ":"}` reads pair on prompts of one length and are refused before any forward where the lengths differ (`d: operand 'f.a' holds 7 positions on rows 0-2 and 9 positions on row 3; …`); read a span every row holds.
 
 ## Score an answer
 

@@ -133,7 +133,7 @@ Each mistake below runs without a refusal and gives wrong numbers.
 | root key | holds |
 |---|---|
 | `description` | prose; copied to the manifest, never checked |
-| `model` | `key`, `revision` (a commit), `dtype`; any other key goes to the loader, such as `"attn_implementation": "eager"` |
+| `model` | `key`, `revision` (a commit), `dtype`; any other key goes to the loader, such as `"attn_implementation": "eager"`, but one that respells these or names a run option (`torch_dtype`, `device`) is refused at compile |
 | `data` | each dataset by name: inline `rows`, a `path` under `data/`, or a hub `hf` at a `revision` |
 | `sites` | named places: a `component`, its `layers`, an optional `select` |
 | `interventions` | named bundles of entries that a step pulls in by name |

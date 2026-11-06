@@ -40,15 +40,15 @@ first clause of `<what>` is the key to [references/refusals.md](references/refus
 
 | `<where>` | refused | as GPT-2 printed it |
 |---|---|---|
-| a document path: `steps.…`, `sites.…`, `data.…`, `saves[i]`, `model.…` | before the model loads | `steps.ld.of: 'patched.logit' names no value produced before this step; known: counterfactual.v_cf, patched.logits, patched.patch` |
+| a document path: `steps.…`, `sites.…`, `data.…`, `saves[i]`, `model` | before the model loads | `steps.ld.of: 'patched.logit' names no value produced before this step; known: counterfactual.v_cf, patched.logits, patched.patch` |
 | none: a flag or an engine option | before the model loads | `batch_size 0: a batch holds one row or more (--batch-size N, N at least 1)` |
 | a step's name without `steps.`: `<step>.<entry>` | after the model loads, before any forward | `counterfactual.v_cf: layer 12; the model has 12 layers` |
 | `<step>: generate rejected …` | at run: earlier steps ran, nothing is written | `answer: generate rejected 'max_new_tokns': …` |
 
 - **Check before you run.** `clab compile documents/x.json` needs no model: it prints what would run and exits
   0, or prints `clab: <where>: <what>`, the line `clab run` would print, and exits 1.
-- **Compiling misses the engine's refusals.** `model.device`, `model.torch_dtype` and a revision missing from
-  the cache are refused as the engine loads, after `clab compile` passes and before any weight loads.
+- **Compiling misses what only the load knows**: a `revision` the cache lacks compiles, and offline the load
+  refuses it. A `model` key naming a run option (`device`, `torch_dtype`, `tp_size`) is refused at compile.
 - **A refusal names its row and sweep point** (`base.r: row 1: …`, `counterfactual.v_cf at layers=12: …`),
   and lists what is valid where it can (`known: …`, `valid: …`): copy the spelling from it.
 

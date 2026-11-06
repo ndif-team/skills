@@ -166,9 +166,11 @@ at                    clean_ld            resample_ld           null_ld
   `Plan.load("out/resample").steps["donor"]`. Seed 0 drew `[5, 2, 4, 1, 0, 3]` and seed 2 `[1, 3, 0, 4, 5, 2]`:
   the even rows name the answer first and the odd rows second, and seed 2 crosses four rows between them.
   Below zero, the model follows the donor's template and picks the other name.
-- **A donor needs a static width and two rows.** Every token of 14-token prompts is `{"index": "0:14"}`. An
-  open `{"index": ":"}` or no `pos` is refused even on prompts of one length (`'donor' has no width compile
-  can fix`), and so is a bare `"0:14"`: a slice goes in an object.
+- **A donor at every token needs prompts of one length, and two rows.** On 14-token prompts `{"index": ":"}`
+  resamples as `{"index": "0:14"}` does, to the bit. On prompts of 14 and 15 tokens it is refused before any
+  forward (`operand 'donor' reorders the rows of 'clean.acts', which holds 14 positions on rows 0-2 and 15
+  positions on rows 3-5; …`); read a span every row holds, `{"index": "0:14"}`. A bare `"0:14"` is refused: a
+  slice goes in an object.
 
 ## Heads one at a time
 

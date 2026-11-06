@@ -161,13 +161,20 @@ its width must be one number on every row.
 | a static index: `-1`, `[-1, 0]`, `{"index": "-3:"}` | yes |
 | one occurrence of a scope in the prefill, with a static `index` | yes |
 | one occurrence of a scope, read whole, not `until` | where every row's scope holds as many tokens |
-| `{"index": ":"}`, no `pos`, several occurrences, `until`, a scope beyond the prefill | no |
+| an open index in the prefill: `{"index": ":"}`, `"5:"`, no `pos` | where every row holds as many positions |
+| several occurrences, `until`, a scope or an open index beyond the prefill | no |
 
-A whole scope whose rows disagree is refused before any forward, naming the counts:
-`g.w: operand 'f.lm' holds 4 positions on row 0, 3 positions on row 1 and 1 position on row 2; a scoped read
-pairs with another forward's value when every row's scope holds the same number of tokens: pick one with
-'index' (-1, or '-2:'), or reduce it`. An open index on both sides is refused at compile:
-`steps.g.interventions.w.ops[0].with: 'f.lm' has no width compile can fix …`.
+Where the rows decide, a pairing they disagree on is refused before any forward, naming each count's rows. On
+`ragged_scope.json`'s rows, whose landmarks are 4, 3 and 1 tokens and whose prompts 10, 9 and 7:
+
+```text
+g.w: operand 'f.lm' holds 4 positions on row 0, 3 positions on row 1 and 1 position on row 2; two values of different reads pair only at a fixed width, whether one forward or two made them, which a scoped read has where every row's scope holds the same number of tokens: pick one with 'index' (-1, or '-2:'), or reduce it
+g.w: operand 'f.lm' holds 10 positions on row 0, 9 positions on row 1 and 7 positions on row 2; two values of different reads pair only at a fixed width, whether one forward or two made them, which an open index has where every row holds as many positions: read a static span every row holds ('index': '0:7', or '-7:'), or reduce it
+```
+
+The span it suggests keeps the read's own start or end: `"5:"` there gets `'5:7', or '-2:'`. An `until` scope is
+refused at compile: `steps.g.interventions.w.ops[0].with: 'f.lm' has no width compile can fix (an open index
+beyond the prefill, an `until` scope, several occurrences), …`.
 
 - **An unscoped `pos` between two prompts pairs index with index.** Two prompts of one length pass however their words line up.
 - **On prompts of different lengths a counted index pairs when every token between it and the end it counts from is the same on both**, whatever the two paired tokens are. On a base ending `, John gave a drink to` and a counterfactual one token longer ending `, Mary gave a drink to`, `-1` to `-5` pair, the names at `-5` included. `-6` pairs `,` with `,` and is refused, since `-5` differs; the refusal names the two tokens.

@@ -103,7 +103,7 @@ far, and how to compare two runs are the `clab-debugging` skill's ([reproducing 
 
 ## Where the model runs
 
-- **`--device` is a run option, never a document key.** `"device"` in the `model` block is refused: `model.device: the nnterp engine cannot honor it: where the model runs is a run option: --device`; so are `device_map`, `dispatch` and `torch_dtype` (spelled `dtype`).
+- **`--device` is a run option, never a document key.** `"device"` in the `model` block is refused at compile: `model: 'device': where the model runs is a run option: --device`. So are `device_map` and `dispatch`, `torch_dtype` (spelled `dtype`), `tp_size` (`-o tp=N`) and `load_in_4bit` or `quantization` (a quantized `dtype`), each naming its fix.
 - **A device that cannot be is refused before the model loads**: `device 'cuda:0': no CUDA device is visible (torch.cuda.is_available() is False); …`.
 - **A device map may spread the model over GPUs**; each batch goes to the first parameter's device.
 - **`clab show`'s `served:` line is where and in what dtype the weights actually were**: `served: float32 on cpu`.

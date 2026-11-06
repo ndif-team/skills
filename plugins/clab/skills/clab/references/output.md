@@ -84,7 +84,7 @@ with every cell whole, where the aligned form cuts cells at 48 characters, as it
 - **A value without rows prints one row per element**: `rate spread` is one row, `1.0  0.9305830001831055`; `lens_by_layer` prints a `layer` column, 0 to 11.
 - **Several names join on the keys they share** (sweep coordinates, `row`, `layer`, `pos`, `key`) and broadcast over the rest: a fit's `held_acc` repeats beside every epoch of `fit.history.ce`.
 - **Values swept over different axes cross**, a row at every pair of points; table them one at a time.
-- **Two reads of one input share a row only where their positions coincide**: `f.landmark` and `f.landmark_last` of `ragged_scope.json` table together as the three last-token rows. Two reads that share no position print nothing and exit 0.
+- **Two reads of one input share a row only where their positions coincide**: `f.landmark` and `f.landmark_last` of `ragged_scope.json` table together as the three last-token rows. Two reads that share no position are refused: `'f.first' and 'f.last' share no row and pos together: …, so they join to no row; table them one at a time, or read at a pos both hold`.
 - **Positions past a ragged row's own are left out**, not printed as NaN.
 - **A row never reached prints flagged, with no value**, even where the saved tensor holds a number there: a `count` of a missing read is 0 in the file and blank in the table.
 - **Only saved names table**: `'patched.logits' was not saved; add it to saves`.

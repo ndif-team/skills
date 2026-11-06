@@ -72,13 +72,14 @@ by position; it holds every layer the write acts at; it is one dataset's rows. T
 |---|---|---|---|
 | `'counterfactual.v_cf' is laid out ['rows', 'pos', 'vocab_size']; 'swap' acts on a value laid out ['rows', 'pos', 'hidden_size']` | before load | an operand with an axis the value lacks: here read at the head, written into the stream | read it at a site of the value's layout, or reduce the extra axis first |
 | `'counterfactual.v_cf' holds 6 position(s) per row and the value 'swap' acts on holds 1` | before load | two static widths that differ (`{"index": "0:6"}` against `-1`) | read both at as many positions |
-| `'counterfactual.v_cf' has no width compile can fix` | before load | an open-ended index (`"5:"`), an `until` scope or several occurrences on one side | a static index, one occurrence of a scope, or a `mean` over `pos` first |
+| `'counterfactual.v_cf' has no width compile can fix` | before load | an `until` scope, several occurrences, or an open index beyond the prefill, on one side | a static index, one occurrence of a scope, or a `mean` over `pos` first |
 | `'counterfactual.v_cf' holds num_heads [1, 3], and this write's selection holds [3, 1]; a select list is positional` | before load | the same heads in another order at the read and the write | one list at both, best one named site |
 | `'counterfactual.v_cf' holds layers [6, 7], and this op acts at layers [5, 6]` | before load | the operand lacks a layer the write acts at | read it at the write's layers |
 | `'pairs.input' has a row per example of 'pairs' and 'counterfactual.v_cf' of 'other'; an op takes one dataset's rows` | before load | values of two datasets in one op, even two over the same rows | read both inputs from one dataset |
 | `'patched.logits' is this entry or one this forward makes after it; an operand names an earlier entry` | before load | a same-forward operand listed later | list it earlier, or read it in an earlier forward |
 | `operand 'patched.later' is read at layer_output layer 8, which the nnterp engine's forward reaches no earlier than this write's layer_output layer 6` | after load | a same-forward operand at a later site | read it in a forward before this one |
-| `operand 'counterfactual.v_cf' holds 4 positions on rows 0-1, 3 positions on row 2 and 2 positions on row 3; a scoped read pairs with another forward's value when every row's scope holds the same number of tokens` | after load | a scope whose rows hold different numbers of tokens (entities of 4, 3, 2 tokens) | `"index": -1` inside the scope on both sides, or reduce over `pos` |
+| `operand 'f.lm' holds 4 positions on row 0, 3 positions on row 1 and 1 position on row 2; two values of different reads pair only at a fixed width, whether one forward or two made them, which a scoped read has where every row's scope holds the same number of tokens` | after load | a scope whose rows hold different numbers of tokens (landmarks of 4, 3, 1 tokens) | `"index": -1` inside the scope on both sides, or reduce over `pos` |
+| `operand 'counterfactual.v_cf' holds 7 positions on rows 0-1 and 9 positions on row 2; two values of different reads pair only at a fixed width, whether one forward or two made them, which an open index has where every row holds as many positions` | after load | an open index in the prefill (`{"index": ":"}`, `"5:"`, no `pos`) on prompts of different lengths, of one forward or two; a `permute` of one names the read it reorders (`operand 'donor' reorders the rows of 'clean.acts', which holds …`) | the span the message prints (`'0:7'`, or `'-7:'`), which keeps the read's start or end; or reduce over `pos` |
 | `operand 'counterfactual.v_cf' was read on pairs.cf_input, row 2 of which is 9 tokens; pairs.input has 7, so pairs.cf_input's position 5 (' in') pairs with pairs.input's position 5 (' city')` | after load | one unscoped `pos` on inputs of different lengths, past the tokens both end (or begin) with alike and the one next to them | a scope on each side naming the token in its own row |
 
 ## Entries and ops
@@ -91,6 +92,9 @@ by position; it holds every layer the write acts at; it is one dataset's rows. T
 | `a reduction cannot remove 'layers'; the value is ['rows', 'pos']` | before load | `over` names an axis the value lacks | an axis of the printed layout |
 | `readout projects a residual-stream value; attention_premix is not one` | before load | `readout` on a value that is not a stream | one of the listed stream components |
 | `'top' is a top_k's value, several tensors (its ids, their probs and their tokens)` | before load | an op over a whole `top_k` | name a member: `top.ids`, and `top.probs` or `top.values` |
+| `select classes 2 outside the 2 along classes (the probe's)` | before load | a `select` step's pick past a count the document fixes (a probe's classes, a featurizer's coordinates) | an index below the count |
+| `sel: select hidden_size 800 outside the 768 along hidden_size (the model's)` | after load | a pick past one of the model's sizes | an index below the size |
+| `select 'rows': a select step narrows a value's other axes, and its rows are a dataset's (take, skip) to narrow` | before load | a `select` of `rows`, `pos` or `key` | `take` and `skip` on the dataset, or the read's `pos` |
 
 ## Gradients
 
@@ -192,8 +196,10 @@ A read is never refused for a row it misses; a write whose operand is missing on
 
 | first clause | refused | cause | fix |
 |---|---|---|---|
-| `model.device: the nnterp engine cannot honor it: where the model runs is a run option: --device` | before load, as the engine loads | a placement key in `model` | `--device` on the command line |
-| ``model.torch_dtype: the nnterp engine cannot honor it: the dtype is spelled `dtype` `` | before load, as the engine loads | the transformers spelling | `"dtype"` |
+| `model: 'device': where the model runs is a run option: --device` | before load | a placement key in `model` (`device`, `device_map`; `dispatch` gets `the engine places its model itself`) | `--device` on the command line |
+| ``model: 'torch_dtype': the dtype is spelled `dtype` `` | before load | the transformers spelling | `"dtype"` |
+| `model: 'tp_size': tensor parallelism is a run option: -o tp=N` | before load | a sharding key in `model` | `-o tp=N` under `torchrun` |
+| ``model: 'load_in_4bit': a quantization is spelled in `dtype` (`nf4`, `fp4`, `int8`, `fp8`)`` | before load | a quantization key in `model` (`load_in_4bit`, vLLM's `quantization`) | `"dtype": "nf4"`, or another the message lists |
 | `model.key 'openai-community/gpt2' at revision '…': the nnterp engine cannot load it: HF_HUB_OFFLINE is set and the Hugging Face cache lacks it` | before load, as the engine loads | offline, a revision the cache does not hold | the cached revision, or one run online first |
 | `layer 12; the model has 12 layers` | after load | a layer past the model (layers count from 0) | at most `num_layers - 1` |
 | `select num_heads 12 outside the model's 12` | after load | a `select` past the model's size | an index below the size |
@@ -217,5 +223,7 @@ A read is never refused for a row it misses; a write whose operand is missing on
 | `'patched.logits' was not saved; add it to saves` | `clab table` | a name not in `saves`, or a run whose `--out` a later run reused | add it to `saves` and rerun, each run to its own `--out` |
 | `no run at 'out/nowhere' (no manifest.json); run the document first` | `clab show`, `clab table` | a directory no run wrote | the run's `--out` |
 | `'clean_ld' has a pos column counting positions of pairs.input, and 'cf_ld' one counting positions of pairs.cf_input` | `clab table` | values read on two inputs in one table | table them one at a time |
+| `'f.first' and 'f.last' share no row and pos together: on no row do they hold the same pos, so they join to no row` | `clab table` | reads of one input at positions no row holds for both (`pos: 0` and `pos: -1`) | table them one at a time, or read at a `pos` both hold |
+| `'m4' and 'm5' share no layer` | `clab table` | values at layers neither holds (a mean of a read at layer 4 and one at layer 5) | table them one at a time |
 
 A step that runs out of CUDA memory is the one refusal that writes output ([SKILL.md](../SKILL.md#out-of-memory)).

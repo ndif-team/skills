@@ -177,8 +177,8 @@ r0          0    38   Ġguiding    palm printf bailout heads smarter seeded plas
   `seqs.next row 0: ' palm printf … stereo' is 20 tokens; the read has 19 positions on that row; …`.
 - **An unshifted column of the right length is not refused.** Those 20 words read at queries 20 to 39 score each
   position against the token it reads: 0.00025, where the shifted column gives 0.69.
-- **Table the two reads apart.** Their positions differ, so `clab table out/next_token p_first p_second` prints
-  a blank line.
+- **Table the two reads apart.** Their positions differ, so `clab table out/next_token p_first p_second` is
+  refused: `'p_first' and 'p_second' share no row and pos together: …`.
 
 Knocking out an induction head and scoring this read is the `clab-ablation` skill's.
 

@@ -242,5 +242,4 @@ Featurizers are the `clab-trained-featurizers` skill.
 | what you see | what it is | the check | the fix |
 |---|---|---|---|
 | a fixed document still shows the old numbers | a refused run writes nothing, so the directory holds the last finished run | `clab show`'s first line: the document's name and `started` time | read the refusal and rerun |
-| `clab table OUT a b` prints nothing, while each alone prints rows | two reads of one input at different positions share no `pos` to join on | table each alone | table them one at a time |
 | `clab table` refuses a value the run saved, `'<x>' was not saved` | a later run into the same `--out` replaced the manifest; the old files stay beside it | the manifest's `saves` | give each run its own `--out` |

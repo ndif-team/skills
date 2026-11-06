@@ -243,9 +243,9 @@ null_kl  entropy
 - **The mask comes from the clean forward.** Nothing before block 0 changed, so the routing the knockout
   meets is the clean run's. A mask read in the knockout's own forward is refused (`'knockout.idx' runs 'ne'
   once it is off the model, after this forward`).
-- **Read the mask at a static width**, the tokens every prompt has: `{"index": ":15"}` on these 15-token
-  prompts. An open `{"index": ":"}` is refused as another forward's operand (`'clean.mask' has no width
-  compile can fix`). Tokens past the width keep the expert, so give the prompts one length.
+- **Read the mask at a width every prompt holds**: `{"index": ":15"}` on these 15-token prompts. An open
+  `{"index": ":"}` pairs too where every prompt is one length, and is refused before any forward where they
+  differ. Tokens past a static width keep the expert, so give the prompts one length.
 - **The forced route** writes -1e9 into e's router logit before the router scores it, so every token that
   chose e goes to its next choice. It needs no mask, so no operand to pair and no width to keep. It
   measures a substitute where the knockout measures a gap; report both.

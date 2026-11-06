@@ -17,8 +17,9 @@ accuracy out of 7 unless a line says otherwise. The fit fields are the `clab` sk
   held-out cross entropy of the counterfactual answer (`held_ce`).
 - **A gate's draw is every unit on.** Its null is the full-vector interchange, not the clean run: DBM's
   `ctl_acc` is 7/7 at layer 5.
-- **A head gate's window is a static index.** `{"index": "0:14"}` on rows of 14 tokens; `{"index": ":"}` is
-  refused (`'corrupt.z' has no width compile can fix (an open index, ...)`).
+- **A head gate's corrupt read and its write need prompts of one length.** On these 14-token rows
+  `{"index": ":"}` gives `{"index": "0:14"}`'s numbers to the bit; on rows of different lengths it is refused
+  before any forward, so read a span every row holds.
 - **The L1 weight scales with the number of units.** `mask.mask` is the mean of the soft mask, so a unit kept
   costs the weight over the unit count. Move a sweep to another model or site by that ratio.
 
