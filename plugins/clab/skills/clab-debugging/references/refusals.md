@@ -5,7 +5,7 @@ clab on `openai-community/gpt2`, provoked by a small broken document; `<x>`-styl
 your document's. The **refused** column says when:
 
 - **before load**: before any weight loads. A document path in `<where>` (`steps.…`, `sites.…`), and
-  `Plan(...).compile()` catches it without a model, unless the row says "as the engine loads".
+  `clab compile` catches it without a model, unless the row says "as the engine loads".
 - **after load**: the model and tokenizer are loaded, no forward has run; `<where>` is `<step>.<entry>` or
   `<step>`, and the message names the row or the sweep point.
 - **at run**: the step was running; the steps before it ran, and nothing is written.

@@ -28,14 +28,34 @@ clab run [--engine ENGINE] [--out OUT] [--batch-size N] [--padding dataset|batch
 
 | stage | checks | for example |
 |---|---|---|
-| compile, no model | every field, reference, column, save and sweep, the data, bundle headers | `steps.clean_ld.of: 'clean.logits' names no value produced before this step; known: none` |
+| `clab compile`, no model | every field, reference, column, save and sweep, the data, bundle headers | `steps.clean_ld.of: 'clean.logits' names no value produced before this step; known: none` |
 | `clab run`, before the checkpoint loads | the flags, the device, the engine's options | `device 'gpu': not a torch device ('cpu', 'cuda:0') or a device map transformers computes (…)` |
 | after the model loads, before any forward | layers, `select` indices, positions and answer tokens against the model; components the engine serves | `clean.v_self: layer 12; the model has 12 layers` |
 | when the step runs | an option `generate` rejects; running out of CUDA memory | `answer: generate rejected 'seed': …` |
 
-Compile alone is `python -c "from clab import Plan; Plan('documents/x.json').compile()"`, which raises
-`clab.plan.PlanError` with the message `clab run` would print. Reading a refusal and fixing it is the
-`clab-debugging` skill's.
+`clab compile DOC` is the first stage alone: no engine, no model, no output directory. It prints each run of a
+step in run order, with its kind, its input, the sweep point it runs at and the points it serves, and exits 0.
+`ioi_broken.json`, the same document with `patched.logit` for `patched.logits`, is refused:
+
+```text
+$ clab compile documents/ioi_patch.json
+ioi_patch: compiled, not run
+  step            kind     input                 at  serves
+  clean           forward  pairs.input           —   —
+  counterfactual  forward  pairs.counterfactual  —   —
+  ...
+  flipped         op       —                     —   —
+$ clab compile documents/ioi_broken.json
+clab: steps.patched_ld.of: 'patched.logit' names no value produced before this step; known: clean.logits, …
+```
+
+- **A refusal is the line `clab run` would print**, on stderr, with exit status 1.
+- **It reads the data files, a hub dataset's rows and the bundle files**; under `HF_HUB_OFFLINE=1` a hub dataset's revision must be in the cache.
+- **It imports transformers only to check a `generate` step's options**, and loads no checkpoint.
+- **It takes the document alone**: `clab run`'s flags and `-o` options are checked by `clab run`.
+- **From Python** it is `Plan(path).compile()`, which raises `clab.plan.PlanError` with the same message.
+
+Reading a refusal and fixing it is the `clab-debugging` skill's.
 
 ## From Python
 

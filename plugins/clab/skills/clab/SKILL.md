@@ -1,6 +1,6 @@
 ---
 name: clab
-description: Write, run and read back a clab experiment, a JSON document that reads and writes a transformer's internals by nnterp component name and scores them. Load it first for any clab task. It covers the document's keys (model, data, sites, interventions, featurizers, steps, saves), the step kinds forward, generate, op, fit and load, entries and their ops, pos and scopes, sweeps and labels, and saves. It covers running with clab run on the nnterp, hooks, ndif or vllm engine, and reading back with clab show, clab table, Plan.load, the manifest and the safetensors files. It answers what clab can express (clab describe) and lists the silent mistakes that run without a refusal. For a technique's recipe go on to clab-patching, clab-ablation, clab-lenses-and-attention, clab-steering-and-generation or clab-trained-featurizers. For a refusal or wrong numbers, go to clab-debugging.
+description: Write, run and read back a clab experiment, a JSON document that reads and writes a transformer's internals by nnterp component name and scores them. Load it first for any clab task. It covers the document's keys (model, data, sites, interventions, featurizers, steps, saves), the step kinds forward, generate, op, fit and load, entries and their ops, pos and scopes, sweeps and labels, and saves. It covers checking with clab compile, running with clab run on the nnterp, hooks, ndif or vllm engine, and reading back with clab show, clab table, Plan.load, the manifest and the safetensors files. It answers what clab can express (clab describe) and lists the silent mistakes that run without a refusal. For a technique's recipe go on to clab-patching, clab-ablation, clab-lenses-and-attention, clab-steering-and-generation or clab-trained-featurizers. For a refusal or wrong numbers, go to clab-debugging.
 ---
 
 # clab
@@ -27,7 +27,7 @@ clab describe records        # prints the format's records: the install works
 - **Into another environment**, install nnterp first, then clab with `--no-deps`, since its `pyproject.toml` names nnterp by that local path.
 - **Inside the venv a command is `clab …`**; outside it, `uv run --no-sync clab …`, since a plain `uv run` re-syncs and moves transformers.
 - **The first run downloads the checkpoint**; after that, `HF_HUB_OFFLINE=1 clab run …` runs from the cache.
-- **Check a document without a model** with the environment's python (there is no `clab compile`): `python -c "from clab import Plan; Plan('documents/x.json').compile()"` refuses most mistakes, naming the document path of each.
+- **Check a document without a model**: `clab compile documents/x.json` prints what would run and exits 0, or prints the refusal `clab run` would print, naming the document path, and exits 1.
 - **`clab describe` is the spec** on your machine; `clab describe ops` (or `components`, `pos`, `steps`, …) prints one section.
 
 ## A complete experiment

@@ -45,10 +45,10 @@ first clause of `<what>` is the key to [references/refusals.md](references/refus
 | a step's name without `steps.`: `<step>.<entry>` | after the model loads, before any forward | `counterfactual.v_cf: layer 12; the model has 12 layers` |
 | `<step>: generate rejected …` | at run: earlier steps ran, nothing is written | `answer: generate rejected 'max_new_tokns': …` |
 
-- **Check before you run.** `python -c "from clab import Plan; Plan('documents/x.json').compile()"` needs no
-  model, and its traceback ends `clab.plan.PlanError: <where>: <what>`, the line `clab run` would print.
+- **Check before you run.** `clab compile documents/x.json` needs no model: it prints what would run and exits
+  0, or prints `clab: <where>: <what>`, the line `clab run` would print, and exits 1.
 - **Compiling misses the engine's refusals.** `model.device`, `model.torch_dtype` and a revision missing from
-  the cache are refused as the engine loads, after `compile()` passes and before any weight loads.
+  the cache are refused as the engine loads, after `clab compile` passes and before any weight loads.
 - **A refusal names its row and sweep point** (`base.r: row 1: …`, `counterfactual.v_cf at layers=12: …`),
   and lists what is valid where it can (`known: …`, `valid: …`): copy the spelling from it.
 
