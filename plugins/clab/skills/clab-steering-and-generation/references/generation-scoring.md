@@ -165,7 +165,7 @@ refuses a chat column. Append the reply to that text, and check that the text an
 
 ```json
 {
-  "description": "Teacher-force an assistant reply. A list input joins text, and a chat column is not text, so the prompt is written as the template renders it (`text`, the default system message included). `c` and `t` read the last prompt token from the chat and from the text; `agree` is 1 where every logit is equal. `forced` appends each row's reply and reads the positions that predict it: row 0's is the reply the model generates greedily, row 1's names another city. `hit` is 1 where a token was the top prediction, and `seq`, the cross-entropy summed over `pos`, is the reply's negative log-likelihood.",
+  "description": "Teacher-force an assistant reply. A list input joins text, and a chat column is not text, so the prompt is written as the template renders it (`text`, the default system message included). `c` and `t` read the last prompt token from the chat and from the text; `agree` is 1 where every logit is equal. `forced` appends each row's reply and reads the positions that predict it: row 0's is the reply the model generates greedily, row 1's names another city, row 2's is the bare city. `hit` is 1 where a token was the top prediction, and `seq`, the cross-entropy summed over `pos`, is the reply's negative log-likelihood.",
   "model": {"key": "HuggingFaceTB/SmolLM2-135M-Instruct", "revision": "12fd25f77366fa6b3b4b768ec3050bf629380bac", "dtype": "float32"},
   "data": {"qa": {"template": {"add_generation_prompt": true}, "rows": [
     {"example_id": "paris", "chat": [{"role": "user", "content": "What is the capital of France?"}],
@@ -173,7 +173,10 @@ refuses a chat column. Append the reply to that text, and check that the text an
      "reply": "The capital of France is Paris."},
     {"example_id": "lyon", "chat": [{"role": "user", "content": "What is the capital of France?"}],
      "text": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n",
-     "reply": "The capital of France is Lyon."}]}},
+     "reply": "The capital of France is Lyon."},
+    {"example_id": "bare", "chat": [{"role": "user", "content": "What is the capital of France?"}],
+     "text": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n",
+     "reply": "Paris"}]}},
   "sites": {"head": {"component": "logits"}},
   "steps": {
     "c": {"kind": "forward", "input": "qa.chat", "interventions": {"l": {"site": "head", "pos": -1}}},
@@ -196,6 +199,7 @@ refuses a chat column. Append the reply to that text, and check that the text an
 example_id  row  text                                              reply                            value
 paris       0    <|im_start|>system\nYou are a helpful AI assist…  The capital of France is Paris.  0.5047430992126465
 lyon        1    <|im_start|>system\nYou are a helpful AI assist…  The capital of France is Lyon.   11.343289375305176
+bare        2    <|im_start|>system\nYou are a helpful AI assist…  Paris                            3.183107614517212
 ```
 
 - **`agree` is 1.0**: the text renders to the chat's tokens, and the logits are equal to the bit. Compare
@@ -203,7 +207,14 @@ lyon        1    <|im_start|>system\nYou are a helpful AI assist…  The capital
 - **The null is the greedy reply**: `hit` is 1.0 at all 7 positions of row 0, from the header's `Ċ` at 36 to
   `ĠParis` at 42. On row 1 it is 0.0 at 41, where the model predicts Paris and the reply says Lyon.
 - **`seq` scores the whole reply**: 0.50 for the reply the model gives, 11.34 for the Lyon reply.
-- **The reply has no leading space**: its first word follows the header's newline.
+- **A bare one-word reply scores a reply the model does not give.** It answers in sentences, opening "The"
+  (row 0), so `hit` on row 2's bare `Paris` is 0.0. On such a model a forced bare answer's `match` is 0 on
+  every row: expected, not a wiring fault. Its `seq` (3.18) is still the bare word's cost.
+- **The reply has no leading space**: its first word follows the header's newline. A generation's answer
+  column keeps it (` Tokyo`), so a document that does both keeps two columns, the spaced answer and the reply.
+- **`strip` loosens the text comparison only** (`contains`, a scope). For `token_prob` and `cross_entropy` an
+  answer is its tokens: bare `Tokyo` is `To`, `kyo` where ` Tokyo` is one. A one-position read of it is
+  refused without naming the space: `'Tokyo' is 2 tokens; the read has 1 position on that row`.
 - **The text holds the template's default system message**, which the chat never states. Render it outside
   clab with the tokenizer's `apply_chat_template(messages, tokenize=False, add_generation_prompt=True)`,
   which gives this row's `text` exactly, never from memory of the template.

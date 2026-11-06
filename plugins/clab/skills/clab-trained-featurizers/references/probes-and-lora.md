@@ -29,7 +29,7 @@ which is the city's last token, and trains on 24 cities of four countries:
 
 ```json
 {
-  "description": "A linear probe per layer for the country of a city, read at GPT-2's last token (the city's last token), trained on 24 cities and scored on 12 others. epochs 0 is the untrained floor.",
+  "description": "A linear probe per layer for the country of a city, read at GPT-2's last token (the city's last token), trained on 24 cities and scored on 12 others. epochs 0 is the untrained floor; mce, the mean held-out cross entropy, ranks layers whose accuracies tie.",
   "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
   "data": {
     "train": {"rows": [
@@ -61,36 +61,40 @@ which is the city's last token, and trains on 24 cities of four countries:
     "fit": {
       "kind": "fit", "train": ["probe"], "objective": {"ce": 1.0},
       "epochs": {"sweep": [0, 30]}, "batch_size": 8, "seed": 0, "optimizer": {"name": "adam", "lr": 0.01},
-      "eval": {"held_out": {"train": "test"}},
+      "eval": {"held_out": {"train": "test"}, "train": {}},
       "steps": {
         "read": {"kind": "forward", "input": "train.input", "interventions": {
           "scores": {"site": "stream", "pos": -1, "ops": [{"op": "encode", "featurizer": "fit.probe"}]}}},
         "ce": {"kind": "op", "op": "cross_entropy", "of": "read.scores", "target": "train.country"},
         "hit": {"kind": "op", "op": "match", "of": "read.scores", "expected": "train.country"},
-        "acc": {"kind": "op", "op": "mean", "of": "hit"}
+        "acc": {"kind": "op", "op": "mean", "of": "hit"},
+        "mce": {"kind": "op", "op": "mean", "of": "ce"}
       }
     }
   },
-  "saves": ["fit.held_out.acc", "fit.held_out.ce"]
+  "saves": ["fit.held_out.acc", "fit.held_out.mce", "fit.held_out.ce", "fit.train.ce"]
 }
 ```
 
 ```text
 clab run documents/probe.json
-clab table out/probe fit.held_out.acc
-at                         value
-{"layers":0,"epochs":0}    0.25
-{"layers":0,"epochs":30}   0.5
-{"layers":2,"epochs":30}   0.8333333134651184
-{"layers":4,"epochs":30}   0.9166666865348816
-{"layers":8,"epochs":30}   1.0
-{"layers":11,"epochs":30}  0.9166666865348816
+clab table out/probe fit.held_out.acc fit.held_out.mce
+at                         fit.held_out.acc    fit.held_out.mce
+{"layers":0,"epochs":0}    0.25                1.3862943649291992
+{"layers":0,"epochs":30}   0.5                 2.3142340183258057
+{"layers":2,"epochs":30}   0.8333333134651184  0.7212057113647461
+{"layers":4,"epochs":30}   0.9166666865348816  0.41435277462005615
+{"layers":8,"epochs":30}   1.0                 0.0029896905180066824
+{"layers":11,"epochs":30}  0.9166666865348816  0.5249781608581543
 ```
 
 - **The two sweeps cross**, since they sweep different fields: ten fits, keyed by layer and epochs.
 - **`epochs=0` is the floor**, 0.25 at every layer: France sorts first and is 3 of the 12 held-out rows.
 - **The 12 held-out cities** decode at 0.5 from layer 0, where only the token is there, and at 1.0 from layer 8.
   Every trained point scores 1.0 on its training rows, so only the held-out column says anything.
+- **Rank layers by `mce` where accuracies tie**: layers 4 and 11 both get 11 of 12, and `mce` puts 4 ahead
+  (0.414 against 0.525). On an easy set a row's cross entropy underflows and prints `-0.0`, as `fit.train.ce`
+  does on 13 to 23 of the 24 training rows at each trained layer.
 - **The `held_out` eval** reads `test` wherever the body says `train`: the input, the target and the classes
   scored. The class list stays the training column's, and a held-out label outside it is refused before any
   forward.
@@ -169,9 +173,9 @@ here). This probe reads the day at `das.json`'s site, layer 5 at the day token:
 }
 ```
 
-`fit.train.acc` is 1.0. From the corpus root, after the run, this writes the span of its class differences as
-a subspace bundle with the header clab writes. The span's rank is the classes less one: 6 here, and for a
-two-class probe the one direction `W[:, 1] - W[:, 0]`, normalised.
+`fit.train.acc` is 1.0. From the corpus root, after the run, this writes the probe's span as a subspace bundle
+with the header clab writes, and three random bases of the same rank as its control. The span's rank is the
+classes less one: 6 here, and for two classes the one direction `W[:, 1] - W[:, 0]`, normalised.
 
 <!-- test: skip -->
 ```python
@@ -180,12 +184,19 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 with safe_open("out/day_probe/fit.probe.safetensors", "pt") as f:
-    W, header = f.get_tensor("W"), f.metadata()                        # [768, 7]: one column per class
-span = torch.linalg.qr(W - W.mean(1, keepdim=True)).Q[:, :W.shape[1] - 1].contiguous()   # the class differences
+    W, header = f.get_tensor("W"), f.metadata()                        # [768, classes]: one column per class
+if W.shape[1] == 2:                                                    # one direction, toward the second class
+    span = ((W[:, 1] - W[:, 0]) / (W[:, 1] - W[:, 0]).norm())[:, None]
+else:                                                                  # the class differences: rank classes - 1
+    span = torch.linalg.qr(W - W.mean(1, keepdim=True)).Q[:, :W.shape[1] - 1]
+bases = {"span": span}
+for seed in range(3):                                                  # random bases of the same rank
+    bases[f"random{seed}"] = torch.linalg.qr(torch.randn(span.shape, generator=torch.Generator().manual_seed(seed))).Q
 keep = ["model.key", "model.revision", "model.dtype", "component", "layer", "width"]
-save_file({"basis": span}, "out/day_probe/span.safetensors", metadata={
-    **{k: header[k] for k in keep}, "format": "clab/1", "kind": "subspace",
-    "k": str(span.shape[1]), "parametrization": "cayley", "document": "probe_span"})
+for name, basis in bases.items():
+    save_file({"basis": basis.contiguous()}, f"out/day_probe/{name}.safetensors", metadata={
+        **{k: header[k] for k in keep}, "format": "clab/1", "kind": "subspace",
+        "k": str(basis.shape[1]), "parametrization": "cayley", "document": "probe_span"})
 ```
 
 To patch along it, `das_apply.json` (in [SKILL.md](../SKILL.md)) takes `{"kind": "subspace", "file_path":
@@ -237,14 +248,18 @@ p_clean              p_null               p_ablated            worst_left
 |---|---|---|---|
 | the probe's span | 6 | 1.0, 1.707 | 0.125 |
 | a drawn subspace, seeds 0, 1, 2 | 6 | 0.0 at each; 2.462, 2.470, 2.440 | 0.243, 0.218, 0.223 |
+| `random0` to `random2` from the snippet | 6 | not run | 0.222, 0.216, 0.234 |
 | DAS, trained (`das.json`'s `fit.rot`) | 4 | 1.0, 1.093 | 0.104 |
 
 - **The probe's directions are used.** Projected out, they take the answer's probability from 0.226 to 0.125;
   drawn subspaces of the same rank move it by under 0.02.
 - **The null is the bracket with no edit**, `p_null`, equal to `p_clean` to the bit; `left`, the span's
   coordinates after the write, is at most 7.7e-6.
-- **The drawn rows** put `{"kind": "subspace", "k": 6, "seed": {"sweep": [0, 1, 2]}}` in place of the loaded
-  span. A sweep cannot stand for an op's `featurizer` (refused by name), so each bundle is a document of its own.
+- **The controls are random directions of the same rank.** The drawn rows put `{"kind": "subspace", "k": 6,
+  "seed": {"sweep": [0, 1, 2]}}` in place of `span`, in one document. A random bundle loads like `span`, one
+  document each, since a sweep cannot stand for `file_path` or an op's `featurizer`. For two classes these are
+  random unit directions, and `project_out` normalises its direction, so a random direction of the probe
+  direction's norm is the same control as a unit one.
 
 ## LoRA: train an adapter
 
@@ -296,15 +311,9 @@ phrasing and scored on another:
 
 ```text
 clab run documents/lora_train.json
-clab table out/lora_train clean_mce
-value
-4.160462856292725
-clab table out/lora_train fit.held_out.mce
-value
-0.1650763601064682
-clab table out/lora_train fit.held_out.acc
-value
-1.0
+clab table out/lora_train clean_mce fit.held_out.mce fit.held_out.acc
+clean_mce          fit.held_out.mce    fit.held_out.acc
+4.160462856292725  0.1650763601064682  1.0
 ```
 
 - **The null is a clean forward.** `B` is drawn as zeros, so the untrained adapter is the model. At
@@ -353,15 +362,11 @@ clab table out/lora_apply said
 row  input                                    value
 1    Today is Tuesday, so tomorrow will be     Thursday.\n\n
 2    Today is Wednesday, so tomorrow will be   Friday.\n\n
-clab table out/lora_apply said_prefill
-row  input                                    value
-1    Today is Tuesday, so tomorrow will be     Thursday, according to
-2    Today is Wednesday, so tomorrow will be   Friday, Saturday or
 ```
 
 - **`adapted_ce` equals `lora_train.json`'s `fit.held_out.ce` to the bit**, mean 0.165 against 4.160 clean.
 - **`frame: ":"` keeps the adapter on at every decode call.** With it at the prefill only (`prefill_only`),
-  the first token is the same and 5 of 7 continuations differ.
+  the first token is the same and 5 of 7 continuations differ (row 2: `Friday, Saturday or`).
 
 ## Across sites: `with`
 
@@ -387,12 +392,7 @@ named bundle, and a bare `"with": "x"` means that bundle's `x`:
              "adapt": {"site": "o_proj", "pos": {"frame": ":", "index": ":"}, "ops": [{"op": "apply", "featurizer": "lora", "with": "x"}]}}}
 ```
 
-A forward that names it gives the fit's `fit.held_out.ce` to the bit. Refused before any forward, the last
-because a `generate` step serves no operand from its own entries:
-
-```text
-clab: adapted.adapt: out/lora_oproj/fit.lora.safetensors was trained reading its input at attention_premix layer 5 (with), and this use gives no 'with'; give 'with' an entry at attention_premix layer 5
-clab: adapted.adapt: out/lora_oproj/fit.lora.safetensors was trained reading its input at attention_premix layer 5 (with), and this use's with 'adapted.x' is layer_input layer 5
-clab: interventions.adapted.adapt.ops[0].with in steps.gen: 'gen.x' is an entry of this generation; an operand from an entry of its own step is served in a forward, not inside a generate
-```
+A forward that names it gives the fit's `fit.held_out.ce` to the bit. A use with no `with`, or a `with` at
+another site, is refused before any forward (`was trained reading its input at attention_premix layer 5
+(with)`). A `generate` step refuses the bundle, since it serves no operand from its own entries.
 

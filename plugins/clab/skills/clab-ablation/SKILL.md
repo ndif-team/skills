@@ -287,13 +287,13 @@ at                                              clean_ld            ablated_ld
   ids, so draw the sets outside the document and write them in sorted.
 - **Zero is not a resting neuron's value**: GELU's floor is -0.17, and seven of the twelve random neurons
   read below -0.1 on every row.
-- **Neurons in several layers need a site per layer**: a `select` list applies at every layer of its site.
+- **A set across layers needs a site per layer**: a `select` list applies at every layer of its site. Its control
+  matches the set's count in each layer, one document per draw: one label over several sites needs the same lists.
 - **On a gated MLP** `mlp_activation` is the gate alone; mean-ablate `mlp_neurons`, what the down projection sums.
 
 ## Which skill for the neighbouring questions
 
-- The format, running and reading back: the [`clab` skill](../clab/SKILL.md), with its
-  [sweeps](../clab/references/sweeps.md) and [sites and interventions](../clab/references/sites-and-interventions.md).
+- The format, sweeps, sites, running and reading back: the [`clab` skill](../clab/SKILL.md).
 - Copying a value in from a counterfactual prompt, path patching, attribution: the `clab-patching` skill.
 - Where a head looks, attention patterns and stripes, the logit lens: the `clab-lenses-and-attention` skill.
 - A trained mask over heads, DAS, a probe's direction, SAE feature ablation: the `clab-trained-featurizers` skill.

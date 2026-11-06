@@ -341,8 +341,10 @@ eiffel,0,9,Ġof,The Eiffel Tower is in the city of,"{""intermediate_size"":[483,
   k, `neg` then `top_k`.
 
 Confirm by zeroing the top five together. A `select` applies at every layer its site picks, so neurons in
-several layers are one site per layer. This fragment is the `sites` and `steps` of `documents/zero_top.json`,
-whose `model` and `data` are those above; `scale` by 0 zeroes, and `keep` 1.0 writes each neuron back as it was:
+several layers are one site per layer. Group the (layer, neuron) pairs of `top.ids` by layer, read from the
+`--csv` cell or from `Plan.load(out).results["top.ids"]` (one tensor per axis), and give each layer's neurons
+as its site's `select` list. This fragment is the `sites` and `steps` of `documents/zero_top.json`, whose
+`model` and `data` are those above; `scale` by 0 zeroes, and `keep` 1.0 writes each neuron back as it was:
 
 ```json
 {
@@ -376,4 +378,5 @@ at            ...  value
 - **The null equals the clean probability to the bit**, and zeroing the five takes it from 0.0700 to 0.0275.
 - **The first-order drops sum to 0.0617 against a real drop of 0.0425**: the estimate ranks, and overshoots.
 - **Neurons drawn at random, the same count per layer, are the control** that says the top set is special; it
-  is the `clab-ablation` skill's.
+  is the `clab-ablation` skill's. When the sets span several layers, write one document per random draw: a
+  shared sweep label needs identical values, so per-layer sites of different sets cannot be one sweep.
