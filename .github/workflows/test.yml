@@ -17,6 +17,25 @@ jobs:
       - run: pip install pytest
       - run: pytest -q tests/test_structure.py
 
+  nnspec-documents:
+    name: nnspec documents compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install nnspec
+        # nnspec is not on PyPI, and its pyproject pins nnterp to a local path, so nnterp
+        # comes from GitHub first and nnspec is installed without dependency resolution.
+        # Compiling a document needs no model, so no weights are downloaded.
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install "transformers>=5" pytest "nnsight>=0.8.2" safetensors pydantic accelerate "datasets>=4"
+          pip install "nnterp @ git+https://github.com/ndif-team/nnterp@e5d0f8e755c6c04ce7c84eeab2832e2ef8dfce20"
+          pip install --no-deps "nnspec @ git+https://github.com/JadenFiotto-Kaufman/nnspec@bb1c38aec32eed9e9cb91a5ca8b6018d924c24f6"
+      - run: pytest -q tests/test_documents.py
+
   code-blocks:
     name: skill code blocks (CPU)
     runs-on: ubuntu-latest
@@ -40,9 +59,9 @@ jobs:
         # throughout these skills are wrong on 4.x.
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install "transformers>=5" pytest
+          pip install "transformers>=5" pytest pillow
           pip install "nnsight @ git+https://github.com/ndif-team/nnsight@0.8"
-          pip install "nnterp @ git+https://github.com/ndif-team/nnterp@0.8-refactor"
+          pip install "nnterp @ git+https://github.com/ndif-team/nnterp@200ac05b7b2d385d0a77c5e0204dba0da502fde7"
       - name: Report versions
         run: python plugins/nnsight/skills/nnsight/scripts/check_env.py
       # No CUDA and no NDIF deployment on the runner, so `gpu` and `remote`
