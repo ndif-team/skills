@@ -87,7 +87,7 @@ raised before any weights load only when the default cannot standardize it. Neit
 |---|---|---|
 | `skip_layers(start, end, skip_with=None)` | inside a trace, before block `start` runs | blocks `start..end` (inclusive) do not run; consumes `layers[start].input`; must cover every row of a batch (one invoke of several raises `ValueError`) |
 | `steer(layers, vector, factor=1.0, token_positions=None, batch_index=None)` | inside a trace; `layers` an int or ascending list | `layer_output += factor * vector` in place at those positions / that row |
-| `project_on_vocab(hidden)` | inside (live) or outside (saved) | the family's head: norm, `lm_head`, then the family's step (softcap, `logit_scale`, `/ logits_scaling`, `hc_head`); equals `logits` on the last block |
+| `project_on_vocab(hidden)` | inside (live) or outside (saved) | the model's own path to its logits: norm, `lm_head`, then the family's step (softcap, `logit_scale`, `/ logits_scaling`, `hc_head`, ZAYA's cast; on OPT-350m `project_out` in place of the missing final norm); equals `logits` on the last block |
 | `get_topk_closest_tokens(hidden, k=5)` | outside, on a saved `[..., hidden]` tensor | `project_on_vocab`, softmax, `{decoded token: probability}` per position; byte tokens decoding alike collapse |
 | `probs_to_dict(probs, k=5)` | outside | the `k` most likely tokens of one `[vocab]` distribution, same keying |
 | `support(layer=None)` | outside; nothing runs | every root and block value, `None` or `{layer: reason}`; with `layer`, that block flat |

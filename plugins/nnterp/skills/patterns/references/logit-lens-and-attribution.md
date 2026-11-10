@@ -1,8 +1,9 @@
 # Logit lens and direct logit attribution
 
 Both read the residual stream through the unembedding. The lens applies the model's
-whole head (`norm`, `lm_head`, softcap) to a stream or a contribution and asks "what
-would this predict alone"; direct logit attribution applies `lm_head` alone to each
+own path from the stream to its logits (`norm`, `lm_head`, and any softcap, scale or
+projection) to a stream or a contribution and asks "what would this predict alone";
+direct logit attribution applies `lm_head` alone to each
 contribution so the numbers sum. nnterp's `project_on_vocab` is the first,
 `model.lm_head(x)` inside a trace is the second, and `layers[i].input +
 attention_output + mlp_output == layer_output` is what makes the second decompose on
@@ -37,11 +38,15 @@ assert decoded[:6] == [" the"] * 6 and decoded[10:] == [" Paris", " Paris"]
 assert torch.equal(lens[model.num_layers - 1], logits[:, -1])
 ```
 
-`project_on_vocab` *calls* `model.norm` and `model.lm_head` on your tensor; reading
-`model.lm_head_output` (`lm_head.output`) is the model's own projection of
-`final_norm_output`, the normed final stream, a different thing. The last-block equality holds on every family because
-`project_on_vocab` is the family's whole head: the softcap (Gemma-2/4), `logit_scale`
-(Cohere), `/ logits_scaling` (Granite), DeepSeek-V4's `hc_head` before the norm.
+`project_on_vocab` *calls* the model's own modules on your tensor (`model.norm`,
+`model.lm_head`, and any the model applies between them); reading `model.lm_head_output`
+(`lm_head.output`) is the model's own projection of the final stream, a different thing.
+The last-block equality holds on every family because `project_on_vocab` follows the
+model's path: the softcap (Gemma-2/4), `logit_scale` (Cohere's and Cohere-2's causal-LM
+classes; the Aya Vision and Command A Vision wrappers do not scale, and the lens follows
+them), `/ logits_scaling` (Granite), DeepSeek-V4's `hc_head` before the norm, ZAYA's cast
+of its float32 stream to the norm's dtype, and on OPT-350m, which has no final norm,
+`project_out` before `lm_head`.
 
 ### Target-probability curve
 
@@ -132,7 +137,12 @@ an error.
 The lens assumes intermediate residuals live in the unembedding's basis. GPT-2's
 smooth curve is the exception; SmolLM2 decodes punctuation for 27 of 30 layers and
 then " Paris" (see the skill body), while answering correctly. Once the wiring check
-passes, a late curve is a fact about the lens, not the model. A tuned lens (one
+passes, a late curve is a fact about the lens, not the model. Where the lens becomes
+readable does not follow the norm placement: on one ~170-token passage OPT-350m, whose
+norms follow the adds, improves block by block from the first and is never worse than a
+uniform guess, while its pre-norm sibling OPT-125m is worse than uniform for five blocks;
+OLMo-2-0425-1B and EXAONE-4.0-1.2B, which norm each sublayer's output, and the pre-norm
+Llama-3.2-1B all start above uniform and become readable late. A tuned lens (one
 learned affine map per layer before the frozen norm and head) fixes the basis; it
 costs a training pass. The `logit-lens` skill has the full treatment, and the lens
 is correlational either way — patch the layer to make a causal claim.
@@ -287,5 +297,5 @@ before it and does not.
   Two comprehensions, one over all attentions then one over all MLPs, raise
   `OutOfOrderError`. `token_embeddings` before `layers[0].input`.
 - **Three different heads.** `model.lm_head(x)` is a stood-down call on your tensor;
-  `model.lm_head_output` is the model's projection of the normed stream;
-  `model.logits` adds the softcap.
+  `model.lm_head_output` is the model's projection of the final stream (the normed
+  stream, or `project_out`'s output on OPT-350m); `model.logits` adds the softcap or scale.

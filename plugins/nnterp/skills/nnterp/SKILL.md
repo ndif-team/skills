@@ -758,10 +758,12 @@ assert torch.equal(model.project_on_vocab(last), out)            # exact at the 
 print(model.get_topk_closest_tokens(mid[0, -1], k=3))            # [{token: probability}]
 ```
 
-`project_on_vocab` is the family's whole head: norm, `lm_head`, then the softcap
-(Gemma-2/4), `logit_scale` (Cohere), `/ logits_scaling` (Granite) or `hc_head`
-(DeepSeek-V4). `steer` moves `vector` to the stream's device and dtype; scale the
-factor to the stream's norm (`layer_output[0, -1].norm()`, which grows with depth).
+`project_on_vocab` is the model's own path from the stream to its logits: norm,
+`lm_head`, then the softcap (Gemma-2/4), `logit_scale` (Cohere's causal-LM classes, not
+the Aya Vision wrappers) or `/ logits_scaling` (Granite); `hc_head` first on DeepSeek-V4,
+and `project_out` in place of the final norm on OPT-350m, which has none. `steer` moves
+`vector` to the stream's device and dtype; scale the factor to the stream's norm
+(`layer_output[0, -1].norm()`, which grows with depth).
 `get_topk_closest_tokens` takes a residual-stream tensor, not logits, and keys on
 the decoded string: byte tokens that decode to `'�'` collapse into one entry.
 

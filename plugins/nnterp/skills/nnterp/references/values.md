@@ -404,12 +404,15 @@ assert torch.allclose(probs, logits[:, -1].softmax(-1))
 ```
 
 **`logits`** is the `.logits` of the model's output: softcapped on Gemma-2/4 and
-VaultGemma, times `logit_scale` on Cohere, `/ logits_scaling` on the Granite line,
+VaultGemma, times `logit_scale` on Cohere's and Cohere-2's causal-LM classes (the Aya
+Vision and Command A Vision wrappers do not scale), `/ logits_scaling` on the Granite line,
 times `logits_scaling` on HyperCLOVA X, times `lm_head_multiplier` on Falcon-H1,
 float32 on Mamba-2 and Nemotron-H. `lm_head_output` is the raw projection
 (`lm_head.output`), so on those families the difference between the two is the
 family's step; `project_on_vocab` applies it. `final_norm_output` is the final norm's
-output (`norm.output`): assign it to hand the head another stream. Assigning `logits`
+output (`norm.output`): assign it to hand the head another stream. OPT-350m has no final
+norm: `model.norm` does not exist, `final_norm_output` is unavailable ("no norm module on
+this model"), and the head reads `project_out`'s output. Assigning `logits`
 replaces the logits in the output:
 
 ```python
