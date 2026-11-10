@@ -105,14 +105,14 @@ python plugins/nnsight/skills/nnsight/scripts/check_env.py --remote
 
 ## nnterp (one vocabulary across families)
 
-[nnterp](https://github.com/ndif-team/nnterp/tree/0.8-refactor) is a layer on nnsight 0.8: a
+[nnterp](https://github.com/ndif-team/nnterp) is a layer on nnsight 0.8: a
 `StandardizedTransformer` whose modules answer to Llama's names on every family
 (`model.layers[i].self_attn`, `model.layers[i].mlp`, `self_attn.o_proj`, `mlp.down_proj`,
 `model.norm`, `model.lm_head`) and carry standard values (`layer_output`, `attention_output`,
 `mlp_output`, the module boundaries between them such as `layer_mid`, `attention_probabilities`,
 the attention interior, `mlp_neurons`, `logits`, the gated-DeltaNet state on hybrids) that mean
 the same thing on all 98 transformer families it knows, with `model.support()` saying what a
-checkpoint has before any trace. It needs nnsight `dev` at `d565f5f8` or later.
+checkpoint has before any trace.
 
 ```bash
 /plugin install nnterp@ndif-team

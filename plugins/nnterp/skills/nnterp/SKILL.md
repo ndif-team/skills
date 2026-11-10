@@ -14,10 +14,6 @@ mean the same thing everywhere. Everything nnsight does (`trace`, `generate`,
 unchanged; this skill covers only what nnterp adds. Load the `nnsight` skill for
 the underlying API.
 
-Verified on nnterp `v2.0.0` at `200ac05` (98 families), with nnsight 0.8.2 and transformers 5.20.2.
-nnterp needs nnsight 0.8 or later: the families alias `o_proj` and `down_proj` with dotted
-rename keys (`"attn.c_proj": "attn.o_proj"` on GPT-2), which older nnsight cannot bind.
-
 ## Orientation
 
 <!-- test: setup -->
@@ -172,8 +168,19 @@ An edit lands at its value's location as a read does, so a list of edits sorts t
 way. The ranks also explain a failure after the fact: compare them for the reads around an
 `OutOfOrderError` or a shifted `tracer.iter` list.
 
-Three variants do not raise. Under `generate` + `tracer.iter`, an out-of-order
-read *binds the next step's value*, so per-step lists come back shifted by one. A
+Two `OutOfOrderError`s are not about the order `rank` gives. A child module's value
+(`self_attn.q_proj.output`) then an interior value of that attention (`attention_queries`)
+fails in the first such trace on a model whose `self_attn.source` nothing has touched yet;
+once the model is dispatched (`dispatch=True`, or after its first trace), touch
+`model.layers[i].self_attn.source` outside the trace. A recurrent mixer's
+submodule value (`linear_attn.in_proj_qkv.output`) and its kernel values (`attention_queries`,
+`state_output`, ...) cannot share a trace in either order: use two traces.
+
+Three variants do not raise. Under `generate` + `tracer.iter`, a late read raises on step 0
+but on a later step (a loop from `iter[1:]`) *binds the next step's value*, so per-step lists
+come back shifted by one; a value inside the attention call shifts from step 0 too (the scores
+and the pattern always; the queries, keys, values and head outputs when the loop is the first
+to touch that attention's `.source`). A
 read pinned to a step the run never reaches (past `max_new_tokens`, or that
 shifted read on the last step) cuts the block short with a `UserWarning`: later
 names are unbound, so look for the warning when a saved name is missing. On a Mamba-1 decode step, `attention_head_outputs` read before
@@ -215,9 +222,10 @@ assert not torch.allclose(edited, logits)
 GPT-2's and GPT-BigCode's keys and values take an in-place edit, and it lands.
 
 **10. Recurrent mixers route kernels before the first trace.** On Mamba,
-Falcon-Mamba and Jamba with `mamba_ssm` installed, a CPU run crashes with
-`Expected u.is_cuda()` (even for `layer_output`) until
-`nnterp.route_kernels(model.family, "torch")`; on DeltaNet hybrids the per-token
+Falcon-Mamba and Jamba the scan's head outputs and state (`attention_head_outputs`,
+`state_output`, `state`, `states`) need `nnterp.route_kernels(model.family, "torch")`
+whether or not `mamba_ssm` is installed, and with it installed a CPU run crashes with
+`Expected u.is_cuda()` (even for `layer_output`) until then; on DeltaNet hybrids the per-token
 `state`/`states` need the same call; on Mamba-2 families `states` needs
 `nnterp.chunk_per_token(model)`.
 
@@ -231,18 +239,13 @@ spelling of it).** A family keys its envoys on module types, so a path key such 
 `"layers.0.mlp"` binds but loses to the family's `GPT2MLP` key; displace a family envoy
 by keying on its type.
 
-**13. A silent segfault at import is pyarrow's, not nnterp's.** On glibc 2.31 (Ubuntu
-20.04) with pyarrow installed, `import transformers.modeling_layers` before nnsight crashes
-in pyarrow's jemalloc thread. Set `JE_ARROW_MALLOC_CONF=background_thread:false`, or import
-`nnterp` (or `nnsight`) first.
-
-**14. A vision-language wrapper loaded without `task="image-text-to-text"` sees no image.**
+**13. A vision-language wrapper loaded without `task="image-text-to-text"` sees no image.**
 The default `task="text-generation"` load has no processor, so the tower never runs:
 `model.vision.support()` is `{}`, `model.support()` has no `vision.` rows, and every tower
 value raises `Unavailable`, inside a trace too, with the reason `a text-only load: no
 processor, so no image reaches the model; load with task='image-text-to-text'`.
 
-**15. Read `vision.image_token_mask` first and `vision.image_features` after the tower;
+**14. Read `vision.image_token_mask` first and `vision.image_features` after the tower;
 one image-carrying invoke per trace.** The mask comes off the inputs, like `input_ids`;
 `image_features` is read at the scatter, after the tower's values and before
 `layers[0].input`. Under `generate` on transformers 5.18 and later the images are encoded
@@ -253,12 +256,12 @@ batch, and then `vision.image_features` is flat over the whole batch's image tok
 invoke, so a write in one invoke reaches every row. Put several images in one invoke, and
 run clean and ablated as two traces.
 
-**16. Boolean indexing with the mask flattens the batch.** `out[mask]` is
+**15. Boolean indexing with the mask flattens the batch.** `out[mask]` is
 `[image_tokens, hidden]` over every row in row-major order (the order of `image_features`),
 not `[batch, ...]`. Index one row (`out[0, mask[0]]`) or mask instead of indexing
 (`out.masked_fill(~mask[..., None], 0)`) to keep the batch.
 
-**17. A query or key moved to another position goes in before the rotary.**
+**16. A query or key moved to another position goes in before the rotary.**
 `attention_queries` and `attention_keys` are rotated for the positions they ran at: a
 rotated query written at another position or into another prompt is attended with the
 wrong position. Write `attention_queries_prerope` / `attention_keys_prerope` instead; the
@@ -269,19 +272,19 @@ Gemma norm between the projection and the rotary. `self_attn.rotate` is the rota
 alone: HunYuan and Llama 4 norm the queries and keys after it, JetMoE tiles its keys,
 Ministral 3 scales its queries, so there `attention_queries` is not `rotate(...)` itself.
 
-**18. Read `self_attn.interface` once per forward, and call it before the scores.**
+**17. Read `self_attn.interface` once per forward, and call it before the scores.**
 Reading it takes the attention call's arguments, so it goes where the queries, keys and
 values are, in any order with them; calling it takes the function the forward is about to
 run, so call it before reading or writing the scores, the pattern or the head outputs. Call
 the result as often as you need. A second read after a call, or a call after those reads,
 asks for a point the forward has passed and raises `OutOfOrderError`, under `tracer.iter`
-too; a first read placed after them under `tracer.iter` binds the next step's call without
-an error, as any late read does there (trap 6). Within one invoke, a padded batch included,
+too; a first read placed after them under `tracer.iter` raises on step 0 and binds the next
+step's call on a later step, as a late read does there (trap 6). Within one invoke, a padded batch included,
 it reproduces the model bit for bit; across invokes only to rounding (about `1e-8` in
 float32), so put prompts in one invoke (`model.trace([a, b])`) when that matters
 ([Calling the attention function again](#calling-the-attention-function-again-interface)).
 
-**19. A head's weights are `value_weight` / `output_weight`, not slices of `.weight`.**
+**18. A head's weights are `value_weight` / `output_weight`, not slices of `.weight`.**
 Under a PEFT adapter (`peft=` at load) `self_attn.v_proj.weight` is the base weight alone;
 `value_weight(kv)` and `output_weight(j)` give the weight the LoRA layer applies (the base
 plus every active, unmerged adapter's delta, what `merge()` would leave), so an adapted
@@ -363,12 +366,14 @@ print(type(model.layers[0].self_attn).attention_probabilities)
 # (attention_probabilities) -> Pattern [batch num_heads query key]: The attention pattern the values are mixed with
 ```
 
-An axis that is a fact about the model is named after the size that holds it (`hidden_size`,
-`num_heads`, `num_kv_heads`, `head_dim`, `vocab_size`, `num_experts`; the constants `HIDDEN`,
-`HEADS`, ... in `nnterp.components`), so `nnterp.axis_size(envoy, axis)` resolves it to a
+An axis named after a size the model holds (`hidden_size`, `num_heads`, `num_kv_heads`,
+`head_dim`, `vocab_size`, `num_experts`; the constants `HIDDEN`, `HEADS`, ... in
+`nnterp.components`) is resolved by `nnterp.axis_size(envoy, axis)` to a
 number for a value served on that envoy, the block's own count where blocks differ. Use it
 to check or allocate shapes without naming a family's config key; `batch`, `seq`, `query`
-and `key` are the tensor's own and raise `ValueError`:
+and `key` are the tensor's own, and the recurrent layouts' `heads`, `key_dim`, `value_dim`,
+`channels`, `state_dim` and `groups` name no such size (take them off a read tensor): both
+raise `ValueError`:
 
 ```python
 from nnterp import axis_size
@@ -488,7 +493,7 @@ into the token embeddings, so `layers[0].input[mask] == image_features` on every
 wrapper; ablate or patch the image there. `projector.output` differs from it on
 LLaVA-NeXT, LLaVA-OneVision, Gemma 4 unified and Qwen2.5-VL. Names per tower (SigLIP, CLIP,
 Pixtral, the Qwen ViT, Llama 4, Gemma 4), the Qwen ViT's packed row and DeepStack,
-`generate`, availability and the 16 host families:
+`generate`, availability and the 19 host families:
 [references/vision.md](references/vision.md).
 
 ## Writing values
@@ -641,7 +646,7 @@ Use it instead of writing `attention_keys` or `attention_values`:
   column, and rounds differently in bf16 when its matmuls have other shapes than the
   model's; the call runs the model's function on the model's shapes.
 
-Read it once and call the result as often as you need (trap 18). Under grouped-query
+Read it once and call the result as often as you need (trap 17). Under grouped-query
 attention a key/value head edited in a copy moves the whole group in the result, and only
 the heads you write reach the model; SmolLM2 has three query heads per key/value head
 (`llama`, loaded above):
@@ -703,7 +708,7 @@ what the attention reads, `[hidden_size]`: the pre-attention norm's gain (`weigh
 `1 + weight`), ones on a post-norm block (OLMo-2/3). Use them for anything that multiplies a
 head's weights: an OV circuit, a head's write of a stream direction, direct logit
 attribution through `output_weight`, and an adapted model's weights without merging (trap
-19). Query head `j` reads key/value head `j // (num_heads // num_kv_heads)`:
+18). Query head `j` reads key/value head `j // (num_heads // num_kv_heads)`:
 
 ```python
 layer = llama.layers[14]
@@ -729,7 +734,10 @@ They are the weight's dtype and device, views of the parameter where torch allow
 need a dispatched model (an undispatched one's weights are meta). The layouts the families
 fuse (Phi-3's `qkv_proj`, GPT-NeoX's and BLOOM's per-head `query_key_value`, Falcon's three,
 MPT's and DBRX's `Wqkv`, CodeGen's four parts, GPT-2's `Conv1D`) are read for you; the
-weights carry no bias (read it off the module). `self_attn.no_head_weights()` is the one
+weights carry no bias. Where the value projection has one, every value (and so a head's
+output: a pattern row sums to one) carries it, and
+`attention_values[:, kv] - self_attn.input @ value_weight(kv).T`, from one eager trace, is
+that bias at every position, whatever the family's layout. `self_attn.no_head_weights()` is the one
 reason both methods raise where a head has no such slice: latent attention (DeepSeek-V2/V3,
 Kimi-K2, GLM-5, GLM-4.7-Flash, Youtu, Kimi-Linear), DeepSeek-V4, Gemma-4 (`v_norm` on the
 values), JetMoE, ZAYA, the default family, a vision tower, a model split tensor-parallel,
@@ -787,12 +795,14 @@ python scripts/inspect_family.py <repo_id> [--layer N] [--eager] [--task image-t
 ## Families
 
 98 families; `nnterp.families.known()` lists 99 modules, counting `kimi_k25` (Kimi K2's
-family under its wrapper's name). 16 of the families also host a vision tower on their
+family under its wrapper's name). 19 of the families also host a vision tower on their
 image-text-to-text wrappers (the family is the text model's: Llava resolves to `llama`);
 the wrappers table is in [references/vision.md](references/vision.md#which-wrappers).
 What a recipe must survive is grouped by quirk in
 [references/api-reference.md](references/api-reference.md); the full per-family table is
-nnterp's `docs/reference/families.md`.
+nnterp's `docs/reference/families.md`. The `docs/...` paths these skills cite are in
+https://github.com/ndif-team/nnterp; the documentation site serves every page as Markdown,
+listed at https://ndif-team.github.io/nnterp/llms.txt.
 
 A `model_type` with no family loads with the best-effort `nnterp.families.default` and a
 `UserWarning` (`nnterp has no family for model_type ...`): it serves `layer_output`, the
@@ -800,10 +810,11 @@ module boundaries its aliases reach, the root values, the sizes and the attentio
 interior, not `attention_output`, `mlp_output`, `layer_mid`, `mlp_norm_output`, a
 mixture's interior or `project_on_vocab`, and raises `UnsupportedFamily` when it cannot
 standardize the checkpoint (no blocks, embedding, final norm or head under a name it
-knows, or a stream of the wrong shape). `nnterp.families.covers(config.model_type)` says
-before a load whether a shipped or registered family covers a checkpoint (`False` means
-the default), and `nnterp.families.resolve(config)` is the family the load would use;
-the `extending` skill adds a family, registers one, or passes one to a single load with
+knows, or a stream of the wrong shape). Before a load, `nnterp.families.resolve(config)`
+(the checkpoint's `AutoConfig`) is the family the load would use, `nnterp.families.default`
+where none covers it; `nnterp.families.covers(model_type)` answers for one type only, so it
+is `False` on a vision-language wrapper's config (Qwen3.5's `qwen3_5`) whose text model
+has a family. The `extending` skill adds a family, registers one, or passes one to a single load with
 `family=`.
 
 ## The vLLM engine and several GPUs
@@ -835,9 +846,15 @@ with vmodel.trace("The Eiffel Tower is in the city of", temperature=0.0, max_tok
 ```
 
 The pattern and scores are recomputed from the queries and keys (read-only, prefill only),
-`self_attn.rotate` runs inside a trace only (it calls the engine's rotary embedding), and an
-assigned value must keep the shape it was served with. vLLM itself is the `nnsight` plugin's
-`vllm` skill.
+`self_attn.rotate`, `project_on_vocab` and `get_topk_closest_tokens` run inside a trace only
+(they call the engine's modules; outside one the last two fail with `RuntimeError: Tensor on
+device meta ...`), and an assigned value must keep the shape it was served with. Errors from
+the engine's worker arrive as `RuntimeError` naming the original type, an unavailable read
+inside a trace included (`RuntimeError: Unavailable: ...`, not `nnterp.Unavailable`): guard
+with `support()` before the trace. Collect into a container saved inside the trace
+(`lens = nnsight.save({})`, then `lens[i] = ...`), which works on both engines; on the engine
+a container made outside the trace and filled with `.save()`d entries comes back empty,
+without an error. vLLM itself is the `nnsight` plugin's `vllm` skill.
 
 A model too big for one GPU loads sharded with
 `distributed_config=DistributedConfig(tp_size=N)` under `torchrun`: every value reads whole

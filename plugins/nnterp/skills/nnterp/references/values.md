@@ -283,7 +283,7 @@ assert torch.allclose(raw_attn[0], x + attn)                     # the module re
 
 On these families a term added in block `i` does not reach the last stream as
 itself, and naive direct logit attribution ranks the wrong terms (on gemma-4-E2B
-it named block 0's attention the top term, off by ~7,700%; on Doge-320M ~18x).
+it named block 0's attention the top term, off by ~7,700%).
 nnterp serves the contributions unscaled and computes no weights for you; the
 recipes below do. Both are skipped here (no such checkpoint in the executed set)
 and were verified on the pinned tiny checkpoints with the scales moved away from
@@ -343,8 +343,7 @@ weight |= {("mlp", i): after[i + 1] for i in range(model.num_layers)}
 # final == after[0] * base + sum(weight[key] * terms[key])   (terms read as in the Gemma-4 recipe)
 ```
 
-No released Doge checkpoint loads in transformers 5.17 (size mismatches); the
-tiny one does. **ZAYA** merges each sublayer's output `o` into the stream `r` as
+**ZAYA** merges each sublayer's output `o` into the stream `r` as
 `(o + hidden_states_bias) * hidden_states_scale + (r + residual_bias) * residual_scale`
 (each merge's parameters on `layers[i].post_attention_residual_scale._module` /
 `post_mlp_residual_scale._module`); `attention_output` / `mlp_output` are the first

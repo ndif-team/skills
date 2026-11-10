@@ -118,7 +118,7 @@ Details: [values.md](values.md#sizes).
 | `model.layers[i].self_attn` / `.linear_attn` / `.mlp` | the family's `Attention`, recurrent mixer, `Mlp` or `Moe`; absent where the block has none |
 | `model.layers[i].self_attn.o_proj`, `.mlp.act_fn`, `.mlp.down_proj` | the output projection, the activation and the down projection under their standard names, aliased from each family's spelling |
 | `model.add_prefix_false_tokenizer` | the tokenizer with `add_prefix_space=False`, loaded on first use |
-| `model.vision`, `model.projector` | a vision-language wrapper's tower (a `Vision`) and the last module before the scatter; present on the 16 host families' wrappers, absent on a text-only checkpoint ([vision.md](vision.md)) |
+| `model.vision`, `model.projector` | a vision-language wrapper's tower (a `Vision`) and the last module before the scatter; present on the 19 host families' wrappers, absent on a text-only checkpoint ([vision.md](vision.md)) |
 | `model.processor` | the wrapper's processor, loaded with `task="image-text-to-text"`; `None` on the default `text-generation` load |
 
 ## Envoys and their values
@@ -220,7 +220,7 @@ Llama-shaped: the standard names and the base values hold as they are (`llama`,
 | per-block sizes | `gemma4_text`, `mimo_v2_flash`, `laguna` | read `layers[i].self_attn.*` / `.mlp.intermediate_size` |
 | multimodal rotary (M-RoPE) | `qwen2_vl_text`, `qwen2_5_vl_text`, `qwen3_vl_text`, `qwen3_vl_moe_text` | folded into one `cos`/`sin` before the blocks: `attention_queries` / `_keys` are the rotated ones, as on any rotary family |
 | DeepStack | `qwen3_vl_text`, `qwen3_vl_moe_text` | the text model adds image features at the image positions after blocks 0-2, outside the blocks: `layers[k].deepstack_output`, and `layers[k+1].input != layers[k].layer_output` there |
-| vision tower host | `gemma3_text`, `gemma`, `qwen2`, `cohere2`, `llama`, `mistral`, `ministral3`, `qwen2_vl_text`, `qwen2_5_vl_text`, `qwen3_vl_text`, `qwen3_vl_moe_text`, `qwen3_5_text`, `qwen3_5_moe_text`, `llama4_text`, `gemma4_text`, `gemma4_unified_text` | their image-text-to-text wrappers have `model.vision` and `model.projector` under `task="image-text-to-text"`; which wrappers and towers: [vision.md](vision.md#which-wrappers) |
+| vision tower host | `gemma3_text`, `gemma`, `gemma2`, `qwen2`, `cohere2`, `llama`, `mistral`, `ministral3`, `qwen2_vl_text`, `qwen2_5_vl_text`, `qwen3_vl_text`, `qwen3_vl_moe_text`, `qwen3_5_text`, `qwen3_5_moe_text`, `llama4_text`, `gemma4_text`, `gemma4_unified_text`, `hyperclovax`, `nemotron_h` | their image-text-to-text wrappers have `model.vision` and `model.projector` under `task="image-text-to-text"`; which wrappers and towers: [vision.md](vision.md#which-wrappers) |
 
 Not shipped: `zamba`, `zamba2` (a shared transformer's output is added to the
 mixer's input, not the stream, so the standard contributions mean nothing there).

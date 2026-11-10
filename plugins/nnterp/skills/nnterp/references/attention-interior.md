@@ -254,7 +254,7 @@ write is rotated for the position it lands at, as here. Three things differ:
 
 On those families read the values, and rotate, on a `StandardizedTransformer`. The blocks
 without a rotary embedding are the ones above, with the same reasons. The transplant on the
-engine (vLLM 0.27.1, a GPU):
+engine (needs vLLM and a GPU):
 
 <!-- test: skip -->
 ```python
@@ -416,8 +416,8 @@ the result as often as you need; a second `attn.interface` after a call, or a ca
 the scores, the pattern or the head outputs, asks for a point the model has passed and
 raises `OutOfOrderError` (`'...attention_interface_1.input.i0'` or `'...fn.i0' was requested
 but the model already ran past it`), under `tracer.iter` too. Under `tracer.iter` a first
-read placed after the step's later values binds the next step's call without an error, as
-any late read there does. On SmolLM2, three query heads per key/value head:
+read placed after the step's later values raises on step 0 and binds the next step's call on
+a later step, as a late read there does. On SmolLM2, three query heads per key/value head:
 
 ```python
 llama = StandardizedTransformer("HuggingFaceTB/SmolLM2-135M-Instruct", device="cpu", dispatch=True, attn_implementation="eager")
@@ -750,8 +750,10 @@ See [generation-and-helpers.md](generation-and-helpers.md).
   rotary, then q, k, v and `interface`, then scores, then pattern, then head outputs; on Falcon
   without alibi the values before the queries and keys, with alibi queries, keys,
   values. Out of order raises `OutOfOrderError` naming the attention call. Under
-  `generate` + `tracer.iter` it does not raise: the read binds the *next* step's
-  value.
+  `generate` + `tracer.iter` it raises on step 0 and binds the *next* step's value on a
+  later step; the scores and the pattern bind the next step from step 0, and so do the
+  queries, keys, values and head outputs when the loop is the first to touch the
+  attention's `.source`.
 - Read `interface` once per forward, and call it before the scores. Reading it again
   after a call, or calling it after reading the scores, the pattern or the head outputs,
   asks for a point the forward has passed. Across invokes it matches the model to

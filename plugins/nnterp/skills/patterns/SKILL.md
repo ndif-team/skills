@@ -13,8 +13,7 @@ layer_output`), the pattern is `attention_probabilities`, the per-head view is
 `attention_head_outputs` (or `attention_premix` at the output projection, under any
 attention implementation), an MLP's neurons are `mlp_neurons`, and `project_on_vocab`
 is the model's own head. Nothing here indexes `.output[0]` or names `ln_f` versus
-`norm`. Verified on nnterp `v2.0.0` at `200ac05`, with nnsight 0.8.2 and transformers
-5.20.2; the executed blocks run on
+`norm`. The executed blocks run on
 `openai-community/gpt2`, `HuggingFaceTB/SmolLM2-135M-Instruct` (30 layers, 576
 hidden, 9 heads, 3 kv heads, bf16) and `trl-internal-testing/tiny-LlavaForConditionalGeneration`.
 
@@ -155,13 +154,13 @@ which ablation you ran. Mean ablation, `skip_layers`, one head via
 
 ### Expert ablation (mixtures of experts)
 
-On a `Moe` (`layers[i].mlp` on the 36 MoE families), remove expert `e` by zeroing
+On a `Moe` (`layers[i].mlp` on the 39 MoE families), remove expert `e` by zeroing
 the weights of the slots that chose it. Ran on the tiny Mixtral checkpoint nnterp
 pins:
 
 <!-- test: skip -->
 ```python
-moe_model = StandardizedTransformer("mistralai/Mixtral-8x7B-v0.1", device="cpu", dispatch=True, dtype=torch.float32)
+moe_model = StandardizedTransformer("hf-internal-testing/tiny-random-MixtralForCausalLM", device="cpu", dispatch=True, dtype=torch.float32)
 blocks = [i for i in range(moe_model.num_layers) if moe_model.support(layer=i).get("mlp.expert_weights", "absent") is None]
 moe = moe_model.layers[blocks[0]].mlp
 target = target_token(moe_model, "Paris")          # sentencepiece: "Paris" is the one token '▁Paris'
@@ -297,7 +296,7 @@ shuffled-label control and the mass-mean direction: `references/sweeps-and-probi
 
 A DeltaNet or Mamba block keeps a recurrent state instead of a pattern.
 `state_input` on a decode step is what the step starts from; assign it to continue
-from another prompt's memory (ran on the tiny Qwen3.5 checkpoint):
+from another prompt's memory (ran on Qwen3.5-0.8B):
 
 <!-- test: skip -->
 ```python
@@ -377,15 +376,6 @@ to_image = torch.stack(masses)                         # [layers, heads]: the la
 assert to_image.shape == (vlm.num_layers, vlm.layers[0].self_attn.num_heads)
 ```
 
-On `llava-hf/llava-1.5-7b-hf`, asked the color of a red square on white (clean: `Red` at
-0.990), zeroing `image_features` leaves `Red` at 0.010 with `''` on top, and the blue
-image's run with the red features assigned answers `Red` at 0.990. Zeroing the image rows
-of `layer_output` after block 4, 8, 16 and 24 leaves `Red` at 0.012, 0.114, 0.384 and
-0.994: the text positions have read the image out by the middle of the stack. The last
-token's mean mass on the image is 0.73 at block 0, under 0.1 from block 3, and 0.1 to 0.26
-across blocks 10 to 24, where single heads put up to 0.95 on it. It peaked at 14.6 GB in
-float16 under eager with `torch.no_grad()`.
-
 1. **Read the mask first, `image_features` after the tower's values and before the text
    model's**; out of order raises `OutOfOrderError`. **One image-carrying invoke per
    trace**: clean and ablated runs are two traces. Several images go in one invoke as a
@@ -393,7 +383,7 @@ float16 under eager with `torch.no_grad()`.
    chat-message inputs that embed the image do run as one batch, but there
    `image_features` is flat over the whole batch's image tokens in every invoke, and a
    write in one invoke reaches every row.
-2. **A tower edit that changes nothing is at a block the wrapper does not read.** Llava's
+2. **A tower edit that changes nothing is at a block the wrapper does not read.** Llava 1.5's
    projector reads `vision.layers[-2].layer_output`, so zeroing `tower_output` leaves the
    logits unchanged; `model.projector.input` is what the projector receives.
 3. **On Qwen3-VL `image_features` is not the only way in**: the text model re-adds the image
@@ -443,8 +433,10 @@ exact checks.
   element, checked (`target_token` above). A recipe on the BOS token runs and prints 0.
 - **KL from logits in float32** (`kl` above); a bf16 KL between nearly equal rows can
   come out slightly negative, which the float32 form avoids.
-- **Nothing bound inside a trace survives it.** Make containers outside (`lens = {}`)
-  and `.save()` each entry.
+- **Nothing bound inside a trace survives it unless saved.** Make containers outside
+  (`lens = {}`) and `.save()` each entry, or save the container inside the trace
+  (`lens = nnsight.save({})`, then `lens[i] = value`). Only the second form comes back from
+  `StandardizedVLLM`; there the first comes back empty, without an error.
 - **A write in one invoke that consumes another invoke's value needs
   `tracer.barrier`**; two traces with a `.save()` between them, or a
   `model.session()`, need nothing.
@@ -457,8 +449,9 @@ exact checks.
   ordered, two comprehensions over them are not; queries/keys/values before the
   pattern, the pattern before `attention_head_outputs`, both before
   `attention_output`; `model.logits` after the loop. Out of order raises
-  `OutOfOrderError`, except under `generate` + `tracer.iter`, where the read binds
-  the *next* step and per-step lists come back shifted by one. To read, patch or ablate
+  `OutOfOrderError`; under `generate` + `tracer.iter` a late read past step 0, or one
+  inside the attention call (the scores, the pattern), binds the *next* step instead and
+  per-step lists come back shifted by one. To read, patch or ablate
   several sites in one invoke, sort them by `model.rank(name, layer)` first (the `nnterp`
   skill, trap 6).
 - **Overwriting `attention_scores` lifts the causal mask**; add to them instead.
@@ -500,7 +493,8 @@ exact checks.
   `image_features` and inside the tower, patching one image into another's run, attention
   onto the image, editing the image positions of a text block.
 - nnterp docs: `docs/patterns/index.md` and one page per technique under
-  `docs/patterns/`.
+  `docs/patterns/`, in https://github.com/ndif-team/nnterp; the documentation site serves
+  every page as Markdown, listed at https://ndif-team.github.io/nnterp/llms.txt.
 
 ## Related skills
 

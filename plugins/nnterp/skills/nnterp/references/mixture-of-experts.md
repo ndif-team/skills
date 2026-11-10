@@ -1,6 +1,6 @@
 # Mixture of experts
 
-On the 36 MoE families the mixture is a `Moe` (an `Mlp`): `layers[i].mlp` on most,
+On the 39 MoE families the mixture is a `Moe` (an `Mlp`): `layers[i].mlp` on most,
 and `mlp_output` is still what the block adds. Six values say how the mixture made
 it, each read where the model consumes it and written back there:
 
@@ -111,13 +111,14 @@ with model.trace(prompt):                       # force the router: logits decid
 
 The sweep fits one trace with one invoke per expert: an in-place edit
 (`moe.expert_weights[:] = moe.expert_weights.masked_fill(...)`) and an assignment both
-reach that invoke only. In float32 the batched sweep equals the per-trace one exactly.
+reach that invoke only. In float32 the batched sweep matches the per-trace one to rounding
+(about 1e-6).
 
 **bf16 sweeps are noise.** On a bf16 GraniteMoE the one-invoke-per-expert sweep
 correlated 0.32 with per-trace ablation and named a different "most important"
 expert: ablating in one invoke moved another invoke's logits by ten times the
-ablation's own effect. Load `dtype=torch.float32` for single-expert effects, or
-keep a clean baseline invoke in the same batch and compare against it.
+ablation's own effect. Load `dtype=torch.float32` for single-expert effects: a clean
+baseline invoke in the same bf16 batch does not fix the ranking.
 
 Unused experts read exactly zero (no slot to zero), which is not "unimportant";
 the shared expert is not an expert here (`shared_expert_output[:] = 0`); zero
@@ -157,7 +158,7 @@ place included, and `model.rank(name, i)` sorts a list of reads by it
 | Laguna | `expert_outputs.sum(2) * routed_scaling_factor == routed_output` |
 | Qwen2-MoE, Qwen3-Next, Qwen3.5-MoE | `shared_expert_output` is the sigmoid-gated product; `shared_experts.output` is ungated |
 | Nemotron-H with `moe_latent_size` | `routed_output` is the latent up-projection's output; `expert_outputs` unavailable |
-| Doge | transformers 5.17 cannot run its mixture: all six unavailable |
+| Doge | routes by product keys, with no router or experts module: all six unavailable |
 
 The nnterp repo pages behind this file: `docs/usage/mixture-of-experts.md`,
 `docs/patterns/expert-ablation.md`.
