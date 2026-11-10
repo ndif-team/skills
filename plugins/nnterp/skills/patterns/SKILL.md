@@ -77,9 +77,9 @@ assert torch.equal(lens[model.num_layers - 1], logits[0, -1])   # the wiring che
 
 The last assertion is the check to run on any new checkpoint before reading a
 curve: `project_on_vocab` on the last block *is* the final computation (softcap,
-`logit_scale`, `/ logits_scaling`, DeepSeek-V4's `hc_head`, OPT-350m's `project_out`).
-It holds on every family, Gemma-4, Granite and OPT-350m included. Argmax hides a
-race: P(" Paris") peaks at layer 9 (0.25) and is 0.07 at the output; the curve is in
+`logit_scale`, `/ logits_scaling`, DeepSeek-V4's `hc_head`). It holds on every
+family, Gemma-4 and Granite included. Argmax hides a race: P(" Paris") peaks at
+layer 9 (0.25) and is 0.07 at the output; the curve is in
 `references/logit-lens-and-attribution.md`.
 
 ## Direct logit attribution

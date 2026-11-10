@@ -220,15 +220,10 @@ SmolLM2. Noising swaps the roles; the code is symmetric.
   patch of `attention_keys` / `attention_values`, in place or by assignment, is local to
   the block it is made on; to patch what every borrower attends with, patch the source
   block's `k_proj` / `v_proj` output.
-- **`layer_output` is not the whole state on four families**, so a stream patch looks
-  weaker than it is there. Gemma-4 E2B/E4B: every block also reads a per-layer input from
-  the token ids (`layers[j].inputs[0][1]`), and the KV-sharing blocks attend with a source
-  block's keys and values; a patch at block 17 of gemma-4-E2B leaves a KL of 0.45 to the
-  source run (13.8 between the prompts), exact once both are patched too. DeepSeek-V4: the
-  first 3 blocks pick experts by token id. GLM-5.2/5.3: a `shared` block attends with the
-  selection the last `full` block computed, the second element of each block's output.
-  ZAYA: each block hands its router state to the next as the second element. On GLM-5 and
-  ZAYA patch the whole `layers[i].output` (`model.layers[i].output = saved_state`).
+- **A `layer_output` patch is not the whole state where blocks pass more forward**: Gemma-4
+  E2B/E4B (per-layer inputs, shared keys and values), DeepSeek-V4 (hash-routed blocks read
+  the token ids), GLM-5 and ZAYA (the block's second output). On GLM-5 and ZAYA patch
+  `layers[i].output` whole.
 - **Granite line in bf16**: a write at one position of a contribution shifts every
   position slightly (the scaled copy is divided back); patch in float32.
 - **Gemma-4, Doge, ZAYA**: a contribution patched at block `i` reaches the last
@@ -496,8 +491,7 @@ the future.
   over all keys; mask query rows with `attention_mask` before a per-row metric.
 - **Size.** A pattern is `heads * seq * seq` per block; index inside the trace and
   wrap read-only capture in `torch.no_grad()`.
-- **GPT-2 with `reorder_and_upcast_attn`** (the `stanford-crfm` GPT-2s) calls its own
-  upcast attention under eager; the pattern is read there, the same tensor, and the
-  scores are float32. GPT-J, BLOOM and MPT map it onto their own softmax
+- **GPT-2 with `reorder_and_upcast_attn`**: `support()` reports the pattern
+  unavailable with the reason. GPT-J, BLOOM and MPT map it onto their own softmax
   and need no eager flag; Falcon maps it onto whichever softmax `config.alibi`
   picks and needs eager.

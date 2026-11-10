@@ -45,8 +45,7 @@ The last-block equality holds on every family because `project_on_vocab` follows
 model's path: the softcap (Gemma-2/4), `logit_scale` (Cohere's and Cohere-2's causal-LM
 classes; the Aya Vision and Command A Vision wrappers do not scale, and the lens follows
 them), `/ logits_scaling` (Granite), DeepSeek-V4's `hc_head` before the norm, ZAYA's cast
-of its float32 stream to the norm's dtype, and on OPT-350m, which has no final norm,
-`project_out` before `lm_head`.
+of its float32 stream to the norm's dtype.
 
 ### Target-probability curve
 
@@ -137,12 +136,7 @@ an error.
 The lens assumes intermediate residuals live in the unembedding's basis. GPT-2's
 smooth curve is the exception; SmolLM2 decodes punctuation for 27 of 30 layers and
 then " Paris" (see the skill body), while answering correctly. Once the wiring check
-passes, a late curve is a fact about the lens, not the model. Where the lens becomes
-readable does not follow the norm placement: on one ~170-token passage OPT-350m, whose
-norms follow the adds, improves block by block from the first and is never worse than a
-uniform guess, while its pre-norm sibling OPT-125m is worse than uniform for five blocks;
-OLMo-2-0425-1B and EXAONE-4.0-1.2B, which norm each sublayer's output, and the pre-norm
-Llama-3.2-1B all start above uniform and become readable late. A tuned lens (one
+passes, a late curve is a fact about the lens, not the model. A tuned lens (one
 learned affine map per layer before the frozen norm and head) fixes the basis; it
 costs a training pass. The `logit-lens` skill has the full treatment, and the lens
 is correlational either way — patch the layer to make a causal claim.
@@ -297,5 +291,5 @@ before it and does not.
   Two comprehensions, one over all attentions then one over all MLPs, raise
   `OutOfOrderError`. `token_embeddings` before `layers[0].input`.
 - **Three different heads.** `model.lm_head(x)` is a stood-down call on your tensor;
-  `model.lm_head_output` is the model's projection of the final stream (the normed
-  stream, or `project_out`'s output on OPT-350m); `model.logits` adds the softcap or scale.
+  `model.lm_head_output` is the model's projection of the normed stream;
+  `model.logits` adds the softcap or scale.

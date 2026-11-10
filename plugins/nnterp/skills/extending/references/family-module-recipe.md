@@ -150,8 +150,8 @@ ENVOYS = {
 
 `gpt2.py` shows the rest of the template in use: block-level single-component aliases,
 container keys anchored at the root, dotted aliases for the two projections both spelled
-`c_proj`, the reason it has no rotary embedding, key functions for a config flag that moves
-the attention to another call, and a size the config spells its own way:
+`c_proj`, the reason it has no rotary embedding, a config flag that takes the attention off
+the shared interface, and a size the config spells its own way:
 
 <!-- test: skip -->
 ```python
@@ -163,20 +163,16 @@ plus ``lm_head``. The container-level keys are anchored at the root
 not ``model.model.layers``. ``wpe`` (learned absolute positions) and ``drop``
 have no standard name; they stay reachable under their own.
 
-A checkpoint with ``reorder_and_upcast_attn`` set (the ``stanford-crfm`` GPT-2
-checkpoints) calls GPT-2's own ``_upcast_and_reordered_attn`` under eager in
-place of the shared interface: the queries, keys, values and mask without the
-module the interface takes first, the scores computed in float32, the same
-return. The attention's interior is read at that call there (`Attention`).
+A checkpoint with ``reorder_and_upcast_attn`` set takes GPT-2's own
+``_upcast_and_reordered_attn`` path instead of the shared eager forward, so
+``attention_probabilities`` is unavailable there.
 """
 
 from typing import TYPE_CHECKING
 
 from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block, GPT2MLP
 
-from ..components import (
-    INTERFACE, Attention, EProperty, HeadOutputs, Keys, Layer, Mlp, Pattern, Queries, Values, interface_reason, projection_weight,
-)
+from ..components import Attention, Layer, Mlp
 
 if TYPE_CHECKING:
     from ..standardized import StandardizedTransformer
@@ -199,60 +195,20 @@ class Layer(Layer):
     """GPT-2's decoder block; returns a bare tensor, so the base holds."""
 
 
-#: GPT-2's own attention call, under eager on a ``reorder_and_upcast_attn`` checkpoint:
-#: ``self._upcast_and_reordered_attn(query, key, value, attention_mask)``.
-UPCAST = "self__upcast_and_reordered_attn_0"
-
-
-def upcast(attn) -> bool:
-    """Whether the forward takes GPT-2's own upcast call: the module's flag under eager, the test the forward makes."""
-    module = attn._module
-    return bool(module.reorder_and_upcast_attn) and module.config._attn_implementation == "eager"
-
-
-def at_call(rest: str):
-    """A key inside the attention call the forward makes: ``source.<call>.<rest>``, the call `UPCAST` or `INTERFACE`."""
-
-    def locate(attn) -> str:
-        return f"source.{UPCAST if upcast(attn) else INTERFACE}.{rest}"
-
-    locate.__name__ = f"call.{rest}"
-    return locate
-
-
-def argument(position: int):
-    """``select`` for the call's ``position``-th tensor (queries 0, keys 1, values 2): the interface takes the module first."""
-
-    def select(attn) -> int:
-        return position if upcast(attn) else position + 1
-
-    select.__name__ = f"argument({position})"
-    return select
-
-
 class Attention(Attention):
     """GPT-2's attention; the shared eager forward and the residual added in the block, so the base holds.
 
-    A checkpoint with ``reorder_and_upcast_attn`` takes GPT-2's own
-    ``_upcast_and_reordered_attn(query, key, value, attention_mask)`` under
-    eager (`UPCAST`) in place of the interface call. The interior values and
-    `interface` are read at whichever call the module's flag picks.
+    A checkpoint with ``reorder_and_upcast_attn`` takes GPT-2's own upcast
+    path instead, where nothing on the interface is reachable.
     """
 
     def no_rotary(self) -> str | None:
         return "no rotary embedding: GPT-2 adds learned absolute position embeddings (wpe) to the stream"
 
-    @EProperty(at_call("inputs"), select=argument(0), description=Attention.attention_queries.description, unavailable=interface_reason)
-    def attention_queries(self, value) -> Queries:
-        return value
-
-    @EProperty(at_call("output"), select=0, description=Attention.attention_head_outputs.description, unavailable=interface_reason)
-    def attention_head_outputs(self, value) -> HeadOutputs:
-        return value
-
-    # ... the keys and values the same way (argument(1), argument(2)), the scores at
-    # at_call("source.nn_functional_softmax_0.input"), the pattern at the upcast call's own
-    # attn_dropout (self_attn_dropout_0) or the interface's functional dropout
+    def off_interface(self):
+        if self._module.config.reorder_and_upcast_attn:
+            return "this checkpoint sets reorder_and_upcast_attn, which takes GPT-2's own upcast attention path"
+        return super().off_interface()
 
 
 class Mlp(Mlp):
@@ -406,15 +362,13 @@ def project_on_vocab(model: "StandardizedTransformer", hidden: torch.Tensor) -> 
     return logits
 ```
 
-The Aya Vision and Cohere2-Vision wrappers never apply the scale their `text_config`
-carries, so the lens on them is unscaled. The others: Cohere-2 (imports Cohere's), Granite
+The others: Cohere-2 (imports Cohere's), Granite
 (`/ logits_scaling`; GraniteMoE, GraniteMoE-Shared, GraniteMoE-Hybrid, Granite-SWA,
 GraniteMoE-SWA import it), Falcon-H1 (`* lm_head_multiplier`), HyperCLOVA X
 (`* logits_scaling`), Gemma-2 and Gemma-3 (the cap only on the causal-LM class), Mamba,
 Falcon-Mamba, Mamba-2 and Nemotron-H (the head in its own dtype, float32 logits), ZAYA (the
-float32 stream cast to the final norm's dtype first), OPT (the decoder's final norm and
-`project_out`, each where the decoder has it: OPT-350m has the projection and no norm),
-DeepSeek-V4 (collapses its parallel streams with `hc_head` first).
+float32 stream cast to the final norm's dtype first), OPT (`project_out` where the decoder
+has it), DeepSeek-V4 (collapses its parallel streams with `hc_head` first).
 Each block's own sizes are not module functions but properties on the family's envoy
 subclasses ([descriptors.md](descriptors.md)).
 
@@ -1340,11 +1294,14 @@ class TestGPT2(FamilySuite):
     REFUSES_IN_PLACE_QKV = True  # q/k/v are split views of one c_attn tensor
     EXPECTED_UNAVAILABLE = NO_ROTARY
 
-
-class TestGPT2Upcast(TestGPT2):
-    """The ``stanford-crfm`` config: the whole suite with the interior read at GPT-2's own upcast call."""
-
-    LOAD_KWARGS = {"reorder_and_upcast_attn": True, "scale_attn_by_inverse_layer_idx": True}
+    def test_reorder_and_upcast_makes_the_interface_unavailable(self, model):
+        config = model.layers[0].self_attn._module.config
+        config.reorder_and_upcast_attn = True
+        try:
+            support = model.support()
+            assert all("reorder_and_upcast_attn" in support[f"self_attn.{name}"][0] for name in ("attention_probabilities", "attention_queries", "interface"))
+        finally:
+            config.reorder_and_upcast_attn = False
 ```
 
 <!-- test: skip -->
@@ -1525,11 +1482,11 @@ with GPT-2's `NATIVE`, `REFUSES_IN_PLACE_QKV` and `EXPECTED_UNAVAILABLE`, passes
   `EXPECTED_UNAVAILABLE` with a substring of the reason.
 - **Interior values bind at different points of the forward.** A family-specific test
   that reads two in one trace must read them in forward order.
-- **The class-scoped `model` fixture is shared.** A test that mutates the config restores
-  it in a `finally`. A flag that changes which operations the forward runs gets its own
-  suite class, so every test runs on that branch: through `LOAD_KWARGS` where the load
-  accepts the flag (`TestGPT2Upcast` in `test_gpt2.py`), or on a patched copy of the
-  checkpoint (`_alibi_checkpoint` in `test_falcon.py`).
+- **The class-scoped `model` fixture is shared.** A test that mutates the config
+  (`config.reorder_and_upcast_attn = True` in `test_gpt2.py`) restores it in a `finally`.
+  A flag that changes which operations the forward runs (Falcon's `alibi`) gets its own
+  suite class on a patched copy of the checkpoint (`_alibi_checkpoint` in
+  `test_falcon.py`), so every test runs on that branch.
 - **`known()` and `all_families()` list the shipped modules only.** A registered family
   is reached through `lookup` and `model.family`, and appears in the `UnsupportedFamily`
   message's list.

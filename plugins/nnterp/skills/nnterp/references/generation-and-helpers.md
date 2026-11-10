@@ -80,8 +80,8 @@ axis) when a per-step result looks off. Every step repeats one forward's order, 
 **An in-place edit of `attention_keys` or `attention_values` stays in the cache.** On
 most families a decode step's attention receives the cache's own tensors, so the edit
 reaches every later step; an assignment replaces the argument of that one forward. On
-BLOOM, MPT and Falcon a call with a cache serves the new tokens' keys and values, which the
-forward then adds to the cache, so an assignment is stored in the cache too. Under
+BLOOM, MPT and Falcon a cached call serves only the new tokens' keys and values, and an
+assignment to them is stored in the cache. Under
 latent attention (DeepSeek-V2/V3) and on Gemma-4 an edit lasts one forward either way. To
 patch what chosen heads read on every step without touching the cache, call
 `self_attn.interface` on edited copies and write the chosen heads of
@@ -89,7 +89,7 @@ patch what chosen heads read on every step without touching the cache, call
 ([attention-interior.md](attention-interior.md#calling-the-attention-function-again-interface);
 the `patterns` skill's head-selective K/V patching runs it under `generate`). The keys and
 values grow with the cache and the queries do not, so a head-wise edit of `attention_keys`
-on a decode step touches the whole context (on BLOOM, MPT and Falcon the new token only).
+on a decode step touches the whole context.
 
 **`tracer.result` after an open loop is never bound.** `tracer.iter[:]` and
 `tracer.all()` end by outrunning the run, and the statements after the loop do

@@ -1,7 +1,8 @@
 # Availability and forward order: `support()`, `Unavailable`, `SourceNotAvailable`, `order()`, `rank()`
 
 Not every checkpoint has every standard value. OPT has no MLP module; a model
-loaded with `sdpa` never builds the attention pattern; a hybrid's linear
+loaded with `sdpa` never builds the attention pattern; GPT-2 with
+`reorder_and_upcast_attn` leaves the shared attention interface; a hybrid's linear
 blocks have no softmax and their per-token state needs a kernel switch; a dense
 block beside mixture blocks has no routing. Every nnterp value can say
 when it is not there and why, and `support()` collects those reasons from the
@@ -152,6 +153,7 @@ assert eager.support(layer=0)["self_attn.attention_probabilities"] is None      
 | reason (exact string, or its prefix) | value(s) | when |
 |---|---|---|
 | `read inside the eager attention forward, but this model runs 'sdpa'; load with attn_implementation='eager'` | the attention interior on every interface family (and GPT-J, Falcon) | loaded with any `attn_implementation` other than `"eager"`; the quoted name is whatever the model runs |
+| `this checkpoint sets reorder_and_upcast_attn, which takes GPT-2's own upcast attention path` | the GPT-2 interior | `config.reorder_and_upcast_attn` is set |
 | `The attention does its own arithmetic rather than transformers' shared attention interface; not mapped for this family yet` | an interior value a family has not mapped | a family off the shared interface that marks it `unavailable(NOT_ON_INTERFACE)`; no shipped family does |
 | `no self_attn module on this block` / `no linear_attn module on this block` | every value of that module | another block has the module and this one does not (a hybrid's blocks). A module no block has (OPT's `mlp`) has no key in `support()` at all |
 | `no rotary embedding: ...` / `no rotary embedding on this block: ...` | `self_attn.attention_queries_prerope`, `self_attn.attention_keys_prerope` (and `self_attn.rotate` raises it) | the family has no rotary embedding (absolute or sinusoidal positions, ALiBi, none in the attention: GPT-2, OPT, BLOOM, ...), or this block skips it (a NoPE block: Cohere 2, SmolLM3, Llama 4, ...) ([attention-interior.md](attention-interior.md#before-the-rotary-embedding-attention_queries_prerope-attention_keys_prerope-rotate)) |
@@ -159,7 +161,7 @@ assert eager.support(layer=0)["self_attn.attention_probabilities"] is None      
 | `the queries, keys and values are not the arguments of one call in this forward that returns the head outputs (the attention does its own arithmetic, or changes the call's output before the projection), so there is no attention function to call again` (`nnterp.components.OWN_ARITHMETIC`) | `self_attn.interface` | BLOOM, MPT, Falcon and XGLM (their own arithmetic) and DeepSeek-V4 (the head outputs are the interface's output rotated back); elsewhere `interface` has the reason of the queries, keys, values, head outputs or pattern it works with ([attention-interior.md](attention-interior.md#calling-the-attention-function-again-interface)) |
 | `no <module> module on this block` (`input_layernorm`, `post_attention_layernorm`, `mlp`) | `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input` | the block has no module the value is keyed on (OPT's `mlp_input`) |
 | `a parallel block: the attention and the MLP read the same input, so there is no stream between them` (`nnterp.components.PARALLEL`) | `layer_mid` | GPT-J, CodeGen, Cohere, Phi, Falcon; GPT-NeoX and StableLM with `use_parallel_residual` |
-| `a post-norm block: the attention reads the residual stream itself, layer_input` / `... the MLP reads the residual stream itself, layer_mid` (`POST_NORM_ATTENTION`, `POST_NORM_MLP`) | `attention_norm_output` / `mlp_norm_output` | OLMo-2/3, EXAONE-4, FlexOlmo, OLMo-Hybrid's attention blocks, OPT-350m (`do_layer_norm_before` false; it also has no final norm, so `final_norm_output` reads `no norm module on this model`) |
+| `a post-norm block: the attention reads the residual stream itself, layer_input` / `... the MLP reads the residual stream itself, layer_mid` (`POST_NORM_ATTENTION`, `POST_NORM_MLP`) | `attention_norm_output` / `mlp_norm_output` | OLMo-2/3, EXAONE-4, FlexOlmo, OLMo-Hybrid's attention blocks, OPT-350m (`do_layer_norm_before` false) |
 | `no o_proj module on this attention` / `no act_fn module on this mlp` / `no down_proj module on this mlp` | `attention_premix` / `mlp_activation` / `mlp_neurons` | the family aliases no module to the standard child name (JetMoE says why in its own words) |
 | `routed experts; read per-expert via the Moe component` | `mlp.mlp_activation`, `mlp.mlp_neurons` | a routed mixture of experts (dense blocks beside it serve them) |
 | `the state after each token is materialized only by the token-by-token kernel; the chunked kernel a prompt runs through carries it between chunks. Call nnterp.route_kernels(model.family, 'torch') before tracing this layer ...` | a DeltaNet's `linear_attn.state`, `.states` | the family is not routed |
@@ -338,7 +340,7 @@ plain.rank("self_attn.attention_probabilities", 0)      # sdpa: the reason is su
   common reason in `support()` is the `'sdpa'` one, and the fix is in the message.
 - The repr lists a value whether or not this checkpoint has it. Only a value a
   family marks `unavailable("...")` in its class body prints as
-  `Unavailable: <reason>`; a config-dependent reason (eager, a hybrid's block types) shows only in
+  `Unavailable: <reason>`; a config-dependent reason (eager, `reorder_and_upcast_attn`) shows only in
   `support()`.
 - A hybrid's `support()` is a long dict by design; read `support(layer=i)` for one
   block.

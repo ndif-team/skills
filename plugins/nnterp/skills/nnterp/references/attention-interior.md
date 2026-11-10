@@ -217,10 +217,8 @@ too: they are served on the text model's blocks. `support()` names the reason pe
 Assignment reaches the model on every family. An in-place edit does too, except where the
 value is a split view of one fused tensor and torch refuses it as it does GPT-2's queries
 (`RuntimeError: Output 0 of Select is a view and is being modified inplace`): DBRX's and
-GPT-NeoX's queries and keys, CodeGen's on a checkpoint with one head per `mp_num` group of
-four (the tiny test checkpoint; every released CodeGen has more, and takes the edit),
-JetMoE's keys, and latent attention's shared rope key. Assign there, or edit under
-`torch.no_grad()`.
+GPT-NeoX's queries and keys, JetMoE's keys, and latent attention's shared rope key. Assign
+there, or edit under `torch.no_grad()`.
 
 ### `rotate` and the positions it is given
 
@@ -519,13 +517,8 @@ keys (CodeGen); `Conv1D` columns and rows (GPT-2). MiMo-V2-Flash's `value_weight
 `attention_value_scale` its forward multiplies the values by; DBRX, and MPT and OLMo with
 `clip_qkv`, clamp the projections' outputs after these weights.
 
-On a BitNet load (`quant_method: bitnet`, transformers' `AutoBitLinear` or `BitLinear`) the
-accessors slice the weight a projection applies, not the one it stores: the stored weight
-ternarized as each forward does it (`online`, `-bf16` checkpoints), times `weight_scale`
-(`offline`, the packed checkpoint), or the unpacked codes over `weight_scale` (`BitLinear`).
-The layer rounds its input to 8 bits per token first, so `value_weight(kv) @ x` gives the
-values to that rounding (relative error 0.01 on bitnet-b1.58-2B-4T; 0.002 with the input
-rounded as the layer rounds it).
+On a BitNet load (transformers' `AutoBitLinear` or `BitLinear`) both raise `Unavailable`:
+those layers apply a function of the weight they store.
 
 Under a PEFT adapter the weight is the one the LoRA layer applies, computed as `merge()`
 computes it, in the base weight's dtype: the base plus each active adapter's delta; the base
@@ -561,11 +554,10 @@ under `torch.no_grad()`. On GPT-2 and GPT-BigCode only the queries refuse: their
 and values take an in-place edit, and it lands. On MPT the queries, keys and values all
 refuse. The scores, the pattern and the head outputs accept in-place edits on both (GPT-2's
 head outputs are a transposed view, which torch allows). A GPT-2 checkpoint
-with `reorder_and_upcast_attn` set (the `stanford-crfm` GPT-2s) calls GPT-2's own
-`_upcast_and_reordered_attn(query, key, value, attention_mask)` under eager in the
-interface's place; the six values and `interface` are read at that call, and the
-scores there are float32 whatever the model's dtype. `openai-community/gpt2` does
-not set it.
+with `reorder_and_upcast_attn` set takes GPT-2's own upcast path, where the
+interface never runs; all six then report
+`this checkpoint sets reorder_and_upcast_attn, which takes GPT-2's own upcast
+attention path`. `openai-community/gpt2` does not set it.
 
 ### Grouped-query attention: two head widths
 
@@ -762,10 +754,8 @@ cache and every later step attends with it, while an assignment replaces the cal
 argument for that one forward. Under latent attention (DeepSeek-V2/V3 and the families on
 their attention) the cache holds the compressed latent and the keys and values are expanded
 from it on every call, and Gemma-4 serves copies, so there an edit lasts one forward either
-way. BLOOM, MPT and Falcon are the exception: a call with a cache serves the new tokens'
-keys and values (`[batch, kv_heads, 1, head_dim]` on a decode step, while the pattern spans
-the cache), which the forward then adds to the cache, so an assignment to them is stored in
-the cache too. To change what chosen heads read without touching the cache, call
+way (BLOOM, MPT and Falcon differ: [generation-and-helpers.md](generation-and-helpers.md)).
+To change what chosen heads read without touching the cache, call
 [`interface`](#calling-the-attention-function-again-interface) on edited copies.
 
 See [generation-and-helpers.md](generation-and-helpers.md).
@@ -785,16 +775,14 @@ See [generation-and-helpers.md](generation-and-helpers.md).
   asks for a point the forward has passed. Across invokes it matches the model to
   rounding only; one invoke is bit for bit.
 - An in-place edit of `attention_keys` / `attention_values` on a decode step stays in the
-  cache on most families; an assignment lasts one forward (on BLOOM, MPT and Falcon, whose
-  calls serve the new tokens' keys and values, it is stored in the cache too). To patch what chosen heads
+  cache on most families; an assignment lasts one forward. To patch what chosen heads
   read without either, use `interface` on copies.
 - Never overwrite `attention_scores` wholesale (it holds the mask).
 - GPT-2's and GPT-BigCode's queries, MPT's queries, keys and values: assign, do not
   edit in place (or edit under `torch.no_grad()`); GPT-2's and GPT-BigCode's keys and
   values take an in-place edit. The same before the rotary
   for DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent attention's
-  shared rope key (and CodeGen's on a checkpoint with one head per `mp_num` group of
-  four; released CodeGens take the edit).
+  shared rope key.
 - A query or key moved to another position or prompt is written to
   `attention_queries_prerope` / `attention_keys_prerope`, never to the rotated
   `attention_queries` / `attention_keys`, which carry the position they ran at.

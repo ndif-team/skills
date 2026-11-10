@@ -97,14 +97,11 @@ with model.trace(prompt):
 assert not torch.allclose(zeroed, clean_logits)
 ```
 
-A write to `layer_mid`, assigned or in place, replaces the stream between the sublayers: the
-MLP's norm reads it and the block adds the MLP's output to it. The block holds that tensor twice
-(as the norm's argument and as `residual`), so `layers[i].layer_mid = new` is copied into it, the
-same write as `layer_mid[:] = new`. Like any in-place write it changes a read of `layer_mid` saved
-earlier in the trace, and a replacement computed from such a read by an op that keeps its input
-for the backward pass (a learned scale or rotation, a trainable SAE encoder) fails in the backward
-pass; start from `layers[i].layer_mid.clone()`. A sum (`layer_mid + v`) needs neither. On vLLM a
-read is a private copy, so only the stream changes.
+A write to `layer_mid` replaces the stream between the sublayers for the MLP's norm and the
+add after the MLP: the block holds the tensor twice, so `layers[i].layer_mid = new` is copied
+into it, the same write as `layer_mid[:] = new`. It changes a read saved earlier in the trace,
+and a learned replacement (a scale, a rotation, a trainable SAE) must start from
+`layers[i].layer_mid.clone()` for its backward pass; a sum (`layer_mid + v`) needs no clone.
 
 The values are keyed on the norm aliases, so they describe the pre-norm block. A block
 built otherwise has its family point a value at its own module, or mark it unavailable
@@ -118,7 +115,7 @@ with the reason (`support()` says which):
 | parallel | `gptj`, `codegen`, `cohere`, `cohere2`, `phi`, `falcon`; `gpt_neox` and `stablelm` with `use_parallel_residual` | `layer_mid` unavailable (`PARALLEL`). Where one norm feeds both sublayers (all but `gpt_neox` and Falcon's 40B layout), `mlp_norm_output` is that norm's output, the tensor `attention_norm_output` is: read before the attention, and a write to either reaches both sublayers; `mlp_input` edits what the MLP alone reads. `gpt_neox` has two norms of the block input, and `mlp_norm_output` is `post_attention_layernorm`'s output (Falcon's 40B layout: `ln_mlp`) |
 | OPT, XGLM | | the pre-MLP norm is the block's `final_layer_norm`; OPT holds the stream flattened there, so `layer_mid` and `mlp_norm_output` are `FlatResidual` (`[tokens, hidden_size]`); `mlp_input` unavailable (no `mlp` module) |
 | gated merges | `doge`, `zaya` | the values are the real boundaries, but Doge's gates scale the stream the block carries and ZAYA's merges rescale the stream as well as what is added, so `layer_mid != layer_input + attention_output`; ZAYA's `layer_mid` is the attention merge's output (`post_attention_residual_scale.output`), the float32 stream, since its MLP's norm reads a copy cast to the norm's dtype |
-| hyper-connections | `deepseek_v4` | `attention_norm_output`, `mlp_norm_output` and `mlp_input` are what each sublayer is called with, its norm's output on a mix of the streams (`Residual`); `layer_mid` is the streams between the sublayers (`Streams`), read at the block's own binding, so a write reaches both the MLP's hyper-connection and the mixing after it |
+| hyper-connections | `deepseek_v4` | `attention_norm_output`, `mlp_norm_output` and `mlp_input` are what each sublayer is called with, its norm's output on a mix of the streams (`Residual`); `layer_mid` is unavailable |
 | one sublayer | `mamba`, `mamba2`, `falcon_mamba`, `nemotron_h` | the boundaries the block has no modules for are unavailable, with the reason |
 
 The three reasons are strings exported from `nnterp.components` (`PARALLEL`,
@@ -370,10 +367,10 @@ term, and the stream term rescales and biases what came before. Unroll it the wa
 the Doge loop does.
 
 **DeepSeek-V4**: parallel streams. The residual between blocks is `hc_mult` (4)
-copies of the stream: `layer_output`, `layers[i].input` and `layer_mid` (the `h`
-below) are `[batch, seq, streams, hidden]` (layout `Streams`), the block's own
-tensors, so writes land. `attention_norm_output`, `mlp_norm_output` and `mlp_input`
-are what each sublayer is called with, `[batch, seq, hidden]`.
+copies of the stream: `layer_output` and `layers[i].input` are `[batch, seq,
+streams, hidden]` (layout `Streams`), the block's own tensor, so writes land.
+`attention_norm_output`, `mlp_norm_output` and `mlp_input` are what each sublayer is
+called with, `[batch, seq, hidden]`.
 Each sublayer reads a weighted collapse and returns `[batch, seq, hidden]`;
 `attention_output` / `mlp_output` are those outputs, unscaled. Four values on the
 block carry the hyper-connection weights, float32 and writable:
@@ -394,9 +391,7 @@ keepdim=True) * mlp_output`, within ~2e-6 relative). Code that assumes rank 3
 the plain identity raises a shape error at most lengths. `project_on_vocab`
 collapses the streams with the model's `hc_head` and equals `logits` at the last
 block; `skip_layers` and `steer` work unchanged (a `[hidden]` vector adds to every
-stream). The first `num_hash_layers` blocks (3) pick their experts by token id, so a
-`layer_output` patched in from another prompt before the last of them leaves those
-blocks routing by this run's ids.
+stream).
 
 ## Root values
 
@@ -432,9 +427,7 @@ times `logits_scaling` on HyperCLOVA X, times `lm_head_multiplier` on Falcon-H1,
 float32 on Mamba-2 and Nemotron-H. `lm_head_output` is the raw projection
 (`lm_head.output`), so on those families the difference between the two is the
 family's step; `project_on_vocab` applies it. `final_norm_output` is the final norm's
-output (`norm.output`): assign it to hand the head another stream. OPT-350m has no final
-norm: `model.norm` does not exist, `final_norm_output` is unavailable ("no norm module on
-this model"), and the head reads `project_out`'s output. Assigning `logits`
+output (`norm.output`): assign it to hand the head another stream. Assigning `logits`
 replaces the logits in the output:
 
 ```python
@@ -445,14 +438,10 @@ with model.trace(prompt) as tracer:
 assert result.abs().max() == 0
 ```
 
-**`token_embeddings`** is whatever the embedding module returns: before the positions
-GPT-2, GPT-BigCode, GPT-Neo, OPT and XGLM add, before BLOOM's
-`word_embeddings_layernorm`, before the `embedding_multiplier` of the Granite families,
-HyperCLOVA X and Falcon-H1 (12 on granite-3), before AFMoE's `sqrt(hidden)` (every
-Trinity checkpoint), ZAYA's shift, scale and float32 cast, DeepSeek-V4's copy into
-streams and a wrapper's image scatter, but *with* Gemma's `sqrt(hidden)` scale, which
-sits inside Gemma's embedding module. On OPT-350m it is 512 wide (`project_in` lifts it to
-the 1024-wide stream). `layers[0].input` is what enters
+**`token_embeddings`** is whatever the embedding module returns: before anything the
+model adds after it (positions, a norm, a multiplier, image features), but *with* Gemma's
+`sqrt(hidden)` scale, which sits inside Gemma's embedding module. On OPT-350m it is 512
+wide (`project_in` lifts it to the 1024-wide stream). `layers[0].input` is what enters
 block 0 on every family; use it as the base of a decomposition. Assign
 `token_embeddings` to replace what the embedding hands on.
 
@@ -534,7 +523,7 @@ envoy that serves it and re-exported by `nnterp.components` (the root's
 `Logits`, `NextTokenProbs`, `Tokens` from `nnterp.standardized`). `value.layout` is
 that alias itself, `value.dims` its axes, and the envoy repr prints each value as
 `(name) -> Layout [axes]: description`. Layouts differ between values, not
-between families, with four exceptions: `layer_output` and `layer_mid` on DeepSeek-V4 (`Streams`),
+between families, with four exceptions: `layer_output` on DeepSeek-V4 (`Streams`),
 `linear_attn.decays` on Kimi-Linear (`ChannelGates`), OPT's `layer_mid` and
 `mlp_norm_output` (`FlatResidual`), and `attention_keys_prerope` under latent attention
 (`SharedRopeKeys`).

@@ -21,14 +21,9 @@ DBRX, Gemma-4, ZAYA, ...), `"topk_softmax"` (GPT-OSS, the GraniteMoE line, JetMo
 token id). `SCORING` alone does not recompute the weights: whether the top-k is
 renormalized (`norm_topk_prob`, off on OLMoE, whose rows sum to 0.24-0.89), a
 selection bias and a routed scaling factor are per-family config. So a token's
-weights sum to 1 on most softmax and top-k-softmax routers (Mixtral, Qwen3-MoE, the
-GraniteMoE line, GPT-OSS, JetMoE, DBRX, ...), under 1 where the top-k is not
-renormalized (OLMoE, Qwen1.5-MoE, Jamba, ZAYA, DeepSeek-V2 before its factor), to
-`routed_scaling_factor` on the renormalized sigmoid routers (2.5 on DeepSeek-V3,
-GLM-4.5, GLM-5 and dots.llm1, 1.8 on GLM-4.7-Flash, 2.827 on Kimi-K2.5; AFMoE's
-`route_scale` 2.826), between 1 and 2 on Phi-3.5-MoE, and to any value on Gemma-4
-(each slot times a learned `per_expert_scale`): divide by the sum before comparing
-routing across families. Children:
+weights sum to 1 where the router renormalizes the top-k (Mixtral, Qwen3-MoE), less
+where it does not (OLMoE, Qwen1.5-MoE), `routed_scaling_factor` where it scales after
+(DeepSeek-V3, GLM-4.5): divide by the sum before comparing families. Children:
 `router` (alias of `gate`), `experts`, `shared_experts` (alias of `shared_expert` /
 `shared_mlp`).
 
@@ -161,7 +156,7 @@ place included, and `model.rank(name, i)` sorts a list of reads by it
 
 | family | what differs |
 |---|---|
-| GraniteMoE (-SWA, -Shared, -Hybrid) | `mlp_output` is the scaled term the block adds; `expert_outputs`, `routed_output` and `shared_expert_output` are unscaled (about 4.5x what reaches the stream on granite-3). -Shared / -Hybrid: `routed_output + shared_expert_output == mlp_output / residual_multiplier`; on -Hybrid `mlp` is the shared expert, handed the block's `router` and `experts`. -SWA with `shared_intermediate_size > 0` (granite-swash-3b-a600m): the block also adds its `shared_mlp` times the multiplier, which `mlp_output` leaves out and `shared_expert_output` does not serve, so the identity misses that term |
+| GraniteMoE (-SWA, -Shared, -Hybrid) | `mlp_output` is the scaled term the block adds; `expert_outputs`, `routed_output` and `shared_expert_output` are unscaled (about 4.5x what reaches the stream on granite-3). -Shared / -Hybrid: `routed_output + shared_expert_output == mlp_output / residual_multiplier`; on -Hybrid `mlp` is the shared expert, handed the block's `router` and `experts` |
 | Gemma-4 (26B-A4B) | `router` / `experts` are the block's children, handed to `layers[i].mlp` (the dense MLP, also `shared_expert_output`); every mixture value is unavailable on a dense checkpoint |
 | Llama 4 | the router scales each expert's *input* by a dense score: `expert_weights` and `expert_outputs` unavailable |
 | DBRX, JetMoE | `expert_outputs` unavailable (the experts loop in their own forward); JetMoE's `routed_output` is before `+ bias`, its indices come before its weights, a written index must not repeat another slot's expert (`RuntimeError`), and on a fresh model the first trace that reads `router_logits` then the routing pair raises `OutOfOrderError` (an earlier trace that read the routing pair, or `moe.router.source` touched outside a trace on a dispatched model, avoids it; an earlier trace that never reached the router's operations does not) |
