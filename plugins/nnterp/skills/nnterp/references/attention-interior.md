@@ -71,7 +71,7 @@ writes by it ([availability-and-support.md](availability-and-support.md#forward-
 | `attention_queries` | the queries entering the interface, after the query projection and, where the family has one, after RoPE | `Queries`: `batch num_heads seq qk_head_dim` |
 | `attention_keys` | the keys entering the interface, after RoPE and before `repeat_kv`: `num_kv_heads` wide under grouped-query attention | `Keys`: `batch num_kv_heads seq qk_head_dim` |
 | `attention_values` | the values entering the interface, before `repeat_kv` | `Values`: `batch num_kv_heads seq head_dim` |
-| `attention_scores` | the scaled, masked scores that enter the softmax | `Pattern`: `batch num_heads query key` |
+| `attention_scores` | the scaled, masked scores that enter the softmax, after the attention softcap where the family has one (Gemma-2's `50 * tanh(x / 50)`; VaultGemma where its config sets it) | `Pattern`: `batch num_heads query key` |
 | `attention_probabilities` | the pattern the values are mixed with: the dropout's output after the softmax, in the model dtype, a sink column already dropped | `Pattern` |
 | `attention_head_outputs` | what the interface returns: each head's mix of the values, before the reshape to `[batch, seq, hidden]` and the output projection | `HeadOutputs`: `batch seq num_heads head_dim` |
 
@@ -231,8 +231,12 @@ differ unless the positions you pass reach as far as the prompt did; rotate the 
 sequence and index the result to match a long prompt. Under `generate` the keys before the
 rotary on decode step `k` of `tracer.iter` (step 0 is the prompt) are the new token's only,
 at position `n + k - 1` for a prompt of `n` tokens: `attn.rotate(keys, [n + k - 1])` is the
-last row of that step's `attention_keys`. On a model split tensor-parallel the two values
-are gathered along their head axis as the queries and keys are, so every rank reads and
+last row of that step's `attention_keys`. On an M-RoPE family (Qwen2-VL, Qwen2.5-VL,
+Qwen3-VL, Qwen3-VL-MoE, Qwen3.5, Qwen3.5-MoE) with an image in the prompt a token's
+position is not its index: pass the model's own `[3, batch, seq]` positions,
+`model.layers.parent.rotary_emb.inputs[0][1]` (read inside the step under `generate`);
+token indices, and `n + k - 1`, rotate wrongly from the image on. On a model split
+tensor-parallel the two values are gathered along their head axis as the queries and keys are, so every rank reads and
 writes them whole, and `rotate` runs on the whole tensor on every rank.
 
 ### On the vLLM engine
@@ -296,7 +300,8 @@ attn_implementation='eager'` in `support()`; reading one raises
 `attn_implementation` gets transformers' default, `sdpa` on every family that
 supports it, so pass `attn_implementation="eager"` at load for any of the six.
 BLOOM, MPT, CodeGen, XGLM and GPT-NeoX-Japanese have no other implementation and
-carry no such check; GPT-J, GPT-Neo and Falcon need the flag.
+carry no such check; Falcon needs the flag; GPT-J and GPT-Neo carry the check, but their
+only other implementation is flash attention, so a default load is eager.
 See [availability-and-support.md](availability-and-support.md).
 
 ## Reading, editing in place, assigning
@@ -339,8 +344,10 @@ with model.trace(prompt):
 assert leaked.triu(diagonal=1).sum() > 0                   # every query now attends to the future
 ```
 
-GPT-Neo's masked scores are `-inf` rather than the dtype's minimum, so
-`scores * 0` is NaN there.
+On a float32 or bfloat16 load GPT-Neo's causally masked scores are `-inf` rather than the
+dtype's minimum (its own mask writes float32's minimum and the model's mask adds the dtype's),
+so `scores * 0` is NaN there; on a float16 load they stay at float32's minimum, and the
+local-window entries are finite on every dtype.
 
 **Two invokes of one trace each read and edit their own rows of every interior value.** At
 one location the invoke written first is served first: an empty `tracer.invoke()` after an

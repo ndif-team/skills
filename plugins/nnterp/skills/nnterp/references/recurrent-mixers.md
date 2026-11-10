@@ -10,7 +10,7 @@ the call, `attention_output` what the mixer adds to the stream.
 
 | mixer | class | families | blocks |
 |---|---|---|---|
-| gated DeltaNet | `LinearAttention` | `qwen3_next`, `qwen3_5_text`, `qwen3_5_moe_text`, `olmo_hybrid` | three in four (`config.layer_types`); `self_attn` on the rest |
+| gated DeltaNet | `LinearAttention` | `qwen3_next`, `qwen3_5_text`, `qwen3_5_moe_text`, `olmo_hybrid`; `kimi_linear` (Kimi Delta Attention: `decays` per head and key channel, `ChannelGates`, `[batch, seq, heads, key_dim]`) | three in four (`config.layer_types`); `self_attn` on the rest |
 | Mamba-1 selective scan | `SelectiveScan` | `mamba`, `falcon_mamba`, `jamba` | every block on Mamba / Falcon-Mamba (no attention, no MLP); all but one in `attn_layer_period` on Jamba |
 | Mamba-2 (SSD) | `StateSpace` | `mamba2`, `nemotron_h`, `bamba`, `falcon_h1`, `granitemoehybrid` | every block on Mamba-2 (mixer alone) and Falcon-H1 (beside `self_attn`); per block type elsewhere |
 
@@ -68,7 +68,7 @@ False)` undoes it) to make every token a chunk boundary.
 | `attention_values` | `v`, `[batch, seq, heads, value_dim]` | `x` per channel, `[batch, seq, channels]` | `x` per head, `[batch, seq, heads, head_dim]` |
 | `betas` | write strength in `(0, 1)`, per head; assignable | `softplus(dt + dt_bias)` per channel; read-only | `softplus(dt + dt_bias)` per head; assignable, written back into `dt` |
 | `decays` | log gate per head, float32, `<= 0`; assignable | `dt * A` per channel and state dim; read-only | `A * dt` per head; assignable, but it *is* `dt`: writing it changes `betas` |
-| `attention_head_outputs` | each head's read, before the gated norm and `out_proj` | `C . h + D x` before `silu(z)` | `h C + D x` before the gated norm |
+| `attention_head_outputs` | each head's read, before the gated norm and `out_proj` | `C . h + D x` before `silu(z)` | `h C + D x` before the gated norm (Falcon-H1 with `mamba_rms_norm` off passes the gate into the decode-step kernel, so there a decode step's is `(h C + D x) * silu(z)`, a prompt's is not) |
 | state layout | `State`: `[batch, heads, key_dim, value_dim]` | `ScanState`: `[batch, channels, state_dim]` (value side first) | `State`: `[batch, heads, state_dim, head_dim]` (key side first; the cache's transpose) |
 | `state` (per token, `tracer.iter`) | after `route_kernels` | after `route_kernels` | unavailable |
 | `states`, `state_after(t)` | after `route_kernels` | after `route_kernels` | after `chunk_per_token(model)`; a read-only copy |

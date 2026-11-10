@@ -1,6 +1,6 @@
 # Mixture of experts
 
-On the 36 MoE families the mixture is a `Moe` (an `Mlp`): `layers[i].mlp` on most,
+On the 39 MoE families the mixture is a `Moe` (an `Mlp`): `layers[i].mlp` on most,
 and `mlp_output` is still what the block adds. Six values say how the mixture made
 it, each read where the model consumes it and written back there:
 
@@ -20,7 +20,15 @@ DBRX, Gemma-4, ZAYA, ...), `"topk_softmax"` (GPT-OSS, the GraniteMoE line, JetMo
 ...), `"sparsemixer"` (Phi-3.5-MoE), per block on DeepSeek-V4 (`"hash"` routes by
 token id). `SCORING` alone does not recompute the weights: whether the top-k is
 renormalized (`norm_topk_prob`, off on OLMoE, whose rows sum to 0.24-0.89), a
-selection bias and a routed scaling factor are per-family config. Children:
+selection bias and a routed scaling factor are per-family config. So a token's
+weights sum to 1 on most softmax and top-k-softmax routers (Mixtral, Qwen3-MoE, the
+GraniteMoE line, GPT-OSS, JetMoE, DBRX, ...), under 1 where the top-k is not
+renormalized (OLMoE, Qwen1.5-MoE, Jamba, ZAYA, DeepSeek-V2 before its factor), to
+`routed_scaling_factor` on the renormalized sigmoid routers (2.5 on DeepSeek-V3,
+GLM-4.5, GLM-5 and dots.llm1, 1.8 on GLM-4.7-Flash, 2.827 on Kimi-K2.5; AFMoE's
+`route_scale` 2.826), between 1 and 2 on Phi-3.5-MoE, and to any value on Gemma-4
+(each slot times a learned `per_expert_scale`): divide by the sum before comparing
+routing across families. Children:
 `router` (alias of `gate`), `experts`, `shared_experts` (alias of `shared_expert` /
 `shared_mlp`).
 
@@ -69,8 +77,8 @@ prompts = ["The Eiffel Tower is in the city of", "def f(x): return"]
 with model.trace(prompts):
     mask = model.attention_mask.save()                  # read first: the model's input
     logits = moe.router_logits.save()                   # [batch, seq, experts]
+    idx = moe.expert_indices.save()                     # the indices first: JetMoE computes them before the weights
     w = moe.expert_weights.save()
-    idx = moe.expert_indices.save()
 
 real = mask.bool()                                      # [batch, seq]
 slots = real[..., None].expand_as(idx) & (w != 0)       # w != 0: ZAYA's skipped slots read as expert 0, weight 0
@@ -94,13 +102,14 @@ with model.trace(prompt):
 effects = []
 for e in range(moe.num_experts):
     with model.trace(prompt):
-        moe.expert_weights = moe.expert_weights.masked_fill(moe.expert_indices == e, 0)
+        idx = moe.expert_indices                # the indices first: JetMoE computes them before the weights
+        moe.expert_weights = moe.expert_weights.masked_fill(idx == e, 0)
         effects.append((model.logits[0, -1].float().log_softmax(-1)[target] - clean).save())
 
-with model.trace(prompt):                       # reroute the last token's first slot to expert 2
+with model.trace(prompt):                       # reroute the last token's first slot to an expert none of its slots uses
     rerouted = moe.expert_indices.clone()
-    rerouted[:, -1, 0] = 2                      # its weight stays what the router gave the expert it chose
-    moe.expert_indices = rerouted
+    rerouted[:, -1, 0] = next(e for e in range(moe.num_experts) if e not in rerouted[0, -1].tolist())
+    moe.expert_indices = rerouted               # its weight stays what the router gave the expert it chose
     rerouted_logits = model.logits.save()
 
 with model.trace(prompt):                       # force the router: logits decide weights and indices
@@ -112,6 +121,10 @@ with model.trace(prompt):                       # force the router: logits decid
 The sweep fits one trace with one invoke per expert: an in-place edit
 (`moe.expert_weights[:] = moe.expert_weights.masked_fill(...)`) and an assignment both
 reach that invoke only. In float32 the batched sweep equals the per-trace one exactly.
+
+Reroute to an expert the token's other slots do not use: on JetMoE a repeated one
+raises `RuntimeError` (`split_with_sizes`), and the other families run that expert
+once per slot.
 
 **bf16 sweeps are noise.** On a bf16 GraniteMoE the one-invoke-per-expert sweep
 correlated 0.32 with per-trace ablation and named a different "most important"
@@ -148,16 +161,16 @@ place included, and `model.rank(name, i)` sorts a list of reads by it
 
 | family | what differs |
 |---|---|
-| GraniteMoE (-SWA, -Shared, -Hybrid) | `mlp_output` is the scaled term the block adds; `expert_outputs`, `routed_output` and `shared_expert_output` are unscaled (about 4.5x what reaches the stream on granite-3). -Shared / -Hybrid: `routed_output + shared_expert_output == mlp_output / residual_multiplier`; on -Hybrid `mlp` is the shared expert, handed the block's `router` and `experts` |
+| GraniteMoE (-SWA, -Shared, -Hybrid) | `mlp_output` is the scaled term the block adds; `expert_outputs`, `routed_output` and `shared_expert_output` are unscaled (about 4.5x what reaches the stream on granite-3). -Shared / -Hybrid: `routed_output + shared_expert_output == mlp_output / residual_multiplier`; on -Hybrid `mlp` is the shared expert, handed the block's `router` and `experts`. -SWA with `shared_intermediate_size > 0` (granite-swash-3b-a600m): the block also adds its `shared_mlp` times the multiplier, which `mlp_output` leaves out and `shared_expert_output` does not serve, so the identity misses that term |
 | Gemma-4 (26B-A4B) | `router` / `experts` are the block's children, handed to `layers[i].mlp` (the dense MLP, also `shared_expert_output`); every mixture value is unavailable on a dense checkpoint |
 | Llama 4 | the router scales each expert's *input* by a dense score: `expert_weights` and `expert_outputs` unavailable |
-| DBRX, JetMoE | `expert_outputs` unavailable (the experts loop in their own forward); JetMoE's `routed_output` is before `+ bias` |
+| DBRX, JetMoE | `expert_outputs` unavailable (the experts loop in their own forward); JetMoE's `routed_output` is before `+ bias`, its indices come before its weights, a written index must not repeat another slot's expert (`RuntimeError`), and on a fresh model the first trace that reads `router_logits` then the routing pair raises `OutOfOrderError` (an earlier trace that read the routing pair, or `moe.router.source` touched outside a trace on a dispatched model, avoids it; an earlier trace that never reached the router's operations does not) |
 | ZAYA | `router_logits` has `num_experts + 1` columns, the last is *skip*: a skipped slot reads index 0, weight 0 |
 | DeepSeek-V4 | on a `hash_moe` block the token ids pick the experts: writing `router_logits` changes the weights, not the indices |
 | Laguna | `expert_outputs.sum(2) * routed_scaling_factor == routed_output` |
 | Qwen2-MoE, Qwen3-Next, Qwen3.5-MoE | `shared_expert_output` is the sigmoid-gated product; `shared_experts.output` is ungated |
 | Nemotron-H with `moe_latent_size` | `routed_output` is the latent up-projection's output; `expert_outputs` unavailable |
-| Doge | transformers 5.17 cannot run its mixture: all six unavailable |
+| Doge | all six unavailable: `router_gate` gives two sets of product-key logits per token, not one per expert, and the experts are embedding rows (the mixture runs from transformers 5.18). The routing views `router_gate`'s output as `(2, batch * seq, -1)`, so on the `is_moe` checkpoints a prompt's outputs depend on its length and on the other prompts in the trace: trace clean and corrupt prompts separately |
 
 The nnterp repo pages behind this file: `docs/usage/mixture-of-experts.md`,
 `docs/patterns/expert-ablation.md`.

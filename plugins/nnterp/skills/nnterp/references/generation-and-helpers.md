@@ -47,7 +47,7 @@ print(model.tokenizer.decode(ids[0, n:]))
 | `attention_keys_prerope` | `[batch, kv_heads, prompt_len, head_dim]` | `[batch, kv_heads, 1, head_dim]`: the new token's only, at position `prompt_len + step - 1` |
 | `attention_scores`, `attention_probabilities` | `[batch, heads, prompt_len, prompt_len]` | `[batch, heads, 1, prompt_len + step]` |
 | `self_attn.interface` | the prompt call | that step's call: one query row, the whole cache as keys and values, the step's mask (none on an unpadded `generate`) |
-| `model.logits` | `[batch, prompt_len, vocab]` | `[batch, 1, vocab]` |
+| `model.logits`, `lm_head_output` | `[batch, 1, vocab]`: `generate` asks for the last position only (`logits_to_keep=1`); `project_on_vocab(layers[-1].layer_output)` gives every prompt position | `[batch, 1, vocab]` |
 | `model.next_token_probs` | `[batch, vocab]` | `[batch, vocab]` |
 
 **Picking steps.** `tracer.iter[k]` binds the body to step `k`, `tracer.iter[:n]`

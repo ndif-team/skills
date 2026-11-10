@@ -223,6 +223,12 @@ with model.trace(prompt):
 print(f"skipped P(Paris) {skipped[0, paris]:.3f}")
 ```
 
+A skip removes the block, which is more than its terms on two families. Gemma-4 ends each
+block by scaling the whole stream by `layer_scalar`, so a skip also drops that rescaling;
+to remove only the terms, `layers[i].skip_with(layers[i].layer_input *
+layers[i]._module.layer_scalar)`. On Qwen3-VL with an image, the skipped blocks'
+`deepstack_output` is still added at the image positions (zero it to skip that too).
+
 A skip must cover every row of a forward. Inside one invoke of a batched trace it
 raises, so it goes in a trace of its own (or in every invoke):
 

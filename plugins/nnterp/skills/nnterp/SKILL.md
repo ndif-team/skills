@@ -104,16 +104,17 @@ assert isinstance(raw, tuple) and wrong.shape == (10, 768)       # batch row 0, 
 
 **5. `attention_output` is the contribution, and not every block is a plain sum.**
 `layers[i].input + attention_output + mlp_output == layer_output` defines the two
-contributions on sequential, parallel and post-norm blocks (on Gemma-2/3,
-OLMo-2/3, EXAONE-4 they are the post-norms' outputs; on BLOOM/MPT the tensor
-before an add inside the module). Five families break the plain sum, and naive
-direct logit attribution there is wrong by orders of magnitude:
+contributions on sequential, parallel and post-norm blocks (on Gemma-2/3/4, GLM-4,
+AFMoE, HyperCLOVA X, OLMo-2/3, EXAONE-4, FlexOlmo and OLMo-Hybrid's attention blocks
+they are the post-norms' outputs; on BLOOM/MPT the tensor before an add inside the
+module). Five families break the plain sum, and naive direct logit attribution there
+is wrong by orders of magnitude:
 
 | family | the block | what a term from block `i` reaches the last stream as |
 |---|---|---|
 | Gemma-4 | `(input + attn + mlp [+ per_layer_output]) * layer_scalar` | times every `layer_scalar` from `i` on (0.005 to 0.99 each) |
 | Doge, ZAYA | the stream itself is rescaled per channel by each merge's learned parameters | times the gates of every later merge |
-| Granite line, HyperCLOVA X | contributions are the scaled terms (`* residual_multiplier`) | the plain sum holds; the head scales the logits (`logits_scaling`) |
+| Granite line, HyperCLOVA X | contributions are the scaled terms (`* residual_multiplier`) | the plain sum holds, except on GraniteMoE-SWA with a shared expert (granite-swash-3b-a600m), whose `mlp_output` leaves out the block's `shared_mlp` term (add `layers[i].shared_mlp.output * residual_multiplier`); the head scales the logits (`logits_scaling`) |
 | DeepSeek-V4 | `layer_output` is `[batch, seq, streams, hidden]` (`Streams`) | mixed by `attention_comb` / `mlp_comb`; only the stream mean is additive |
 
 The recipes (stream weights for Gemma-4 and Doge, the stream formula for
@@ -247,6 +248,7 @@ processor, so no image reaches the model; load with task='image-text-to-text'`.
 
 **15. Read `vision.image_token_mask` first and `vision.image_features` after the tower;
 one image-carrying invoke per trace.** The mask comes off the inputs, like `input_ids`;
+`token_embeddings` comes next (the wrapper embeds the ids before it runs the tower), and
 `image_features` is read at the scatter, after the tower's values and before
 `layers[0].input`. Under `generate` on transformers 5.18 and later the images are encoded
 before the first forward, so the tower's values come before the mask; mask then
@@ -270,7 +272,8 @@ block rotates what you wrote for the position it lands at
 `self_attn.q_proj.output` is wrong too: Phi-3 has no `q_proj`, and Qwen3, OLMo-2/3 and
 Gemma norm between the projection and the rotary. `self_attn.rotate` is the rotary
 alone: HunYuan and Llama 4 norm the queries and keys after it, JetMoE tiles its keys,
-Ministral 3 scales its queries, so there `attention_queries` is not `rotate(...)` itself.
+Ministral 3 scales its queries past `original_max_position_embeddings` (16384), so there
+`attention_queries` is not `rotate(...)` itself (on Ministral 3, on longer prompts only).
 
 **18. Read `self_attn.interface` once per forward, and call it before the scores.**
 Reading it takes the attention call's arguments, so it goes where the queries, keys and
@@ -767,6 +770,9 @@ the Aya Vision wrappers) or `/ logits_scaling` (Granite); `hc_head` first on Dee
 and `project_out` in place of the final norm on OPT-350m, which has none. `steer` moves
 `vector` to the stream's device and dtype; scale the factor to the stream's norm
 (`layer_output[0, -1].norm()`, which grows with depth).
+On DeepSeek-V4 the vector goes into every stream and each sublayer reads a weighted sum
+of the streams, so it arrives multiplied by that sum (between 0 and 4; about 2 at block 5
+of the pinned tiny checkpoint).
 `get_topk_closest_tokens` takes a residual-stream tensor, not logits, and keys on
 the decoded string: byte tokens that decode to `'�'` collapse into one entry.
 
