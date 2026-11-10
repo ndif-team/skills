@@ -324,7 +324,7 @@ neither attention nor MLP.
 |---|---|---|---|
 | `layer_input` | `layers[i]` | `Residual` | the stream entering the block, `layers[i].input` |
 | `attention_norm_output` | `layers[i]` | `Residual` | the normed stream the attention is called with (`input_layernorm.output`) |
-| `layer_mid` | `layers[i]` | `Residual` | the stream between the sublayers, `layer_input + attention_output`; none on a parallel block |
+| `layer_mid` | `layers[i]` | `Residual` | the stream between the sublayers, `layer_input + attention_output`; none on a parallel block. Assigning it is an in-place write into the stream: it changes a read saved earlier in the trace (clone what you keep) |
 | `mlp_norm_output`, `mlp_input` | `layers[i]` | `Residual` | the MLP's pre-norm output; what the MLP is called with (`mlp.input`; the norm's output on GraniteMoE-Shared/-SWA/-Hybrid, whose two experts are both called with it; the dense MLP's input alone on a Gemma-4 mixture block) |
 | `layer_output` | `layers[i]` | `Residual` | the stream leaving the block; `Streams` on DeepSeek-V4 (as are `layer_input` and `layer_mid` there) |
 | `attention_output` | `self_attn` / `linear_attn` | `Residual` | the contribution |

@@ -96,6 +96,15 @@ with model.trace(prompt):
 assert not torch.allclose(zeroed, clean_logits)
 ```
 
+A write to `layer_mid`, assigned or in place, replaces the stream between the sublayers: the
+MLP's norm reads it and the block adds the MLP's output to it. The block holds that tensor twice
+(as the norm's argument and as `residual`), so `layers[i].layer_mid = new` is copied into it, the
+same write as `layer_mid[:] = new`. Like any in-place write it changes a read of `layer_mid` saved
+earlier in the trace, and a replacement computed from such a read by an op that keeps its input
+for the backward pass (a learned scale or rotation, a trainable SAE encoder) fails in the backward
+pass; start from `layers[i].layer_mid.clone()`. A sum (`layer_mid + v`) needs neither. On vLLM a
+read is a private copy, so only the stream changes.
+
 The values are keyed on the norm aliases, so they describe the pre-norm block. A block
 built otherwise has its family point a value at its own module, or mark it unavailable
 with the reason (`support()` says which):
@@ -107,7 +116,7 @@ with the reason (`support()` says which):
 | post-norm only | `olmo2`, `olmo3`, `exaone4`, `flex_olmo`; OLMo-Hybrid's attention blocks | `layer_mid` is `mlp.input`; the two norm outputs are unavailable (`POST_NORM_ATTENTION`, `POST_NORM_MLP`: the sublayer reads the stream itself) |
 | parallel | `gptj`, `codegen`, `cohere`, `cohere2`, `phi`, `falcon`; `gpt_neox` and `stablelm` with `use_parallel_residual` | `layer_mid` unavailable (`PARALLEL`); `mlp_norm_output` is the one norm's output (Falcon's 40B layout: `ln_mlp`) |
 | OPT, XGLM | | the pre-MLP norm is the block's `final_layer_norm`; OPT holds the stream flattened there, so `layer_mid` and `mlp_norm_output` are `FlatResidual` (`[tokens, hidden_size]`); `mlp_input` unavailable (no `mlp` module) |
-| gated merges | `doge`, `zaya` | the values are the real boundaries, but a gate scales what the block adds, so `layer_mid != layer_input + attention_output` |
+| gated merges | `doge`, `zaya` | the values are the real boundaries, but a gate scales what the block adds, so `layer_mid != layer_input + attention_output`; ZAYA's `layer_mid` is the attention merge's output (`post_attention_residual_scale.output`), the float32 stream, since its MLP's norm reads a copy cast to the norm's dtype |
 | hyper-connections | `deepseek_v4` | `attention_norm_output`, `mlp_norm_output` and `mlp_input` are what each sublayer is called with, its norm's output on a mix of the streams (`Residual`); `layer_mid` is the streams between the sublayers (`Streams`), read at the block's own binding, so a write reaches both the MLP's hyper-connection and the mixing after it |
 | one sublayer | `mamba`, `mamba2`, `falcon_mamba`, `nemotron_h` | the boundaries the block has no modules for are unavailable, with the reason |
 
