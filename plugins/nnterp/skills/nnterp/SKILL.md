@@ -141,9 +141,8 @@ with model.trace(prompt):
 When code decides which values to read or edit (a list of sites, a sweep over several
 values per block, a port of code that hooked modules in its own order), sort the sites by
 `model.rank(name, layer)` before the trace instead of keeping a table of what comes first:
-that table differs per family (Falcon's keys and values come after its queries where the call
-has a key/value cache, and its values first where it has none; a mixture's shared expert runs
-first on some families and last on others), and `rank` is
+that table differs per family (on Falcon without alibi the values come before the queries;
+a mixture's shared expert runs first on some families and last on others), and `rank` is
 measured on the loaded checkpoint. `model.order(i)` lists block `i`'s values in that order,
 equal ranks sharing one location. Both are asked outside the trace, by `support()`'s
 dotted names; `rank` raises `Unavailable` for a value the checkpoint lacks:
@@ -183,17 +182,19 @@ names are unbound, so look for the warning when a saved name is missing. On a Ma
 `skip_layers` consumes `layers[start].input`: read it first or not at all.
 
 **7. Two invokes of one trace each read and edit their own rows of every attention-interior
-value**, on every family (BLOOM, XGLM and Falcon with alibi read theirs where the batch still
-leads, before the forward flattens batch and heads for its `bmm`). At one location the invoke
-written first is served first, so an empty `tracer.invoke()` after an invoke that edits the
-scores reads the edited pattern.
+value**, on every family but XGLM's keys and values (BLOOM, XGLM and Falcon with alibi read
+theirs where the batch still leads, before the forward flattens batch and heads for its `bmm`;
+XGLM's keys and values are read flat after its cache update, so there a read returns every
+invoke's rows and an edit in one invoke reaches them all). At one location the invoke written
+first is served first, so an empty `tracer.invoke()` after an invoke that edits the scores
+reads the edited pattern.
 
 **8. Overwriting `attention_scores` lifts the causal mask.** The scores are read
 after masking, so `scores[:] = 0` attends to the future. Add to them
 (`scores[..., k] += c`, or `-inf` to block a key) instead.
 
-**9. GPT-2's and GPT-BigCode's queries, and MPT's queries (and its keys and values on a call
-without a cache), are split views torch will not edit in place**; so are Mamba-1's, and
+**9. GPT-2's and GPT-BigCode's queries, and MPT's queries, keys and values, are split
+views torch will not edit in place**; so are Mamba-1's, and
 before the rotary DBRX's and GPT-NeoX's queries and keys (CodeGen's only on a checkpoint
 with one head per `mp_num` group of four, which no released CodeGen is), JetMoE's keys and
 latent attention's shared rope key. torch refuses an in-place edit with grad on; assign

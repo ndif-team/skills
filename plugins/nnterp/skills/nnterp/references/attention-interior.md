@@ -349,12 +349,16 @@ dtype's minimum (its own mask writes float32's minimum and the model's mask adds
 so `scores * 0` is NaN there; on a float16 load they stay at float32's minimum, and the
 local-window entries are finite on every dtype.
 
-**Two invokes of one trace each read and edit their own rows of every interior value.** At
-one location the invoke written first is served first: an empty `tracer.invoke()` after an
-invoke that edits the scores reads the edited pattern. BLOOM, XGLM and Falcon with alibi
-flatten batch and heads together for their `bmm`, which nnsight cannot narrow to an invoke's
-rows, so their families read each value where the batch still leads (BLOOM's and Falcon's
-head outputs once `_merge_heads` has merged them).
+**Two invokes of one trace each read and edit their own rows of every interior value**,
+except XGLM's keys and values. At one location the invoke written first is served first: an
+empty `tracer.invoke()` after an invoke that edits the scores reads the edited pattern. BLOOM,
+XGLM and Falcon with alibi flatten batch and heads together for their `bmm`, which nnsight
+cannot narrow to an invoke's rows, so their families read each value where the batch still
+leads (BLOOM's and Falcon's head outputs once `_merge_heads` has merged them). XGLM's keys
+and values are read at the flat `[batch * num_heads, ...]` reshape after its cache update, the
+one operation that holds them with or without a cache: there a read returns every invoke's
+rows and an edit in one invoke reaches them all, so put XGLM key or value edits in one trace
+per prompt.
 
 **Padded rows.** In a left-padded batch a pad *query* row attends uniformly over
 all keys, which pollutes per-row head metrics (entropy, previous-token mass);
@@ -554,9 +558,8 @@ with model.trace(prompt):
 
 Assign instead (`attn.attention_queries = attn.attention_queries * 0`), or edit
 under `torch.no_grad()`. On GPT-2 and GPT-BigCode only the queries refuse: their keys
-and values take an in-place edit, and it lands. On MPT the queries refuse, and the keys and
-values on a call without a cache; with one they are the cache update's new tensors and take
-in-place edits, which the cache keeps. The scores, the pattern and the head outputs accept in-place edits on both (GPT-2's
+and values take an in-place edit, and it lands. On MPT the queries, keys and values all
+refuse. The scores, the pattern and the head outputs accept in-place edits on both (GPT-2's
 head outputs are a transposed view, which torch allows). A GPT-2 checkpoint
 with `reorder_and_upcast_attn` set (the `stanford-crfm` GPT-2s) calls GPT-2's own
 `_upcast_and_reordered_attn(query, key, value, attention_mask)` under eager in the
@@ -594,11 +597,9 @@ On Llama the queries, keys and values also take in-place edits.
 Falcon's attention does its own arithmetic, and `config.alibi` picks one of two
 branches with different operations; the family names every interior value's
 operation by that flag, so all six are available under eager on both. Without
-alibi the queries are the rotary embedding's first return; with alibi there is no
-rotary and they are the reshaped projection. Either branch then updates the cache
-itself, and where the call has a cache (every call but `use_cache=False`) the keys
-and values are what the update returns, every position so far, read after the
-queries:
+alibi the queries and keys are the two returns of the rotary embedding, and the
+values are bound *before* it, so in one trace the values must be read before
+the queries or keys:
 
 <!-- test: skip -->
 ```python
@@ -606,19 +607,18 @@ falcon = StandardizedTransformer("tiiuae/falcon-7b", device="cpu", dispatch=True
 fattn = falcon.layers[0].self_attn
 
 with falcon.trace(prompt):
+    v = fattn.attention_values.save()       # binds first
     q = fattn.attention_queries.save()
-    k = fattn.attention_keys.save()         # the cache update's return
-    v = fattn.attention_values.save()
+    k = fattn.attention_keys.save()
 ```
 
-Without a cache they are the new tokens' own: the rotary's second return and the
-`value_layer` binding before it without alibi (read the values first there), the
-reshaped projections with alibi. Whether the call has a cache is read off the
-attention's arguments by its first standard value, so read its standard values before
-its child modules' (`query_key_value.output`) in one trace. Without alibi the pattern
-is the first softmax's output itself (no dropout follows); with alibi it is the dropout
-after the second softmax, and the head outputs are read once `_merge_heads` has merged
-them (the product before it is flattened over batch and heads), served as the same
+The other order raises `OutOfOrderError` naming `value_layer_0`. On that branch
+the pattern is the first softmax's output itself (no dropout follows). With
+alibi there is no rotary: queries, keys and values are the reshaped projections,
+bound in that order, so read them as queries, keys, values (values first raises
+`OutOfOrderError` naming `query_layer_0`); the pattern is the dropout after the
+second softmax, and the head outputs are read once `_merge_heads` has merged them
+(the product before it is flattened over batch and heads), served as the same
 `[batch, seq, heads, head_dim]` view as elsewhere, so in-place edits land. The 7B
 layout is multi-query on both branches: keys and values have one head
 (`num_kv_heads == 1`).
@@ -635,10 +635,9 @@ reports the config's `num_kv_heads` (8).
 GPT-J, GPT-Neo, CodeGen, GPT-NeoX-Japanese, XGLM, BLOOM, MPT and Falcon do their
 own attention arithmetic, and their families map the same six values onto it
 (GPT-J/GPT-Neo/CodeGen/GPT-NeoX-Japanese around a `self._attn(q, k, v, mask)`
-call; BLOOM, XGLM and MPT on their projections, their cache update and the bindings
-around their matmuls, where the batch still leads). BLOOM, MPT, Falcon and XGLM update
-the cache in their own forwards, and their keys and values are the update's return where
-the call has a cache, as on every other family. Heads-first head outputs are served as a
+call; BLOOM, XGLM and MPT on their projections and the bindings around their matmuls,
+where the batch still leads; XGLM's keys and values at the flat reshape after its cache
+update). Heads-first head outputs are served as a
 sequence-first view, so in-place edits land. Where the scale sits differs (GPT-Neo
 has none, CodeGen divides after the mask, XGLM scales the queries as it projects
 them). GPT-Neo's `self_attn` is the module inside the `attn` wrapper. Their output
@@ -763,7 +762,10 @@ cache and every later step attends with it, while an assignment replaces the cal
 argument for that one forward. Under latent attention (DeepSeek-V2/V3 and the families on
 their attention) the cache holds the compressed latent and the keys and values are expanded
 from it on every call, and Gemma-4 serves copies, so there an edit lasts one forward either
-way. To change what chosen heads read without touching the cache, call
+way. BLOOM, MPT and Falcon are the exception: a call with a cache serves the new tokens'
+keys and values (`[batch, kv_heads, 1, head_dim]` on a decode step, while the pattern spans
+the cache), which the forward then adds to the cache, so an assignment to them is stored in
+the cache too. To change what chosen heads read without touching the cache, call
 [`interface`](#calling-the-attention-function-again-interface) on edited copies.
 
 See [generation-and-helpers.md](generation-and-helpers.md).
@@ -773,9 +775,9 @@ See [generation-and-helpers.md](generation-and-helpers.md).
 - `attn_implementation="eager"` or nothing: under `sdpa` every interior value is
   `Unavailable`, and `support()` says so per block before any trace.
 - Reads follow the forward within one trace: the queries and keys before the
-  rotary, then q, k, v and `interface`, then scores, then pattern, then head outputs; on Falcon,
-  BLOOM and MPT the keys and values after the queries where the call has a cache (on
-  Falcon without alibi and without one, the values first). Out of order raises `OutOfOrderError` naming the attention call. Under
+  rotary, then q, k, v and `interface`, then scores, then pattern, then head outputs; on Falcon
+  without alibi the values before the queries and keys, with alibi queries, keys,
+  values. Out of order raises `OutOfOrderError` naming the attention call. Under
   `generate` + `tracer.iter` it does not raise: the read binds the *next* step's
   value.
 - Read `interface` once per forward, and call it before the scores. Reading it again
@@ -783,11 +785,11 @@ See [generation-and-helpers.md](generation-and-helpers.md).
   asks for a point the forward has passed. Across invokes it matches the model to
   rounding only; one invoke is bit for bit.
 - An in-place edit of `attention_keys` / `attention_values` on a decode step stays in the
-  cache on most families; an assignment lasts one forward. To patch what chosen heads
+  cache on most families; an assignment lasts one forward (on BLOOM, MPT and Falcon, whose
+  calls serve the new tokens' keys and values, it is stored in the cache too). To patch what chosen heads
   read without either, use `interface` on copies.
 - Never overwrite `attention_scores` wholesale (it holds the mask).
-- GPT-2's and GPT-BigCode's queries, MPT's queries (and its keys and values on a call
-  without a cache): assign, do not
+- GPT-2's and GPT-BigCode's queries, MPT's queries, keys and values: assign, do not
   edit in place (or edit under `torch.no_grad()`); GPT-2's and GPT-BigCode's keys and
   values take an in-place edit. The same before the rotary
   for DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent attention's

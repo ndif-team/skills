@@ -178,7 +178,7 @@ Every value's descriptor exposes `.layout` (the named alias), `.dims`,
 | `nnsight...SourceNotAvailable` | a source-located value's operation is not in this run's forward (another transformers release, an unexpected branch); also `hasattr` on a nested-source value outside a trace |
 | `nnsight...OutOfOrderError` | a value read after the model ran past it; the message names an internal location, not the value; also a second `self_attn.interface` read after a call, or a call after the scores, the pattern or the head outputs (`'...attention_interface_1.input.i0'`, `'...attention_interface_1.fn.i0'`), under `tracer.iter` too |
 | `AttributeError` | assigning a read-only value (`next_token_probs`, `input_size`, `states`, any `DerivedEProperty`); a mixture's `num_experts` / `top_k` / `SCORING` on a dense block |
-| `RuntimeError` (torch view error) | an in-place edit of a split view with grad on: GPT-2 / GPT-BigCode queries, MPT queries (and keys and values on a call without a cache), Mamba-1 / Mamba-2 kernel arguments; before the rotary, DBRX / GPT-NeoX queries and keys (CodeGen's with one head per `mp_num` group), JetMoE keys, latent attention's shared rope key |
+| `RuntimeError` (torch view error) | an in-place edit of a split view with grad on: GPT-2 / GPT-BigCode queries, MPT q/k/v, Mamba-1 / Mamba-2 kernel arguments; before the rotary, DBRX / GPT-NeoX queries and keys (CodeGen's with one head per `mp_num` group), JetMoE keys, latent attention's shared rope key |
 | `RuntimeError: Expected u.is_cuda()` | an unrouted Mamba-1 model on CPU with `mamba_ssm` installed |
 
 ## The 98 families, by what a recipe must survive
