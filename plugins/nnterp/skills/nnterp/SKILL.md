@@ -800,9 +800,11 @@ image-text-to-text wrappers (the family is the text model's: Llava resolves to `
 the wrappers table is in [references/vision.md](references/vision.md#which-wrappers).
 What a recipe must survive is grouped by quirk in
 [references/api-reference.md](references/api-reference.md); the full per-family table is
-nnterp's `docs/reference/families.md`. The `docs/...` paths these skills cite are in
-https://github.com/ndif-team/nnterp; the documentation site serves every page as Markdown,
-listed at https://ndif-team.github.io/nnterp/llms.txt.
+nnterp's `docs/reference/families.md`, and the encyclopedia
+(https://ndif-team.github.io/nnterp/encyclopedia/) has a page per family with its block
+drawn. The `docs/...` paths these skills cite are in https://github.com/ndif-team/nnterp;
+the documentation site serves every page as Markdown, listed at
+https://ndif-team.github.io/nnterp/llms.txt.
 
 A `model_type` with no family loads with the best-effort `nnterp.families.default` and a
 `UserWarning` (`nnterp has no family for model_type ...`): it serves `layer_output`, the

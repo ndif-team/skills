@@ -30,7 +30,7 @@ a GPT-2 block returns `(hidden_states,)` in 4.x and a plain tensor in 5, and its
 attention dropout went from `module.attn_dropout(...)` (source op
 `module_attn_dropout_0`) to `nn.functional.dropout(...)`
 (`nn_functional_dropout_0`). Anything that indexes `.output` or names a `.source`
-operation is version-bound — say which version a claim was verified on.
+operation is version-bound.
 
 ## Layout
 
