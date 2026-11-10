@@ -480,8 +480,8 @@ the future.
 - **Order.** Read the pattern before `model.logits`; read `attention_keys` /
   `attention_queries` / `attention_values` before the pattern (and the queries and
   keys before the rotary before them) and `attention_head_outputs` after it. On
-  Falcon read the values before the queries (without alibi; queries, keys, values in
-  that order with it).
+  Falcon, BLOOM and MPT the keys and values come after the queries where the call has
+  a cache (on Falcon without alibi and without one, the values first).
 - **Batches are left-padded**: a padded row's pattern has zero columns at its pad
   positions, its real tokens start later, and its pad *query* rows attend uniformly
   over all keys; mask query rows with `attention_mask` before a per-row metric.

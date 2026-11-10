@@ -102,7 +102,8 @@ with the reason (`support()` says which):
 
 | block | families | what changes |
 |---|---|---|
-| sandwich | `gemma2`, `gemma3_text`, `gemma4_text`, `gemma4_unified_text`, `afmoe` | `layer_mid` and `mlp_norm_output` read the MLP's own pre-norm (`pre_feedforward_layernorm`), since `post_attention_layernorm` follows the attention |
+| sandwich | `gemma2`, `gemma3_text`, `gemma4_text`, `gemma4_unified_text`, `afmoe` | `layer_mid` and `mlp_norm_output` read the MLP's own pre-norm (`pre_feedforward_layernorm`), since `post_attention_layernorm` follows the attention; on a Gemma-4 mixture block (26B-A4B) the router and the experts norm `layer_mid` themselves, so `mlp_norm_output` and `mlp_input` are the dense MLP's input alone: edit `layer_mid` to change what the whole feed-forward reads |
+| two experts on the block | `granitemoeshared`, `granitemoe_swa`, `granitemoehybrid` | the block calls the routed experts and a shared expert, siblings, with the norm's output, so `mlp_input` is that output (the same tensor as `mlp_norm_output`) and a write reaches both |
 | post-norm only | `olmo2`, `olmo3`, `exaone4`, `flex_olmo`; OLMo-Hybrid's attention blocks | `layer_mid` is `mlp.input`; the two norm outputs are unavailable (`POST_NORM_ATTENTION`, `POST_NORM_MLP`: the sublayer reads the stream itself) |
 | parallel | `gptj`, `codegen`, `cohere`, `cohere2`, `phi`, `falcon`; `gpt_neox` and `stablelm` with `use_parallel_residual` | `layer_mid` unavailable (`PARALLEL`); `mlp_norm_output` is the one norm's output (Falcon's 40B layout: `ln_mlp`) |
 | OPT, XGLM | | the pre-MLP norm is the block's `final_layer_norm`; OPT holds the stream flattened there, so `layer_mid` and `mlp_norm_output` are `FlatResidual` (`[tokens, hidden_size]`); `mlp_input` unavailable (no `mlp` module) |

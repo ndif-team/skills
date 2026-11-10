@@ -288,9 +288,7 @@ assert not torch.allclose(clean_probs, knocked)
 
 ### Every head of a block in one forward
 
-One invoke per head, each zeroing its own head's output. On BLOOM and XGLM the attention
-interior is served off `[batch * num_heads, ...]` tensors, so an edit in one invoke reaches
-every invoke's rows and this sweep gives wrong numbers there: run one trace per head.
+One invoke per head, each zeroing its own head's output.
 
 ```python
 rows = []

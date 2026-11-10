@@ -140,8 +140,9 @@ with model.trace(prompt):
 When code decides which values to read or edit (a list of sites, a sweep over several
 values per block, a port of code that hooked modules in its own order), sort the sites by
 `model.rank(name, layer)` before the trace instead of keeping a table of what comes first:
-that table differs per family (on Falcon without alibi the values come before the queries;
-a mixture's shared expert runs first on some families and last on others), and `rank` is
+that table differs per family (Falcon's keys and values come after its queries where the call
+has a key/value cache, and its values first where it has none; a mixture's shared expert runs
+first on some families and last on others), and `rank` is
 measured on the loaded checkpoint. `model.order(i)` lists block `i`'s values in that order,
 equal ranks sharing one location. Both are asked outside the trace, by `support()`'s
 dotted names; `rank` raises `Unavailable` for a value the checkpoint lacks:
@@ -180,20 +181,18 @@ names are unbound, so look for the warning when a saved name is missing. On a Ma
 `state_output` returns the next step's state ([references/recurrent-mixers.md](references/recurrent-mixers.md)).
 `skip_layers` consumes `layers[start].input`: read it first or not at all.
 
-**7. On BLOOM and XGLM an attention-interior edit in one invoke reaches every invoke.**
-Their interior is served off `[batch * num_heads, ...]` tensors, so a one-forward sweep with
-one invoke per head gives wrong numbers there (and on XGLM a read returns the whole batch):
-run one trace per head. On the other families two invokes of one trace can both read and
-edit `attention_probabilities` and `attention_scores`; at one location the invoke written
-first is served first, so an empty `tracer.invoke()` after an invoke that edits the scores
-reads the edited pattern.
+**7. Two invokes of one trace each read and edit their own rows of every attention-interior
+value**, on every family (BLOOM, XGLM and Falcon with alibi read theirs where the batch still
+leads, before the forward flattens batch and heads for its `bmm`). At one location the invoke
+written first is served first, so an empty `tracer.invoke()` after an invoke that edits the
+scores reads the edited pattern.
 
 **8. Overwriting `attention_scores` lifts the causal mask.** The scores are read
 after masking, so `scores[:] = 0` attends to the future. Add to them
 (`scores[..., k] += c`, or `-inf` to block a key) instead.
 
-**9. GPT-2's and GPT-BigCode's queries, and MPT's queries, keys and values, are split
-views torch will not edit in place**; so are Mamba-1's, and before the rotary CodeGen's,
+**9. GPT-2's and GPT-BigCode's queries, and MPT's queries (and its keys and values on a call
+without a cache), are split views torch will not edit in place**; so are Mamba-1's, and before the rotary CodeGen's,
 DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent attention's shared rope
 key. torch refuses an in-place edit with grad on; assign instead (or edit under
 `torch.no_grad()`):
@@ -326,7 +325,7 @@ neither attention nor MLP.
 | `layer_input` | `layers[i]` | `Residual` | the stream entering the block, `layers[i].input` |
 | `attention_norm_output` | `layers[i]` | `Residual` | the normed stream the attention is called with (`input_layernorm.output`) |
 | `layer_mid` | `layers[i]` | `Residual` | the stream between the sublayers, `layer_input + attention_output`; none on a parallel block |
-| `mlp_norm_output`, `mlp_input` | `layers[i]` | `Residual` | the MLP's pre-norm output; what the MLP is called with (`mlp.input`) |
+| `mlp_norm_output`, `mlp_input` | `layers[i]` | `Residual` | the MLP's pre-norm output; what the MLP is called with (`mlp.input`; the norm's output on GraniteMoE-Shared/-SWA/-Hybrid, whose two experts are both called with it; the dense MLP's input alone on a Gemma-4 mixture block) |
 | `layer_output` | `layers[i]` | `Residual` | the stream leaving the block; `Streams` on DeepSeek-V4 (as are `layer_input` and `layer_mid` there) |
 | `attention_output` | `self_attn` / `linear_attn` | `Residual` | the contribution |
 | `attention_premix` | `self_attn` | `HeadOutputs` | `o_proj.input` split by head, after any gate; any `attn_implementation` |
