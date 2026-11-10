@@ -799,7 +799,7 @@ size and `project_on_vocab` functions too. Which shipped families define which:
 |---|---|---|
 | `needs_eager(envoy)` | `nnterp.components` | the sdpa reason, or `None` under `attn_implementation="eager"` |
 | `interface_reason(envoy)` | `nnterp.components` | `envoy.off_interface()`; the `unavailable=` every base interface value takes |
-| `Attention.off_interface(self)` | method | one decision for every interface value; override it (GPT-2) rather than each value |
+| `Attention.off_interface(self)` | method | one decision for every interface value; override it (a vision tower's `no_tower_run`) rather than each value |
 | `rotary_reason(envoy)` | `nnterp.components` | `envoy.no_rotary()`; the `unavailable=` of the queries and keys before the rotary |
 | `Attention.no_rotary(self)` | method | why this block applies no rotary embedding, or `None`: what the two values before the rotary and `rotate` report; override it (GPT-2, BLOOM, SmolLM3) rather than each value |
 | `Attention.rotary_embedding(self, x, position_ids)` / `Attention.apply_rotary(self, x, embedding)` | methods | the `(cos, sin)` the block's rotary call is given, and the family's apply function: what `rotate` runs; override where the family rotates another way (GPT-J's sinusoid table, Granite-SWA's per-theta `rotary_embs`, Phi's `rotary_ndims` slice, Llama 4's complex `apply_rotary_emb`) |

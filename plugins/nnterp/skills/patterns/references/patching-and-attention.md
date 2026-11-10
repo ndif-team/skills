@@ -487,7 +487,8 @@ the future.
   over all keys; mask query rows with `attention_mask` before a per-row metric.
 - **Size.** A pattern is `heads * seq * seq` per block; index inside the trace and
   wrap read-only capture in `torch.no_grad()`.
-- **GPT-2 with `reorder_and_upcast_attn`**: `support()` reports the pattern
-  unavailable with the reason. GPT-J, BLOOM and MPT map it onto their own softmax
+- **GPT-2 with `reorder_and_upcast_attn`** (the `stanford-crfm` GPT-2s) calls its own
+  upcast attention under eager; the pattern is read there, the same tensor, and the
+  scores are float32. GPT-J, BLOOM and MPT map it onto their own softmax
   and need no eager flag; Falcon maps it onto whichever softmax `config.alibi`
   picks and needs eager.

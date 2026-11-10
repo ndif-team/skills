@@ -217,8 +217,11 @@ GPT-2's and GPT-BigCode's keys and values take an in-place edit, and it lands.
 **10. Recurrent mixers route kernels before the first trace.** On Mamba,
 Falcon-Mamba and Jamba with `mamba_ssm` installed, a CPU run crashes with
 `Expected u.is_cuda()` (even for `layer_output`) until
-`nnterp.route_kernels(model.family, "torch")`; on DeltaNet hybrids the per-token
-`state`/`states` need the same call; on Mamba-2 families `states` needs
+`nnterp.route_kernels(model.family, "torch")`, and without it `attention_head_outputs`,
+`state_output` and the per-token state still need that call (they are read inside the
+pure-torch kernels, which the unrouted forward reaches through transformers' dispatcher);
+on DeltaNet hybrids the per-token `state`/`states` need the same call; on Mamba-2 families
+it is needed only with `mamba_ssm` installed, and `states` needs
 `nnterp.chunk_per_token(model)`.
 
 **11. Hybrids: decide `self_attn` vs `linear_attn` outside the trace**, with
@@ -324,7 +327,7 @@ neither attention nor MLP.
 | `attention_norm_output` | `layers[i]` | `Residual` | the normed stream the attention is called with (`input_layernorm.output`) |
 | `layer_mid` | `layers[i]` | `Residual` | the stream between the sublayers, `layer_input + attention_output`; none on a parallel block |
 | `mlp_norm_output`, `mlp_input` | `layers[i]` | `Residual` | the MLP's pre-norm output; what the MLP is called with (`mlp.input`) |
-| `layer_output` | `layers[i]` | `Residual` | the stream leaving the block; `Streams` on DeepSeek-V4 |
+| `layer_output` | `layers[i]` | `Residual` | the stream leaving the block; `Streams` on DeepSeek-V4 (as are `layer_input` and `layer_mid` there) |
 | `attention_output` | `self_attn` / `linear_attn` | `Residual` | the contribution |
 | `attention_premix` | `self_attn` | `HeadOutputs` | `o_proj.input` split by head, after any gate; any `attn_implementation` |
 | `mlp_activation`, `mlp_neurons` | `mlp` | `Neurons` | `act_fn.output`; `down_proj.input` (`act(gate) * up` on a gated MLP, the activation on a plain one); none on a routed mixture |

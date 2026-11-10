@@ -123,8 +123,8 @@ ENVOYS = {<X>DecoderLayer: Layer, <X>Attention: Attention, <X>MLP: Mlp}
   parallel block, `POST_NORM_ATTENTION` / `POST_NORM_MLP` on a post-norm one (all three in
   `nnterp.components`).
 - **`Layer`, `Attention`, `Mlp`** exist even when nothing changes (the suite asserts the
-  block envoys are exactly the family's classes). Override `off_interface()` for a config
-  flag that routes the attention off transformers' interface (GPT-2), and `no_rotary()` for
+  block envoys are exactly the family's classes). Override `off_interface()` for another
+  reason the interface does not run (a vision tower no image reached), and `no_rotary()` for
   a block that applies no rotary embedding (absolute positions, ALiBi, a NoPE block: GPT-2,
   BLOOM, SmolLM3's `no_rope_layers`), the one place the queries and keys before the rotary
   and `Attention.rotate` ask; redefine values for
@@ -186,7 +186,7 @@ Keep the name, the layout annotation and the description; change only the locati
 | adds the residual inside the module | `@EProperty("source.dropout_add_0.input", ...)` | bloom.py |
 | its own attention arithmetic | `EProperty("source.<op>.inputs", select=n)` / `("source.<op>.output", select=i)`; pattern at the dropout after its softmax | bloom.py, falcon.py, gptj.py |
 | has no such value | `attention_scores = unavailable(NOT_ON_INTERFACE)` | DBRX `expert_outputs` (`unavailable(...)`) |
-| routes off the interface on a config flag | `def off_interface(self): return "<reason>" if flag else super().off_interface()` | gpt2.py |
+| calls another function in the interface's place on a config flag | key functions: `EProperty(at_call("inputs"), select=argument(n))`, the call (and the argument positions) picked from the module's flag; `attention_call` evaluates them, so `interface` follows | gpt2.py (`reorder_and_upcast_attn`) |
 | maps the queries, keys, values and head outputs onto one call of its own (`_attn(q, k, v, mask, ...)`) | `EProperty("source.<call>.inputs", select=n)` for the three and `("source.<call>.output", select=0)` for the head outputs; `interface` then re-runs that call, and is `OWN_ARITHMETIC` otherwise | gptj.py, gpt_neo.py, codegen.py |
 | applies no rotary embedding, on every block or on some | `def no_rotary(self): return "no rotary embedding: <why>"` (`"... on this block: ..."` where the module decides, `None` otherwise) | gpt2.py, bloom.py, smollm3.py |
 | fuses or transposes the value / output projection | override `value_weight(kv_head)` / `output_weight(head)` on the `Attention`, reading the projection through `projection_weight(self, name)` (which keeps the refusal and the PEFT adapters) and indexing a view: `projection_weight(self, "qkv_proj")[self.num_heads * self.head_dim:].unflatten(0, (2, self.num_kv_heads, self.head_dim))[1, kv_head]` | phi3.py, gpt2.py, gpt_neox.py, falcon.py |

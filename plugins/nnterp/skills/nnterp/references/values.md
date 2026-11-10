@@ -107,7 +107,7 @@ with the reason (`support()` says which):
 | parallel | `gptj`, `codegen`, `cohere`, `cohere2`, `phi`, `falcon`; `gpt_neox` and `stablelm` with `use_parallel_residual` | `layer_mid` unavailable (`PARALLEL`); `mlp_norm_output` is the one norm's output (Falcon's 40B layout: `ln_mlp`) |
 | OPT, XGLM | | the pre-MLP norm is the block's `final_layer_norm`; OPT holds the stream flattened there, so `layer_mid` and `mlp_norm_output` are `FlatResidual` (`[tokens, hidden_size]`); `mlp_input` unavailable (no `mlp` module) |
 | gated merges | `doge`, `zaya` | the values are the real boundaries, but a gate scales what the block adds, so `layer_mid != layer_input + attention_output` |
-| hyper-connections | `deepseek_v4` | all four unavailable: each sublayer reads a mix of the streams |
+| hyper-connections | `deepseek_v4` | `attention_norm_output`, `mlp_norm_output` and `mlp_input` are what each sublayer is called with, its norm's output on a mix of the streams (`Residual`); `layer_mid` is the streams between the sublayers (`Streams`), read at the block's own binding, so a write reaches both the MLP's hyper-connection and the mixing after it |
 | one sublayer | `mamba`, `mamba2`, `falcon_mamba`, `nemotron_h` | the boundaries the block has no modules for are unavailable, with the reason |
 
 The three reasons are strings exported from `nnterp.components` (`PARALLEL`,
@@ -158,7 +158,8 @@ A routed mixture of experts has no single activation or down projection: on a `M
 block both are unavailable with `routed experts; read per-expert via the Moe component`
 ([mixture-of-experts.md](mixture-of-experts.md)); dense blocks beside the mixtures serve
 them. A family that aliases none of the three names reports `no o_proj module on this
-attention` (DeepSeek-V4's low-rank projection, JetMoE's per-expert one). Zeroing neuron
+attention` (JetMoE's per-expert projection); DeepSeek-V4's `attention_premix` is the input of
+the first of its two output matrices, `o_a_proj`, split by head. Zeroing neuron
 `n` everywhere is `mlp_neurons[..., n] = 0`, on every family with a dense MLP.
 
 ## Tensor blocks and tuple blocks
@@ -193,6 +194,9 @@ The same holds for `attention_output` on an attention module returning
 `(attn_output, attn_weights)`: the value is the first tensor, an assignment
 rewraps it. Skip a tuple block with `skip_layers` or `Layer.skip_with`, not
 nnsight's `.skip(tensor)`, which hands a bare tensor where a tuple is expected.
+Where the second element is state the next block reads (ZAYA's router state, GLM-5's
+key selection), a skipped block hands on the state it received, as it hands on the
+stream.
 
 ## Reading, editing in place, assigning
 
@@ -352,8 +356,10 @@ term, and the stream term rescales and biases what came before. Unroll it the wa
 the Doge loop does.
 
 **DeepSeek-V4**: parallel streams. The residual between blocks is `hc_mult` (4)
-copies of the stream: `layer_output` and `layers[i].input` are `[batch, seq,
-streams, hidden]` (layout `Streams`), the block's own tensor, so writes land.
+copies of the stream: `layer_output`, `layers[i].input` and `layer_mid` (the `h`
+below) are `[batch, seq, streams, hidden]` (layout `Streams`), the block's own
+tensors, so writes land. `attention_norm_output`, `mlp_norm_output` and `mlp_input`
+are what each sublayer is called with, `[batch, seq, hidden]`.
 Each sublayer reads a weighted collapse and returns `[batch, seq, hidden]`;
 `attention_output` / `mlp_output` are those outputs, unscaled. Four values on the
 block carry the hyper-connection weights, float32 and writable:
@@ -508,7 +514,7 @@ envoy that serves it and re-exported by `nnterp.components` (the root's
 `Logits`, `NextTokenProbs`, `Tokens` from `nnterp.standardized`). `value.layout` is
 that alias itself, `value.dims` its axes, and the envoy repr prints each value as
 `(name) -> Layout [axes]: description`. Layouts differ between values, not
-between families, with four exceptions: `layer_output` on DeepSeek-V4 (`Streams`),
+between families, with four exceptions: `layer_output` and `layer_mid` on DeepSeek-V4 (`Streams`),
 `linear_attn.decays` on Kimi-Linear (`ChannelGates`), OPT's `layer_mid` and
 `mlp_norm_output` (`FlatResidual`), and `attention_keys_prerope` under latent attention
 (`SharedRopeKeys`).

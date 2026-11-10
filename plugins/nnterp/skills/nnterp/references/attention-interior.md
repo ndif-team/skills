@@ -540,10 +540,11 @@ under `torch.no_grad()`. On GPT-2 and GPT-BigCode only the queries refuse: their
 and values take an in-place edit, and it lands. On MPT the queries, keys and values all
 refuse. The scores, the pattern and the head outputs accept in-place edits on both (GPT-2's
 head outputs are a transposed view, which torch allows). A GPT-2 checkpoint
-with `reorder_and_upcast_attn` set takes GPT-2's own upcast path, where the
-interface never runs; all six then report
-`this checkpoint sets reorder_and_upcast_attn, which takes GPT-2's own upcast
-attention path`. `openai-community/gpt2` does not set it.
+with `reorder_and_upcast_attn` set (the `stanford-crfm` GPT-2s) calls GPT-2's own
+`_upcast_and_reordered_attn(query, key, value, attention_mask)` under eager in the
+interface's place; the six values and `interface` are read at that call, and the
+scores there are float32 whatever the model's dtype. `openai-community/gpt2` does
+not set it.
 
 ### Grouped-query attention: two head widths
 

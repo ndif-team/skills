@@ -25,7 +25,11 @@ transformers dispatches each mixer to a compiled kernel when one is installed
 (`mamba_ssm`, `flash-linear-attention`, `causal-conv1d`); those have no Python
 source, so nothing inside them is readable, and `mamba_ssm`'s do not run on CPU
 at all: an unrouted Mamba-1 model on CPU crashes with `Expected u.is_cuda()` even
-for a `layer_output` read. `route_kernels(family, "torch")` binds the family's
+for a `layer_output` read. Without the package, transformers binds the kernel names to
+its dispatcher, which calls the pure-torch functions: Mamba-2 reads through it and needs
+no routing, while Mamba-1's `attention_head_outputs`, `state_output` and per-token state
+are read inside the kernels' own bodies and need routing on every machine (`support()`
+says so). `route_kernels(family, "torch")` binds the family's
 kernel names to transformers' pure-torch functions, **process-wide**; call it
 before the layer's first trace (a forward already instrumented keeps its
 kernel), with the family module before loading or `model.family` after.

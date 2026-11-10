@@ -112,16 +112,16 @@ The guards:
   `{block: reason}`. Guard on it, not on `hasattr`, which raises. Common reasons in a
   sweep: `no self_attn module` (a hybrid's linear blocks; a module no block has,
   OPT's `mlp`, has no key at all, so `.get` it),
-  `runs 'sdpa'; load with attn_implementation='eager'`, GPT-2's
-  `reorder_and_upcast_attn`, and a DeltaNet interior with `flash-linear-attention`
-  installed (no Python source; `attention_output` stays available).
+  `runs 'sdpa'; load with attn_implementation='eager'`, and a DeltaNet interior with
+  `flash-linear-attention` installed (no Python source; `attention_output` stays available).
 - **Hybrids.** A block has either `self_attn` or `linear_attn`. `layer_output`,
   `mlp_output` and the mixer's `attention_output` exist on both kinds, so most
   experiments never branch. When one must, branch outside the trace.
 - **Recurrent-only families.** Mamba and Mamba-2 have no `self_attn` and no `mlp`
   anywhere (`pattern_blocks` is empty, `has_mlp` is `False`), and with `mamba_ssm`
   installed need `nnterp.route_kernels(model.family, "torch")` before the first trace
-  even for `layer_output` on CPU.
+  even for `layer_output` on CPU; Mamba needs it on every machine for its head outputs
+  and state.
 - **Non-additive blocks.** Zeroing a contribution is still a valid ablation on
   Gemma-4, Doge, ZAYA and DeepSeek-V4; attributing by the plain sum is not (the
   `nnterp` skill's `references/values.md`).
