@@ -192,10 +192,11 @@ after masking, so `scores[:] = 0` attends to the future. Add to them
 (`scores[..., k] += c`, or `-inf` to block a key) instead.
 
 **9. GPT-2's and GPT-BigCode's queries, and MPT's queries (and its keys and values on a call
-without a cache), are split views torch will not edit in place**; so are Mamba-1's, and before the rotary CodeGen's,
-DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent attention's shared rope
-key. torch refuses an in-place edit with grad on; assign instead (or edit under
-`torch.no_grad()`):
+without a cache), are split views torch will not edit in place**; so are Mamba-1's, and
+before the rotary DBRX's and GPT-NeoX's queries and keys (CodeGen's only on a checkpoint
+with one head per `mp_num` group of four, which no released CodeGen is), JetMoE's keys and
+latent attention's shared rope key. torch refuses an in-place edit with grad on; assign
+instead (or edit under `torch.no_grad()`):
 
 <!-- test: expect-error RuntimeError -->
 ```python

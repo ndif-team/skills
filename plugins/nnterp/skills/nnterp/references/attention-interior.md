@@ -216,9 +216,11 @@ too: they are served on the text model's blocks. `support()` names the reason pe
 
 Assignment reaches the model on every family. An in-place edit does too, except where the
 value is a split view of one fused tensor and torch refuses it as it does GPT-2's queries
-(`RuntimeError: Output 0 of Select is a view and is being modified inplace`): CodeGen's,
-DBRX's and GPT-NeoX's queries and keys, JetMoE's keys, and latent attention's shared rope
-key. Assign there, or edit under `torch.no_grad()`.
+(`RuntimeError: Output 0 of Select is a view and is being modified inplace`): DBRX's and
+GPT-NeoX's queries and keys, CodeGen's on a checkpoint with one head per `mp_num` group of
+four (the tiny test checkpoint; every released CodeGen has more, and takes the edit),
+JetMoE's keys, and latent attention's shared rope key. Assign there, or edit under
+`torch.no_grad()`.
 
 ### `rotate` and the positions it is given
 
@@ -777,11 +779,13 @@ See [generation-and-helpers.md](generation-and-helpers.md).
   cache on most families; an assignment lasts one forward. To patch what chosen heads
   read without either, use `interface` on copies.
 - Never overwrite `attention_scores` wholesale (it holds the mask).
-- GPT-2's and GPT-BigCode's queries, MPT's queries, keys and values: assign, do not
+- GPT-2's and GPT-BigCode's queries, MPT's queries (and its keys and values on a call
+  without a cache): assign, do not
   edit in place (or edit under `torch.no_grad()`); GPT-2's and GPT-BigCode's keys and
   values take an in-place edit. The same before the rotary
-  for CodeGen's, DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent
-  attention's shared rope key.
+  for DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent attention's
+  shared rope key (and CodeGen's on a checkpoint with one head per `mp_num` group of
+  four; released CodeGens take the edit).
 - A query or key moved to another position or prompt is written to
   `attention_queries_prerope` / `attention_keys_prerope`, never to the rotated
   `attention_queries` / `attention_keys`, which carry the position they ran at.
