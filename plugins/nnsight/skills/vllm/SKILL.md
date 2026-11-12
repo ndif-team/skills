@@ -10,11 +10,12 @@ serialized onto each request, run against the real modules, and the saved values
 shipped back. You get PagedAttention, continuous batching, tensor parallelism and
 CUDA-graph replay (with `taps=`), and the same trace syntax.
 
-nnsight targets **vLLM 0.27.1 and its V1 engine**; from nnsight 0.8.2 the `vllm`
-extra pins `vllm>=0.27.1,<0.28`. On 0.8.1, pin `vllm==0.27.1` yourself: vLLM 0.32
-installs and imports, then taps stop firing after the prefill, with no error. nnsight sets
-`VLLM_USE_V2_MODEL_RUNNER=0` itself and refuses an engine started with it set to
-`1` (`NotImplementedError`: that runner is not instrumented).
+nnsight after 0.8.2 targets **vLLM 0.33**: the `vllm` extra pins
+`vllm>=0.33,<0.34`. That vLLM needs Python 3.11 or later, and its wheel is built
+for CUDA 13, so on an NVIDIA driver too old for CUDA 13 torch finds no GPU.
+nnsight 0.8.2 pins `vllm>=0.27.1,<0.28`; install the pair the extra gives you.
+Leave `VLLM_USE_V2_MODEL_RUNNER` unset: `0` selects a runner nnsight does not
+instrument, and the engine refuses to start (`vLLM chose its V1 model runner`).
 
 The examples use `HuggingFaceTB/SmolLM2-135M-Instruct`, a Llama-style trunk, so
 what they show about layer outputs holds for Llama, Qwen and Mistral.
@@ -197,9 +198,9 @@ Trace-level kwargs fill in what an invoke did not name; anything an invoke names
 wins, including vLLM's own defaults (`temperature=1.0`, `max_tokens=16`).
 Anything `vllm.SamplingParams` accepts works (`top_p`, `top_k`, `seed`, `stop`,
 `logprobs`, `lora_request`, ...). `n=k` fans one prompt into `k` sequences: the
-block runs once per sequence, saved names come back as a list per sequence, and a
-saved container comes back as a list of `k` containers matching
-`result.outputs[i]`.
+block runs once per sequence, so every saved name comes back as a list of `k`
+values in sequence order. That includes `tracer.result`: `result[i].outputs`
+holds sequence `i` alone.
 
 <!-- test: gpu requires vllm -->
 ```python
@@ -209,7 +210,8 @@ with model.trace("My favourite colour is", temperature=0.9, seed=0, n=3, max_tok
         caps.append(model.model.layers[8].output[1][-1].clone())
     result = tracer.result.save()
 
-assert len(caps) == 3 and len(caps[1]) == 4 and len(result.outputs) == 3
+assert len(caps) == 3 and len(caps[1]) == 4
+assert len(result) == 3 and [o.index for o in result[1].outputs] == [1]
 ```
 
 ## Sweeps: `model.edit()` and the per-invoke cost
@@ -318,10 +320,8 @@ To ablate a layer without that risk, write its output instead.
   `tensor_parallel_size`. A `pipeline_parallel_size=2` engine builds and then fails
   every trace with `RuntimeError: UnknownPersistentIdError:
   Module:model.model.layers.12.self_attn`, naming a layer on the other stage.
-- **Data parallelism and Ray's compiled-graph executor** — `data_parallel_size > 1`
-  raises `NotImplementedError` when the model is built (use `tensor_parallel_size`,
-  or one `VLLM` per GPU); `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0` is refused as the
-  engine starts (vLLM's default Ray executor works).
+- **Data parallelism** — `data_parallel_size > 1` raises `NotImplementedError`
+  when the model is built (use `tensor_parallel_size`, or one `VLLM` per GPU).
 
 ## Errors and warnings
 

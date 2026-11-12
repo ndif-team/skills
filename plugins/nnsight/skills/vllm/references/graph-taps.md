@@ -61,11 +61,9 @@ What changes under graphs:
 - **Steer inside the `iter` loop.** An edit written before the loop fires on the
   prefill only.
 - **`torch.compile` is off** for a tapped engine; the switch is process-wide.
-- **Hybrid and recurrent trunks replay graphs for decode only.** On a model vLLM
-  reports as hybrid or attention-free (Qwen3.5, Qwen3.6, Mamba, ...) a tapped
-  engine pins `cudagraph_mode="FULL_DECODE_ONLY"` (a full graph over a
-  gated-delta-net layer miscomputes); tapped generation matches eager exactly.
-  Your own `compilation_config` wins.
+- **Tapped graphs are piecewise.** A tapped engine sets
+  `cudagraph_mode="PIECEWISE"`; a `compilation_config` that asks for full graphs
+  fails the engine build.
 
 <!-- test: gpu requires vllm expect-error RuntimeError -->
 ```python
@@ -76,8 +74,8 @@ with model.trace(prompt, temperature=0.0, max_tokens=1):
 ## Measured
 
 Llama-3.1-8B and -70B, bf16, 512-token prompt, 128 new tokens, greedy, capturing
-one layer every step. Tokens per second, with taps' share of vanilla in
-parentheses:
+one layer every step, on vLLM 0.27.1. Tokens per second, with taps' share of
+vanilla in parentheses:
 
 | | vanilla | eager | taps |
 |---|---:|---:|---:|
@@ -88,4 +86,6 @@ parentheses:
 
 An eager engine's rate depends on the host's spare CPU (a Python round trip per
 module call), so that column is a share, not a rate; taps keep the graph, and the
-graph is what scales — declare them whenever the GPUs outnumber one.
+graph is what scales — declare them whenever the GPUs outnumber one. On vLLM 0.33
+piecewise graphs cost taps more: Llama-3.2-1B at 32 concurrent requests keeps 77%
+of vanilla with taps and 39% eager.

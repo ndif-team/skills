@@ -113,7 +113,7 @@ assert attention == [3, 7, 11, 15, 19, 23]
 ```
 
 The recurrent state lives in vLLM's state cache, not in any module output, so it
-is not a location; the layer outputs are. A tapped engine on these models pins
-decode-only graphs and matches eager exactly — [graph taps](graph-taps.md).
+is not a location; the layer outputs are. A tapped engine on these models
+matches eager exactly — [graph taps](graph-taps.md).
 Vision-language checkpoints load and trace on text prompts; image inputs are
 not accepted.
