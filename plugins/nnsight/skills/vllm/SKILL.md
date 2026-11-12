@@ -10,12 +10,12 @@ serialized onto each request, run against the real modules, and the saved values
 shipped back. You get PagedAttention, continuous batching, tensor parallelism and
 CUDA-graph replay (with `taps=`), and the same trace syntax.
 
-nnsight after 0.8.2 targets **vLLM 0.33**: the `vllm` extra pins
-`vllm>=0.33,<0.34`. That vLLM needs Python 3.11 or later, and its wheel is built
-for CUDA 13, so on an NVIDIA driver too old for CUDA 13 torch finds no GPU.
-nnsight 0.8.2 pins `vllm>=0.27.1,<0.28`; install the pair the extra gives you.
-Leave `VLLM_USE_V2_MODEL_RUNNER` unset: `0` selects a runner nnsight does not
-instrument, and the engine refuses to start (`vLLM chose its V1 model runner`).
+nnsight targets **vLLM 0.33**. Install the pair with `pip install "nnsight[vllm]"`,
+which pins `vllm>=0.33,<0.34`. That vLLM needs Python 3.11 or later, and its
+wheel is built for CUDA 13, so on an NVIDIA driver too old for CUDA 13 torch
+finds no GPU. Leave `VLLM_USE_V2_MODEL_RUNNER` unset: `0` selects a runner nnsight
+does not instrument, and the engine refuses to start (`vLLM chose its V1 model
+runner`).
 
 The examples use `HuggingFaceTB/SmolLM2-135M-Instruct`, a Llama-style trunk, so
 what they show about layer outputs holds for Llama, Qwen and Mistral.
@@ -29,7 +29,7 @@ import nnsight
 from nnsight.modeling.vllm import VLLM
 
 model = VLLM("HuggingFaceTB/SmolLM2-135M-Instruct", dispatch=True,
-             gpu_memory_utilization=0.2, max_model_len=1024, enable_prefix_caching=False)
+             gpu_memory_utilization=0.2, max_model_len=1024)
 
 with model.trace("The Eiffel Tower is in the city of", temperature=0.0, max_tokens=1):
     out = model.model.layers[12].output
@@ -87,7 +87,6 @@ eagerly, serving every location, unless you declare
 any `tensor_parallel_size` (notebooks are exempt). Without it the engine's spawned
 process re-imports your module and dies with `An attempt has been made to start a
 new process before the current process has finished its bootstrapping phase`.
-Pass `enable_prefix_caching=False` whenever you will `model.edit()`.
 
 ## Per-step values and generation
 
@@ -268,16 +267,15 @@ assert "score" in both.saves and "score" not in only_unnamed.saves and "score" i
 model.clear_edits()
 ```
 
-Prefix caching must be off for an edit: a cached token gets no forward pass, so
-the edit silently sees fewer rows than the prompt has (a trace forces its own
-recompute). After `edit.clear()` an output has no `.saves` attribute at all.
+Prefix caching is off by default, and an edit needs it off: a cached token gets
+no forward pass, so the edit silently sees fewer rows than the prompt has (a trace
+forces its own recompute). After `edit.clear()` an output has no `.saves` attribute at all.
 `tracer.result.saves` on a traced request carries the edit's values only.
 
 ## Graph taps, serving, parallelism, architectures
 
 - **[Graph taps](references/graph-taps.md)** — `taps=[...]` keeps CUDA-graph replay
-  and serves only the named locations, at 91–96% of plain vLLM's throughput;
-  edits land in place, clone what you keep.
+  and serves only the named locations; edits land in place, clone what you keep.
 - **[Serving](references/serving.md)** — `nnsight-serve`, GPU-less clients with
   `trace(..., serve=url)` and `edit(serve=url)`, the async engine, and what the
   server is not (an OpenAI endpoint).
@@ -333,6 +331,8 @@ a locally defined class is that request's `RuntimeError`.
 so `warnings.catch_warnings()` records nothing. A failure while the engine builds
 (a bad `taps=` entry included) arrives as `RuntimeError: Engine core initialization
 failed`; the real message is in the `(EngineCore pid=...)` log lines above it.
+If your script is killed (a timeout, `kill -9`), that EngineCore process can
+outlive it and keep the GPU memory: kill the pid `nvidia-smi` lists.
 
 ## Choosing
 
