@@ -1,6 +1,6 @@
 ---
 name: vllm
-description: Run nnsight interventions inside the vLLM inference engine — continuous batching, tensor parallelism, CUDA-graph taps, async streaming, engine-wide edit() and nnsight-serve. Use for throughput, many concurrent prompts, streamed tokens, or a served engine; for a sharded model that needs gradients, .source or the full TransformersModel API, use the tensor-parallel skill instead. Covers flat [tokens, hidden] rows, the (hidden, residual) layer pair, live buffers, model.logits/model.samples, one prompt per invoke, model.edit() sweeps, taps, and why .skip() can kill the engine.
+description: Run nnsight interventions inside the vLLM inference engine — continuous batching, tensor parallelism, CUDA-graph taps, async streaming, engine-wide edit() and nnsight-serve. Use for throughput, many concurrent prompts, streamed tokens, or a served engine; for a sharded model that needs gradients, .source or the full TransformersModel API, use the tensor-parallel skill instead. Covers flat [tokens, hidden] rows, the (hidden, residual) layer pair, live buffers, model.logits/model.samples, one prompt per invoke, model.edit() sweeps, taps, LoRA adapters, and why .skip() can kill the engine.
 ---
 
 # vLLM
@@ -10,11 +10,12 @@ serialized onto each request, run against the real modules, and the saved values
 shipped back. You get PagedAttention, continuous batching, tensor parallelism and
 CUDA-graph replay (with `taps=`), and the same trace syntax.
 
-nnsight targets **vLLM 0.27.1 and its V1 engine**; from nnsight 0.8.2 the `vllm`
-extra pins `vllm>=0.27.1,<0.28`. On 0.8.1, pin `vllm==0.27.1` yourself: vLLM 0.32
-installs and imports, then taps stop firing after the prefill, with no error. nnsight sets
-`VLLM_USE_V2_MODEL_RUNNER=0` itself and refuses an engine started with it set to
-`1` (`NotImplementedError`: that runner is not instrumented).
+nnsight targets **vLLM 0.33**. Install the pair with `pip install "nnsight[vllm]"`,
+which pins `vllm>=0.33,<0.34`. That vLLM needs Python 3.11 or later, and its
+wheel is built for CUDA 13, so on an NVIDIA driver too old for CUDA 13 torch
+finds no GPU. Leave `VLLM_USE_V2_MODEL_RUNNER` unset: `0` selects a runner nnsight
+does not instrument, and the engine refuses to start (`vLLM chose its V1 model
+runner`).
 
 The examples use `HuggingFaceTB/SmolLM2-135M-Instruct`, a Llama-style trunk, so
 what they show about layer outputs holds for Llama, Qwen and Mistral.
@@ -28,7 +29,7 @@ import nnsight
 from nnsight.modeling.vllm import VLLM
 
 model = VLLM("HuggingFaceTB/SmolLM2-135M-Instruct", dispatch=True,
-             gpu_memory_utilization=0.2, max_model_len=1024, enable_prefix_caching=False)
+             gpu_memory_utilization=0.2, max_model_len=1024)
 
 with model.trace("The Eiffel Tower is in the city of", temperature=0.0, max_tokens=1):
     out = model.model.layers[12].output
@@ -86,7 +87,6 @@ eagerly, serving every location, unless you declare
 any `tensor_parallel_size` (notebooks are exempt). Without it the engine's spawned
 process re-imports your module and dies with `An attempt has been made to start a
 new process before the current process has finished its bootstrapping phase`.
-Pass `enable_prefix_caching=False` whenever you will `model.edit()`.
 
 ## Per-step values and generation
 
@@ -197,9 +197,9 @@ Trace-level kwargs fill in what an invoke did not name; anything an invoke names
 wins, including vLLM's own defaults (`temperature=1.0`, `max_tokens=16`).
 Anything `vllm.SamplingParams` accepts works (`top_p`, `top_k`, `seed`, `stop`,
 `logprobs`, `lora_request`, ...). `n=k` fans one prompt into `k` sequences: the
-block runs once per sequence, saved names come back as a list per sequence, and a
-saved container comes back as a list of `k` containers matching
-`result.outputs[i]`.
+block runs once per sequence, so every saved name comes back as a list of `k`
+values in sequence order. That includes `tracer.result`: `result[i].outputs`
+holds sequence `i` alone.
 
 <!-- test: gpu requires vllm -->
 ```python
@@ -209,7 +209,8 @@ with model.trace("My favourite colour is", temperature=0.9, seed=0, n=3, max_tok
         caps.append(model.model.layers[8].output[1][-1].clone())
     result = tracer.result.save()
 
-assert len(caps) == 3 and len(caps[1]) == 4 and len(result.outputs) == 3
+assert len(caps) == 3 and len(caps[1]) == 4
+assert len(result) == 3 and [o.index for o in result[1].outputs] == [1]
 ```
 
 ## Sweeps: `model.edit()` and the per-invoke cost
@@ -266,19 +267,21 @@ assert "score" in both.saves and "score" not in only_unnamed.saves and "score" i
 model.clear_edits()
 ```
 
-Prefix caching must be off for an edit: a cached token gets no forward pass, so
-the edit silently sees fewer rows than the prompt has (a trace forces its own
-recompute). After `edit.clear()` an output has no `.saves` attribute at all.
+Prefix caching is off by default, and an edit needs it off: a cached token gets
+no forward pass, so the edit silently sees fewer rows than the prompt has (a trace
+forces its own recompute). After `edit.clear()` an output has no `.saves` attribute at all.
 `tracer.result.saves` on a traced request carries the edit's values only.
 
 ## Graph taps, serving, parallelism, architectures
 
 - **[Graph taps](references/graph-taps.md)** — `taps=[...]` keeps CUDA-graph replay
-  and serves only the named locations, at 91–96% of plain vLLM's throughput;
-  edits land in place, clone what you keep.
+  and serves only the named locations; edits land in place, clone what you keep.
 - **[Serving](references/serving.md)** — `nnsight-serve`, GPU-less clients with
   `trace(..., serve=url)` and `edit(serve=url)`, the async engine, and what the
   server is not (an OpenAI endpoint).
+- **[LoRA adapters](references/lora.md)** — `enable_lora=True`, `lora_request=` on a
+  trace or an invoke, and why to load an adapter with `add_lora` first: a request
+  naming one the engine cannot load kills the engine.
 - **[Tensor parallelism, MoE, hybrid trunks](references/parallel-and-architectures.md)**
   — what is gathered and what is a shard, the logit lens via `logits_processor`
   (`model.lm_head(h)` raises), router logits as a `(logits, bias)` pair,
@@ -318,10 +321,8 @@ To ablate a layer without that risk, write its output instead.
   `tensor_parallel_size`. A `pipeline_parallel_size=2` engine builds and then fails
   every trace with `RuntimeError: UnknownPersistentIdError:
   Module:model.model.layers.12.self_attn`, naming a layer on the other stage.
-- **Data parallelism and Ray's compiled-graph executor** — `data_parallel_size > 1`
-  raises `NotImplementedError` when the model is built (use `tensor_parallel_size`,
-  or one `VLLM` per GPU); `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0` is refused as the
-  engine starts (vLLM's default Ray executor works).
+- **Data parallelism** — `data_parallel_size > 1` raises `NotImplementedError`
+  when the model is built (use `tensor_parallel_size`, or one `VLLM` per GPU).
 
 ## Errors and warnings
 
@@ -333,6 +334,8 @@ a locally defined class is that request's `RuntimeError`.
 so `warnings.catch_warnings()` records nothing. A failure while the engine builds
 (a bad `taps=` entry included) arrives as `RuntimeError: Engine core initialization
 failed`; the real message is in the `(EngineCore pid=...)` log lines above it.
+If your script is killed (a timeout, `kill -9`), that EngineCore process can
+outlive it and keep the GPU memory: kill the pid `nvidia-smi` lists.
 
 ## Choosing
 
