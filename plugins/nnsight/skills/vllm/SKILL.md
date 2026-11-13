@@ -1,6 +1,6 @@
 ---
 name: vllm
-description: Run nnsight interventions inside the vLLM inference engine — continuous batching, tensor parallelism, CUDA-graph taps, async streaming, engine-wide edit() and nnsight-serve. Use for throughput, many concurrent prompts, streamed tokens, or a served engine; for a sharded model that needs gradients, .source or the full TransformersModel API, use the tensor-parallel skill instead. Covers flat [tokens, hidden] rows, the (hidden, residual) layer pair, live buffers, model.logits/model.samples, one prompt per invoke, model.edit() sweeps, taps, and why .skip() can kill the engine.
+description: Run nnsight interventions inside the vLLM inference engine — continuous batching, tensor parallelism, CUDA-graph taps, async streaming, engine-wide edit() and nnsight-serve. Use for throughput, many concurrent prompts, streamed tokens, or a served engine; for a sharded model that needs gradients, .source or the full TransformersModel API, use the tensor-parallel skill instead. Covers flat [tokens, hidden] rows, the (hidden, residual) layer pair, live buffers, model.logits/model.samples, one prompt per invoke, model.edit() sweeps, taps, LoRA adapters, and why .skip() can kill the engine.
 ---
 
 # vLLM
@@ -279,6 +279,9 @@ forces its own recompute). After `edit.clear()` an output has no `.saves` attrib
 - **[Serving](references/serving.md)** — `nnsight-serve`, GPU-less clients with
   `trace(..., serve=url)` and `edit(serve=url)`, the async engine, and what the
   server is not (an OpenAI endpoint).
+- **[LoRA adapters](references/lora.md)** — `enable_lora=True`, `lora_request=` on a
+  trace or an invoke, and why to load an adapter with `add_lora` first: a request
+  naming one the engine cannot load kills the engine.
 - **[Tensor parallelism, MoE, hybrid trunks](references/parallel-and-architectures.md)**
   — what is gathered and what is a shard, the logit lens via `logits_processor`
   (`model.lm_head(h)` raises), router logits as a `(logits, bias)` pair,
