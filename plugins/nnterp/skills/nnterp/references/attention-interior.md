@@ -532,7 +532,7 @@ without a bias, to rounding with one; ones on a post-norm block; with
 
 `self_attn.no_head_weights()` is the one reason `value_weight` and `output_weight` raise:
 latent attention, DeepSeek-V4, Gemma-4 (`v_norm`), JetMoE (an output projection per expert),
-ZAYA (half of each value head from the previous token), the default family, a vision tower,
+ZAYA (its second value head holds the previous token's values), the default family, a vision tower,
 a model split tensor-parallel (`nnterp.components.SHARDED_WEIGHTS`), and `StandardizedVLLM`.
 
 ## Family caveats
