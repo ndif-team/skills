@@ -104,16 +104,17 @@ assert isinstance(raw, tuple) and wrong.shape == (10, 768)       # batch row 0, 
 
 **5. `attention_output` is the contribution, and not every block is a plain sum.**
 `layers[i].input + attention_output + mlp_output == layer_output` defines the two
-contributions on sequential, parallel and post-norm blocks (on Gemma-2/3,
-OLMo-2/3, EXAONE-4 they are the post-norms' outputs; on BLOOM/MPT the tensor
-before an add inside the module). Five families break the plain sum, and naive
-direct logit attribution there is wrong by orders of magnitude:
+contributions on sequential, parallel and post-norm blocks (on Gemma-2/3/4, GLM-4,
+AFMoE, HyperCLOVA X, OLMo-2/3, EXAONE-4, FlexOlmo and OLMo-Hybrid's attention blocks
+they are the post-norms' outputs; on BLOOM/MPT the tensor before an add inside the
+module). Five families break the plain sum, and naive direct logit attribution there
+is wrong by orders of magnitude:
 
 | family | the block | what a term from block `i` reaches the last stream as |
 |---|---|---|
 | Gemma-4 | `(input + attn + mlp [+ per_layer_output]) * layer_scalar` | times every `layer_scalar` from `i` on (0.005 to 0.99 each) |
 | Doge, ZAYA | the stream itself is rescaled per channel by each merge's learned parameters | times the gates of every later merge |
-| Granite line, HyperCLOVA X | contributions are the scaled terms (`* residual_multiplier`) | the plain sum holds; the head scales the logits (`logits_scaling`) |
+| Granite line, HyperCLOVA X | contributions are the scaled terms (`* residual_multiplier`) | the plain sum holds (not on GraniteMoE-SWA with a shared expert: [references/values.md](references/values.md)); the head scales the logits (`logits_scaling`) |
 | DeepSeek-V4 | `layer_output` is `[batch, seq, streams, hidden]` (`Streams`) | mixed by `attention_comb` / `mlp_comb`; only the stream mean is additive |
 
 The recipes (stream weights for Gemma-4 and Doge, the stream formula for
@@ -180,11 +181,11 @@ names are unbound, so look for the warning when a saved name is missing. On a Ma
 `state_output` returns the next step's state ([references/recurrent-mixers.md](references/recurrent-mixers.md)).
 `skip_layers` consumes `layers[start].input`: read it first or not at all.
 
-**7. On BLOOM and XGLM an attention-interior edit in one invoke reaches every invoke.**
-Their interior is served off `[batch * num_heads, ...]` tensors, so a one-forward sweep with
-one invoke per head gives wrong numbers there (and on XGLM a read returns the whole batch):
-run one trace per head. On the other families two invokes of one trace can both read and
-edit `attention_probabilities` and `attention_scores`; at one location the invoke written
+**7. Two invokes of one trace each read and edit their own rows of every attention-interior
+value**, on every family but XGLM's keys and values (BLOOM, XGLM and Falcon with alibi read
+theirs where the batch still leads, before the forward flattens batch and heads for its `bmm`;
+XGLM's keys and values are read flat after its cache update, so there a read returns every
+invoke's rows and an edit in one invoke reaches them all). At one location the invoke written
 first is served first, so an empty `tracer.invoke()` after an invoke that edits the scores
 reads the edited pattern.
 
@@ -193,10 +194,9 @@ after masking, so `scores[:] = 0` attends to the future. Add to them
 (`scores[..., k] += c`, or `-inf` to block a key) instead.
 
 **9. GPT-2's and GPT-BigCode's queries, and MPT's queries, keys and values, are split
-views torch will not edit in place**; so are Mamba-1's, and before the rotary CodeGen's,
-DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent attention's shared rope
-key. torch refuses an in-place edit with grad on; assign instead (or edit under
-`torch.no_grad()`):
+views torch will not edit in place**; so are Mamba-1's, and before the rotary DBRX's and
+GPT-NeoX's queries and keys, JetMoE's keys and latent attention's shared rope key. torch
+refuses an in-place edit with grad on; assign instead (or edit under `torch.no_grad()`):
 
 <!-- test: expect-error RuntimeError -->
 ```python
@@ -217,8 +217,11 @@ GPT-2's and GPT-BigCode's keys and values take an in-place edit, and it lands.
 **10. Recurrent mixers route kernels before the first trace.** On Mamba,
 Falcon-Mamba and Jamba with `mamba_ssm` installed, a CPU run crashes with
 `Expected u.is_cuda()` (even for `layer_output`) until
-`nnterp.route_kernels(model.family, "torch")`; on DeltaNet hybrids the per-token
-`state`/`states` need the same call; on Mamba-2 families `states` needs
+`nnterp.route_kernels(model.family, "torch")`, and without it `attention_head_outputs`,
+`state_output` and the per-token state still need that call (they are read inside the
+pure-torch kernels, which the unrouted forward reaches through transformers' dispatcher);
+on DeltaNet hybrids the per-token `state`/`states` need the same call; on Mamba-2 families
+it is needed only with `mamba_ssm` installed, and `states` needs
 `nnterp.chunk_per_token(model)`.
 
 **11. Hybrids: decide `self_attn` vs `linear_attn` outside the trace**, with
@@ -244,6 +247,7 @@ processor, so no image reaches the model; load with task='image-text-to-text'`.
 
 **15. Read `vision.image_token_mask` first and `vision.image_features` after the tower;
 one image-carrying invoke per trace.** The mask comes off the inputs, like `input_ids`;
+`token_embeddings` comes next (the wrapper embeds the ids before it runs the tower), and
 `image_features` is read at the scatter, after the tower's values and before
 `layers[0].input`. Under `generate` on transformers 5.18 and later the images are encoded
 before the first forward, so the tower's values come before the mask; mask then
@@ -267,7 +271,8 @@ block rotates what you wrote for the position it lands at
 `self_attn.q_proj.output` is wrong too: Phi-3 has no `q_proj`, and Qwen3, OLMo-2/3 and
 Gemma norm between the projection and the rotary. `self_attn.rotate` is the rotary
 alone: HunYuan and Llama 4 norm the queries and keys after it, JetMoE tiles its keys,
-Ministral 3 scales its queries, so there `attention_queries` is not `rotate(...)` itself.
+Ministral 3 scales its queries past `original_max_position_embeddings` (16384), so there
+`attention_queries` is not `rotate(...)` itself (on Ministral 3, on longer prompts only).
 
 **18. Read `self_attn.interface` once per forward, and call it before the scores.**
 Reading it takes the attention call's arguments, so it goes where the queries, keys and
@@ -322,9 +327,9 @@ neither attention nor MLP.
 |---|---|---|---|
 | `layer_input` | `layers[i]` | `Residual` | the stream entering the block, `layers[i].input` |
 | `attention_norm_output` | `layers[i]` | `Residual` | the normed stream the attention is called with (`input_layernorm.output`) |
-| `layer_mid` | `layers[i]` | `Residual` | the stream between the sublayers, `layer_input + attention_output`; none on a parallel block |
-| `mlp_norm_output`, `mlp_input` | `layers[i]` | `Residual` | the MLP's pre-norm output; what the MLP is called with (`mlp.input`) |
-| `layer_output` | `layers[i]` | `Residual` | the stream leaving the block; `Streams` on DeepSeek-V4 |
+| `layer_mid` | `layers[i]` | `Residual` | the stream between the sublayers, `layer_input + attention_output`; none on a parallel block; an assignment is an in-place write ([references/values.md](references/values.md)) |
+| `mlp_norm_output`, `mlp_input` | `layers[i]` | `Residual` | the MLP's pre-norm output; what the MLP is called with (`mlp.input`; the norm's output on GraniteMoE-Shared/-SWA/-Hybrid, whose two experts are both called with it; the dense MLP's input alone on a Gemma-4 mixture block) |
+| `layer_output` | `layers[i]` | `Residual` | the stream leaving the block; `Streams` on DeepSeek-V4 (as is `layer_input` there) |
 | `attention_output` | `self_attn` / `linear_attn` | `Residual` | the contribution |
 | `attention_premix` | `self_attn` | `HeadOutputs` | `o_proj.input` split by head, after any gate; any `attn_implementation` |
 | `mlp_activation`, `mlp_neurons` | `mlp` | `Neurons` | `act_fn.output`; `down_proj.input` (`act(gate) * up` on a gated MLP, the activation on a plain one); none on a routed mixture |
@@ -758,10 +763,14 @@ assert torch.equal(model.project_on_vocab(last), out)            # exact at the 
 print(model.get_topk_closest_tokens(mid[0, -1], k=3))            # [{token: probability}]
 ```
 
-`project_on_vocab` is the family's whole head: norm, `lm_head`, then the softcap
-(Gemma-2/4), `logit_scale` (Cohere), `/ logits_scaling` (Granite) or `hc_head`
-(DeepSeek-V4). `steer` moves `vector` to the stream's device and dtype; scale the
-factor to the stream's norm (`layer_output[0, -1].norm()`, which grows with depth).
+`project_on_vocab` is the model's own path from the stream to its logits: norm,
+`lm_head`, then the softcap (Gemma-2/4), `logit_scale` (Cohere's causal-LM classes, not
+the Aya Vision wrappers) or `/ logits_scaling` (Granite); `hc_head` first on DeepSeek-V4,
+and `project_out` in place of the final norm on OPT-350m, which has none. `steer` moves
+`vector` to the stream's device and dtype; scale the factor to the stream's norm
+(`layer_output[0, -1].norm()`, which grows with depth).
+On DeepSeek-V4 the vector goes into every stream and each sublayer reads a weighted sum
+of the streams, so it arrives multiplied by that sum (between 0 and 4).
 `get_topk_closest_tokens` takes a residual-stream tensor, not logits, and keys on
 the decoded string: byte tokens that decode to `'�'` collapse into one entry.
 

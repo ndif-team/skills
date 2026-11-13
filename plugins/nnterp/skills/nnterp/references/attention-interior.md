@@ -71,7 +71,7 @@ writes by it ([availability-and-support.md](availability-and-support.md#forward-
 | `attention_queries` | the queries entering the interface, after the query projection and, where the family has one, after RoPE | `Queries`: `batch num_heads seq qk_head_dim` |
 | `attention_keys` | the keys entering the interface, after RoPE and before `repeat_kv`: `num_kv_heads` wide under grouped-query attention | `Keys`: `batch num_kv_heads seq qk_head_dim` |
 | `attention_values` | the values entering the interface, before `repeat_kv` | `Values`: `batch num_kv_heads seq head_dim` |
-| `attention_scores` | the scaled, masked scores that enter the softmax | `Pattern`: `batch num_heads query key` |
+| `attention_scores` | the scaled, masked scores that enter the softmax, after the attention softcap where the family has one (Gemma-2's `50 * tanh(x / 50)`; VaultGemma where its config sets it) | `Pattern`: `batch num_heads query key` |
 | `attention_probabilities` | the pattern the values are mixed with: the dropout's output after the softmax, in the model dtype, a sink column already dropped | `Pattern` |
 | `attention_head_outputs` | what the interface returns: each head's mix of the values, before the reshape to `[batch, seq, hidden]` and the output projection | `HeadOutputs`: `batch seq num_heads head_dim` |
 
@@ -216,9 +216,9 @@ too: they are served on the text model's blocks. `support()` names the reason pe
 
 Assignment reaches the model on every family. An in-place edit does too, except where the
 value is a split view of one fused tensor and torch refuses it as it does GPT-2's queries
-(`RuntimeError: Output 0 of Select is a view and is being modified inplace`): CodeGen's,
-DBRX's and GPT-NeoX's queries and keys, JetMoE's keys, and latent attention's shared rope
-key. Assign there, or edit under `torch.no_grad()`.
+(`RuntimeError: Output 0 of Select is a view and is being modified inplace`): DBRX's and
+GPT-NeoX's queries and keys, JetMoE's keys, and latent attention's shared rope key. Assign
+there, or edit under `torch.no_grad()`.
 
 ### `rotate` and the positions it is given
 
@@ -229,8 +229,12 @@ differ unless the positions you pass reach as far as the prompt did; rotate the 
 sequence and index the result to match a long prompt. Under `generate` the keys before the
 rotary on decode step `k` of `tracer.iter` (step 0 is the prompt) are the new token's only,
 at position `n + k - 1` for a prompt of `n` tokens: `attn.rotate(keys, [n + k - 1])` is the
-last row of that step's `attention_keys`. On a model split tensor-parallel the two values
-are gathered along their head axis as the queries and keys are, so every rank reads and
+last row of that step's `attention_keys`. On an M-RoPE family (Qwen2-VL, Qwen2.5-VL,
+Qwen3-VL, Qwen3-VL-MoE, Qwen3.5, Qwen3.5-MoE) with an image in the prompt a token's
+position is not its index: pass the model's own `[3, batch, seq]` positions,
+`model.layers.parent.rotary_emb.inputs[0][1]` (read inside the step under `generate`);
+token indices, and `n + k - 1`, rotate wrongly from the image on. On a model split
+tensor-parallel the two values are gathered along their head axis as the queries and keys are, so every rank reads and
 writes them whole, and `rotate` runs on the whole tensor on every rank.
 
 ### On the vLLM engine
@@ -294,7 +298,8 @@ attn_implementation='eager'` in `support()`; reading one raises
 `attn_implementation` gets transformers' default, `sdpa` on every family that
 supports it, so pass `attn_implementation="eager"` at load for any of the six.
 BLOOM, MPT, CodeGen, XGLM and GPT-NeoX-Japanese have no other implementation and
-carry no such check; GPT-J, GPT-Neo and Falcon need the flag.
+carry no such check; Falcon needs the flag; GPT-J and GPT-Neo carry the check, but their
+only other implementation is flash attention, so a default load is eager.
 See [availability-and-support.md](availability-and-support.md).
 
 ## Reading, editing in place, assigning
@@ -337,15 +342,21 @@ with model.trace(prompt):
 assert leaked.triu(diagonal=1).sum() > 0                   # every query now attends to the future
 ```
 
-GPT-Neo's masked scores are `-inf` rather than the dtype's minimum, so
-`scores * 0` is NaN there.
+On a float32 or bfloat16 load GPT-Neo's causally masked scores are `-inf` rather than the
+dtype's minimum (its own mask writes float32's minimum and the model's mask adds the dtype's),
+so `scores * 0` is NaN there; on a float16 load they stay at float32's minimum, and the
+local-window entries are finite on every dtype.
 
-**Two invokes of one trace can both read and edit `attention_probabilities` and
-`attention_scores`.** At one location the invoke written first is served first: an
-empty `tracer.invoke()` after an invoke that edits the scores reads the edited pattern.
-On BLOOM and XGLM the interior is served off `[batch * num_heads, ...]` tensors, so an
-edit in one invoke reaches every invoke's rows (and on XGLM a read returns the whole
-batch); run one trace per prompt or per head there.
+**Two invokes of one trace each read and edit their own rows of every interior value**,
+except XGLM's keys and values. At one location the invoke written first is served first: an
+empty `tracer.invoke()` after an invoke that edits the scores reads the edited pattern. BLOOM,
+XGLM and Falcon with alibi flatten batch and heads together for their `bmm`, which nnsight
+cannot narrow to an invoke's rows, so their families read each value where the batch still
+leads (BLOOM's and Falcon's head outputs once `_merge_heads` has merged them). XGLM's keys
+and values are read at the flat `[batch * num_heads, ...]` reshape after its cache update, the
+one operation that holds them with or without a cache: there a read returns every invoke's
+rows and an edit in one invoke reaches them all, so put XGLM key or value edits in one trace
+per prompt.
 
 **Padded rows.** In a left-padded batch a pad *query* row attends uniformly over
 all keys, which pollutes per-row head metrics (entropy, previous-token mass);
@@ -506,6 +517,9 @@ keys (CodeGen); `Conv1D` columns and rows (GPT-2). MiMo-V2-Flash's `value_weight
 `attention_value_scale` its forward multiplies the values by; DBRX, and MPT and OLMo with
 `clip_qkv`, clamp the projections' outputs after these weights.
 
+On a BitNet load (transformers' `AutoBitLinear` or `BitLinear`) both raise `Unavailable`:
+those layers apply a function of the weight they store.
+
 Under a PEFT adapter the weight is the one the LoRA layer applies, computed as `merge()`
 computes it, in the base weight's dtype: the base plus each active adapter's delta; the base
 alone once an adapter is merged (the forward then runs the base layer only); the base without
@@ -518,7 +532,7 @@ without a bias, to rounding with one; ones on a post-norm block; with
 
 `self_attn.no_head_weights()` is the one reason `value_weight` and `output_weight` raise:
 latent attention, DeepSeek-V4, Gemma-4 (`v_norm`), JetMoE (an output projection per expert),
-ZAYA (half of each value head from the previous token), the default family, a vision tower,
+ZAYA (its second value head holds the previous token's values), the default family, a vision tower,
 a model split tensor-parallel (`nnterp.components.SHARDED_WEIGHTS`), and `StandardizedVLLM`.
 
 ## Family caveats
@@ -595,10 +609,11 @@ the pattern is the first softmax's output itself (no dropout follows). With
 alibi there is no rotary: queries, keys and values are the reshaped projections,
 bound in that order, so read them as queries, keys, values (values first raises
 `OutOfOrderError` naming `query_layer_0`); the pattern is the dropout after the
-second softmax, and the head outputs are computed flattened over batch and
-heads but served as the same `[batch, seq, heads, head_dim]` view as elsewhere,
-so in-place edits land. The 7B layout is multi-query on both branches: keys and
-values have one head (`num_kv_heads == 1`).
+second softmax, and the head outputs are read once `_merge_heads` has merged them
+(the product before it is flattened over batch and heads), served as the same
+`[batch, seq, heads, head_dim]` view as elsewhere, so in-place edits land. The 7B
+layout is multi-query on both branches: keys and values have one head
+(`num_kv_heads == 1`).
 
 ### Falcon-40B layout: keys and values already expanded
 
@@ -612,8 +627,9 @@ reports the config's `num_kv_heads` (8).
 GPT-J, GPT-Neo, CodeGen, GPT-NeoX-Japanese, XGLM, BLOOM, MPT and Falcon do their
 own attention arithmetic, and their families map the same six values onto it
 (GPT-J/GPT-Neo/CodeGen/GPT-NeoX-Japanese around a `self._attn(q, k, v, mask)`
-call; BLOOM and XGLM as views of their flattened `[batch * heads, ...]` tensors;
-MPT on its `*_states` bindings). Heads-first head outputs are served as a
+call; BLOOM, XGLM and MPT on their projections and the bindings around their matmuls,
+where the batch still leads; XGLM's keys and values at the flat reshape after its cache
+update). Heads-first head outputs are served as a
 sequence-first view, so in-place edits land. Where the scale sits differs (GPT-Neo
 has none, CodeGen divides after the mask, XGLM scales the queries as it projects
 them). GPT-Neo's `self_attn` is the module inside the `attn` wrapper. Their output
@@ -659,7 +675,8 @@ tensors.
 pattern's rows sum to one and `softmax(attention_scores)` reproduces it, but each
 query's head output is then scaled by `sigmoid(logsumexp(scores) - sink)` (as low
 as 0.001 on real weights). Forcing the pattern does not control the output there;
-`SINK` is `False`. GPT-OSS, DeepSeek-V4 and MiMo-V2-Flash's sliding blocks put
+`attention_scores` is read before both the softmax and the scale, so a write to the
+scores moves the pattern and the scale together. `SINK` is `False`. GPT-OSS, DeepSeek-V4 and MiMo-V2-Flash's sliding blocks put
 the sink in the pattern instead (below).
 
 ### GPT-OSS: an attention sink
@@ -737,7 +754,8 @@ cache and every later step attends with it, while an assignment replaces the cal
 argument for that one forward. Under latent attention (DeepSeek-V2/V3 and the families on
 their attention) the cache holds the compressed latent and the keys and values are expanded
 from it on every call, and Gemma-4 serves copies, so there an edit lasts one forward either
-way. To change what chosen heads read without touching the cache, call
+way (BLOOM, MPT and Falcon differ: [generation-and-helpers.md](generation-and-helpers.md)).
+To change what chosen heads read without touching the cache, call
 [`interface`](#calling-the-attention-function-again-interface) on edited copies.
 
 See [generation-and-helpers.md](generation-and-helpers.md).
@@ -763,8 +781,8 @@ See [generation-and-helpers.md](generation-and-helpers.md).
 - GPT-2's and GPT-BigCode's queries, MPT's queries, keys and values: assign, do not
   edit in place (or edit under `torch.no_grad()`); GPT-2's and GPT-BigCode's keys and
   values take an in-place edit. The same before the rotary
-  for CodeGen's, DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent
-  attention's shared rope key.
+  for DBRX's and GPT-NeoX's queries and keys, JetMoE's keys and latent attention's
+  shared rope key.
 - A query or key moved to another position or prompt is written to
   `attention_queries_prerope` / `attention_keys_prerope`, never to the rotated
   `attention_queries` / `attention_keys`, which carry the position they ran at.

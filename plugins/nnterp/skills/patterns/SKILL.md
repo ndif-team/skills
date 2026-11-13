@@ -155,7 +155,7 @@ which ablation you ran. Mean ablation, `skip_layers`, one head via
 
 ### Expert ablation (mixtures of experts)
 
-On a `Moe` (`layers[i].mlp` on the 36 MoE families), remove expert `e` by zeroing
+On a `Moe` (`layers[i].mlp` on the 39 MoE families), remove expert `e` by zeroing
 the weights of the slots that chose it. Ran on the tiny Mixtral checkpoint nnterp
 pins:
 
@@ -172,7 +172,8 @@ with moe_model.trace() as tracer:
         base = moe_model.logits[0, -1].float().log_softmax(-1)[target].save()
     for e in range(moe.num_experts):
         with tracer.invoke(prompt):
-            moe.expert_weights[:] = moe.expert_weights.masked_fill(moe.expert_indices == e, 0)   # this invoke's rows only
+            idx = moe.expert_indices                                                      # first: JetMoE computes the indices before the weights
+            moe.expert_weights[:] = moe.expert_weights.masked_fill(idx == e, 0)           # this invoke's rows only
             rows.append(moe_model.logits[0, -1].float().log_softmax(-1)[target].save())
 effects = torch.stack(rows) - base                  # [experts]: change in log p(target)
 ```

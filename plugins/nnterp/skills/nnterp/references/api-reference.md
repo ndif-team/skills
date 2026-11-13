@@ -87,7 +87,7 @@ raised before any weights load only when the default cannot standardize it. Neit
 |---|---|---|
 | `skip_layers(start, end, skip_with=None)` | inside a trace, before block `start` runs | blocks `start..end` (inclusive) do not run; consumes `layers[start].input`; must cover every row of a batch (one invoke of several raises `ValueError`) |
 | `steer(layers, vector, factor=1.0, token_positions=None, batch_index=None)` | inside a trace; `layers` an int or ascending list | `layer_output += factor * vector` in place at those positions / that row |
-| `project_on_vocab(hidden)` | inside (live) or outside (saved) | the family's head: norm, `lm_head`, then the family's step (softcap, `logit_scale`, `/ logits_scaling`, `hc_head`); equals `logits` on the last block |
+| `project_on_vocab(hidden)` | inside (live) or outside (saved) | the model's own path to its logits: norm, `lm_head`, then the family's step (softcap, `logit_scale`, `/ logits_scaling`, `hc_head`, ZAYA's cast, OPT's `project_out`); equals `logits` on the last block |
 | `get_topk_closest_tokens(hidden, k=5)` | outside, on a saved `[..., hidden]` tensor | `project_on_vocab`, softmax, `{decoded token: probability}` per position; byte tokens decoding alike collapse |
 | `probs_to_dict(probs, k=5)` | outside | the `k` most likely tokens of one `[vocab]` distribution, same keying |
 | `support(layer=None)` | outside; nothing runs | every root and block value, `None` or `{layer: reason}`; with `layer`, that block flat |
@@ -125,7 +125,7 @@ Details: [values.md](values.md#sizes).
 
 | host | values | page |
 |---|---|---|
-| `Layer` | `layer_input`, `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input` (`Residual`; `FlatResidual` for OPT's `layer_mid` / `mlp_norm_output`); `layer_output` (`Residual`; `Streams` on DeepSeek-V4); `per_layer_output` (Gemma-4); `attention_post` / `attention_comb` / `mlp_post` / `mlp_comb` (DeepSeek-V4); `skip_with(hidden)`; `attention_input_gain`; `returns_tuple` | [values.md](values.md) |
+| `Layer` | `layer_input`, `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input` (`Residual`; `FlatResidual` for OPT's `layer_mid` / `mlp_norm_output`); `layer_output` (`Residual`; `Streams` on DeepSeek-V4, as is its `layer_input`); `per_layer_output` (Gemma-4); `attention_post` / `attention_comb` / `mlp_post` / `mlp_comb` (DeepSeek-V4); `skip_with(hidden)`; `attention_input_gain`; `returns_tuple` | [values.md](values.md) |
 | `Attention` | `attention_output`; `attention_premix` (`HeadOutputs`, `o_proj.input`, any implementation); `attention_queries_prerope` / `attention_keys_prerope` (`Queries` / `Keys`, `SharedRopeKeys` under latent attention; before the rotary, any implementation); `attention_queries` / `_keys` / `_values` / `_scores` / `_probabilities` / `_head_outputs` (eager); `interface` (eager; `Unavailable` with `OWN_ARITHMETIC` where no one call takes the queries, keys and values and returns the head outputs); `rotate(x, positions)`; `value_weight(kv)`, `output_weight(j)`; `SINK`; `off_interface()`, `no_rotary()`, `no_head_weights()` | [attention-interior.md](attention-interior.md) |
 | `Mlp` | `mlp_output`; `mlp_activation`, `mlp_neurons` (`Neurons`: `act_fn.output`, `down_proj.input`) | [values.md](values.md#inside-the-sublayers) |
 | `Moe(Mlp)` | `router_logits`, `expert_weights`, `expert_indices`, `expert_outputs`, `routed_output`, `shared_expert_output` (each a `TokenEProperty`); `num_experts`, `top_k`, `SCORING`, `no_mixture()`; `mlp_activation` / `mlp_neurons` unavailable (routed experts) | [mixture-of-experts.md](mixture-of-experts.md) |
@@ -178,7 +178,7 @@ Every value's descriptor exposes `.layout` (the named alias), `.dims`,
 | `nnsight...SourceNotAvailable` | a source-located value's operation is not in this run's forward (another transformers release, an unexpected branch); also `hasattr` on a nested-source value outside a trace |
 | `nnsight...OutOfOrderError` | a value read after the model ran past it; the message names an internal location, not the value; also a second `self_attn.interface` read after a call, or a call after the scores, the pattern or the head outputs (`'...attention_interface_1.input.i0'`, `'...attention_interface_1.fn.i0'`), under `tracer.iter` too |
 | `AttributeError` | assigning a read-only value (`next_token_probs`, `input_size`, `states`, any `DerivedEProperty`); a mixture's `num_experts` / `top_k` / `SCORING` on a dense block |
-| `RuntimeError` (torch view error) | an in-place edit of a split view with grad on: GPT-2 / GPT-BigCode queries, MPT q/k/v, Mamba-1 / Mamba-2 kernel arguments; before the rotary, CodeGen / DBRX / GPT-NeoX queries and keys, JetMoE keys, latent attention's shared rope key |
+| `RuntimeError` (torch view error) | an in-place edit of a split view with grad on: GPT-2 / GPT-BigCode queries, MPT q/k/v, Mamba-1 / Mamba-2 kernel arguments; before the rotary, DBRX / GPT-NeoX queries and keys, JetMoE keys, latent attention's shared rope key |
 | `RuntimeError: Expected u.is_cuda()` | an unrouted Mamba-1 model on CPU with `mamba_ssm` installed |
 
 ## The 98 families, by what a recipe must survive
@@ -197,7 +197,7 @@ Llama-shaped: the standard names and the base values hold as they are (`llama`,
 | tuple block | `gptj`, `gpt_neo`, `codegen`, `gpt_neox_japanese`, `bloom`, `mpt`, `falcon`, `glm_moe_dsa`, `bamba`, `falcon_h1`, `zaya` | `.output` is a tuple; the values are tensors |
 | post-norm (sandwich) | `gemma2`, `gemma3_text`, `gemma4_text`, `gemma4_unified_text`, `olmo2`, `olmo3`, `exaone4`, `flex_olmo`, `afmoe`, `glm4`, `hyperclovax`, OLMo-Hybrid's attention blocks | contributions are the post-norms' outputs, after `self_attn.output`; per-head sums are pre-norm |
 | residual inside the module | `bloom`, `mpt` (MLP) | contributions read before the module's `.output` |
-| parallel block | `gpt_neox`, `phi`, `gptj`, `codegen`, `stablelm`, `cohere`, `cohere2`, `falcon` | `mlp.input` is the block input's norm; the identity holds within a few ulps |
+| parallel block | `phi`, `gptj`, `codegen`, `cohere`, `cohere2`, `falcon` (7B, 40B, 11B layouts; not RW); `gpt_neox` and `stablelm` with `use_parallel_residual` | `mlp.input` is the block input's norm; the identity holds within a few ulps |
 | scaled contributions | `granite`, `granitemoe`, `granitemoeshared`, `granitemoehybrid`, `granite_swa`, `granitemoe_swa`, `hyperclovax`, `falcon_h1` | values are the scaled terms, computed copies divided back on write |
 | not a plain sum | `gemma4_text`, `gemma4_unified_text` (`layer_scalar`), `doge`, `zaya` (stream gates), `deepseek_v4` (`Streams`) | weight each term before attributing ([values.md](values.md#blocks-that-are-not-a-plain-sum)) |
 | own attention arithmetic | `gptj`, `gpt_neo`, `codegen`, `gpt_neox_japanese`, `xglm`, `bloom`, `mpt`, `falcon` | same six interior names on the family's ops; different scale placement; `out_proj` / `dense`; `self_attn.interface` calls `_attn` on the first four |
