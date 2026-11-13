@@ -112,7 +112,7 @@ python plugins/nnsight/skills/nnsight/scripts/check_env.py --remote
 `mlp_output`, the module boundaries between them such as `layer_mid`, `attention_probabilities`,
 the attention interior, `mlp_neurons`, `logits`, the gated-DeltaNet state on hybrids) that mean
 the same thing on all 98 transformer families it knows, with `model.support()` saying what a
-checkpoint has before any trace. It needs nnsight `dev` at `d565f5f8` or later.
+checkpoint has before any trace.
 
 ```bash
 /plugin install nnterp@ndif-team

@@ -122,9 +122,11 @@ as *reach*, and localize with the map.
 ### Layer × position map, on SmolLM2
 
 One trace per layer, one invoke per position. The prompts must tokenize to the same
-length; the tokenizer decides, so assert it. GPT-2 small barely moves under this
-prompt pair at any single cell; SmolLM2 gives the textbook picture, so the map runs
-there (`bf16`, 30 layers, 9 tokens: 30 traces of 9 rows, about a second):
+length; the tokenizer decides, so assert it. GPT-2 small puts only 0.07 on " Paris"
+even clean, so its map of raw P(Paris) is near zero in every cell (normalized, as under
+Interpretation below, its subject tokens recover 0.3 to 0.5 of the logit difference);
+SmolLM2's probabilities show the picture directly, so the map runs there (`bf16`, 30
+layers, 9 tokens: 30 traces of 9 rows):
 
 ```python
 llama = StandardizedTransformer("HuggingFaceTB/SmolLM2-135M-Instruct", device="cpu", dispatch=True, attn_implementation="eager")
@@ -172,8 +174,7 @@ block through 22 and does nothing from 23 on; the last position is the mirror
 image. The attention that moves the fact sits between blocks 22 and 23, which is
 where to look with a head-level patch or the attention-output ablation (block 23's
 `attention_output` is the one whose zeroing drops P(Paris) to 0.37 on the clean
-prompt). This is the same code that produced the flat GPT-2 map: the model, not
-the recipe, decided.
+prompt).
 
 ### Patch a contribution instead of the stream
 
@@ -213,8 +214,10 @@ SmolLM2. Noising swaps the roles; the code is symmetric.
   slightly.
 - Position is the question. The subject's position localizes the *source*; the
   last position tests whether the *final prediction* is sensitive.
-- Use a logit difference (Paris minus Rome) when the corrupt run is near-degenerate;
-  a tiny shift can flip an argmax.
+- Use a logit difference (Paris minus Rome) when the corrupt run is near-degenerate,
+  reported as recovery = (patched - corrupt) / (clean - corrupt), with the clean and
+  corrupt values from unpatched invokes of the same trace (0 is the corrupt run, 1 the
+  clean one); a tiny shift can flip an argmax.
 - Effects are a few percent on one pair; average over pairs.
 - **Gemma-4**: the KV-sharing blocks attend with an earlier block's keys and values. A
   patch of `attention_keys` / `attention_values`, in place or by assignment, is local to
@@ -357,7 +360,7 @@ it, at the head outputs.
 - **Read `interface` with the queries and call it before the head outputs.** The call
   takes the function as the forward runs it, so it comes before any read of the scores,
   the pattern or the head outputs; to call it twice, read `hattn.interface` once and call
-  the result twice (the `nnterp` skill, trap 18).
+  the result twice (the `nnterp` skill, trap 17).
 - **Pass whole tensors.** The call takes the live call's query and key lengths (its mask
   has them): patch inside `k2` and `v2`, pass all of `q`, and slice the result.
 - **Eager only, and not everywhere.** `support()` reports `self_attn.interface` unavailable
@@ -432,7 +435,8 @@ assert best[4] == (11, 1.0)                                              # GPT-2
 
 `attn_blocks` is decided outside the trace; on a non-hybrid it is every block and the
 code is unchanged, on a Qwen3.5 or Jamba hybrid it skips the recurrent blocks. The
-same search finds induction heads unmodified on GPT-2 (5.1, 5.5, 6.9, 7.2, 7.10) and
+same loop, scoring the induction target on a prompt that repeats a block of random tokens,
+finds induction heads on GPT-2 (5.1, 5.5, 6.9, 7.2, 7.10) and
 on six other families' trained checkpoints. All the heads of all the prompts are read in
 one invoke.
 

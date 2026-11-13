@@ -68,10 +68,13 @@ assert torch.equal(edited[0, : n + 1], ids[0, : n + 1])   # the prompt and step 
 
 **Read order within a step** follows the forward like in a trace: `input_ids`
 first, a block's `self_attn.*` and `mlp.*` before its `layer_output`, `logits`
-and `next_token_probs` last. Inside `tracer.iter` a misplaced read does **not**
+and `next_token_probs` last. Inside `tracer.iter` a misplaced read raises
+`OutOfOrderError` on step 0; on a later step (a loop from `iter[1:]`) it does **not**
 raise: it binds the same location on the *next* step, so a per-step list comes
-back shifted by one (the pattern read after `attention_output` is step `k+1`'s),
-and the only symptom is a final warning blaming the loop bound. Check each
+back shifted by one, and the only symptom is a final warning blaming the loop bound. A
+value inside the attention call shifts from step 0 too: the scores and the pattern
+always (the pattern read after `attention_output` is step `k+1`'s), the queries, keys,
+values and head outputs when the loop is the first to touch that attention's `.source`. Check each
 step's shapes (`[batch, 1, ...]` on a decode step, the cache length on the key
 axis) when a per-step result looks off. Every step repeats one forward's order, so
 `model.rank(name, layer)` sorts a step's reads as it does a trace's

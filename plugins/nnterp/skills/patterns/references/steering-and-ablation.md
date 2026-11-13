@@ -359,8 +359,9 @@ slightly negative.
 - A checkpoint may lack the component: OPT has no `mlp`, a hybrid's linear blocks
   have no `self_attn`. `model.support()` says so per block; reading raises
   `nnterp.Unavailable`.
-- Head-level ablation needs eager; `attention_output`, `mlp_output` and
-  `layer_output` do not.
+- Head-level ablation through `attention_head_outputs` or the pattern needs eager; through
+  `attention_premix` it does not, nor do `attention_output`, `mlp_output` and
+  `layer_output`.
 - Gemma-4: the KV-sharing blocks attend with an earlier block's keys and values.
   Zeroing `attention_keys` / `attention_values`, in place or by assignment, ablates them
   on that block alone; to ablate what every borrower attends with, edit the source

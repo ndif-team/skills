@@ -115,7 +115,8 @@ with model.trace(prompt):                       # force the router: logits decid
 
 The sweep fits one trace with one invoke per expert: an in-place edit
 (`moe.expert_weights[:] = moe.expert_weights.masked_fill(...)`) and an assignment both
-reach that invoke only. In float32 the batched sweep equals the per-trace one exactly.
+reach that invoke only. In float32 the batched sweep matches the per-trace one to rounding
+(about 1e-6).
 
 Reroute to an expert the token's other slots do not use: on JetMoE a repeated one
 raises `RuntimeError` (`split_with_sizes`), and the other families run that expert
@@ -124,8 +125,8 @@ once per slot.
 **bf16 sweeps are noise.** On a bf16 GraniteMoE the one-invoke-per-expert sweep
 correlated 0.32 with per-trace ablation and named a different "most important"
 expert: ablating in one invoke moved another invoke's logits by ten times the
-ablation's own effect. Load `dtype=torch.float32` for single-expert effects, or
-keep a clean baseline invoke in the same batch and compare against it.
+ablation's own effect. Load `dtype=torch.float32` for single-expert effects: a clean
+baseline invoke in the same bf16 batch does not fix the ranking.
 
 Unused experts read exactly zero (no slot to zero), which is not "unimportant";
 the shared expert is not an expert here (`shared_expert_output[:] = 0`); zero

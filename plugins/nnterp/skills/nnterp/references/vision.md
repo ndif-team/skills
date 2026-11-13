@@ -110,12 +110,12 @@ assert (vlm.vision.image_size // vlm.vision.patch_size) ** 2 == 576  # 336 // 14
 | Gemma 4's ViT | one per image | the patches padded to `max_soft_tokens * pooling_kernel_size**2` rows (2520 by default); the padded rows are masked as keys but run through every block, so they are rows of `layer_output`, with values; the pooler zeroes and strips them |
 | Gemma 4 unified's embedder | one per image | `patch_embeddings` and `tower_output` only, padded to `max_soft_tokens` rows (280) the same way |
 
-**Sizes.** `model.vision` has `num_layers`, `hidden_size`, `num_heads`, `head_dim`,
+**Sizes.** `model.vision` has `num_layers`, `vision_hidden_size`, `num_heads`, `head_dim`,
 `intermediate_size`, `patch_size`, `image_size`, read off the tower's own config. The Qwen
 ViT, Pixtral, Gemma 4 and Gemma 4 unified take images of any resolution, so their
 `image_size` raises `Unavailable` saying where each image's grid is (`image_grid_thw`,
 `image_sizes`, `image_position_ids`). The encoder-free embedder has `num_layers == 0`,
-`hidden_size` its `mm_embed_dim` and `patch_size` the 48-pixel merged patch it embeds; its
+`vision_hidden_size` its `mm_embed_dim` and `patch_size` the 48-pixel merged patch it embeds; its
 `num_heads`, `head_dim` and `intermediate_size` raise `Unavailable`.
 
 Two images in one invoke give one `Patches` row each on CLIP, and the features stay flat:
@@ -152,9 +152,10 @@ projector's output, reshaped. Where the wrapper changes that output before scatt
 - Qwen2.5-VL restores the merge-block order after the merger, so `projector.output` is in
   window order once an image spans more than one 112-pixel window.
 
-What feeds the projector differs per host: Gemma 3 pools `tower_output`; Llava takes
+What feeds the projector differs per host: Gemma 3 pools `tower_output`; Llava 1.5 takes
 `vision.layers[-2].layer_output` without its CLS token (`vision_feature_layer=-2`), so a
-write to `tower_output` or to the last block does not reach Llava's text model; VipLlava
+write to `tower_output` or to the last block does not reach Llava 1.5's text model (a Llava
+wrapper reads the block its config's `vision_feature_layer` names: `-1` on llava-interleave); VipLlava
 concatenates several blocks' streams. `model.projector.input` is what the projector
 receives. On Llama 4 the tower runs a pixel-shuffle adapter after `tower_output`
 (`vision.vision_adapter`) whose output, flattened over the tiles, is `projector.input`; on
@@ -243,7 +244,10 @@ Read order is the forward's: `vision.image_token_mask` first (it comes off the i
 the tower; under `generate`, after the tower and the mask), then `vision.patch_embeddings`, the tower's blocks (a block's attention
 interior before its `layer_output`), `vision.tower_output`, `projector`, then
 `vision.image_features`, then the text model's values. A late read raises
-`OutOfOrderError`.
+`OutOfOrderError`. `model.rank` and `model.order` do not cover the tower's values, and their
+order differs by tower: on the Qwen ViT the merger (`projector`) runs inside the tower and
+`tower_output` is served after it, so read `projector.input` and `projector.output` before
+`vision.tower_output`.
 
 <!-- test: expect-error NotImplementedError -->
 ```python
@@ -305,7 +309,7 @@ Qwen2.5-VL's windowed blocks).
   implementation. Split the queries and keys at the attention's `cu_seqlens` argument
   (`self_attn.inputs[1]["cu_seqlens"]`) to compute a per-image pattern.
 - The sizes add `spatial_merge_size` and `window_size` (Qwen2.5-VL's, in pixels; `None`
-  elsewhere); `hidden_size` is the tower's width (`embed_dim` on Qwen2-VL).
+  elsewhere); `vision_hidden_size` is the tower's width (`embed_dim` on Qwen2-VL).
 
 **DeepStack.** On `qwen3_vl_text` and `qwen3_vl_moe_text` the tower also taps three of its
 blocks, and the text model adds each tap's merged features at the image positions after
@@ -380,12 +384,13 @@ scatters, the family's `ROOT_SCATTER`.
 
 ## Which wrappers
 
-16 families host a tower:
+19 families host a tower:
 
 | family | wrapper (`model_type`) | tower |
 |---|---|---|
 | `gemma3_text` | Gemma 3 (`gemma3`) | SigLIP |
 | `gemma` | PaliGemma (`paligemma`) | SigLIP |
+| `gemma2` | PaliGemma 2 (`paligemma`, its `text_config` a `gemma2`) | SigLIP |
 | `qwen2` | llava-interleave (`llava`), LLaVA-OneVision (`llava_onevision`) | SigLIP |
 | `cohere2` | Aya Vision (`aya_vision`), Cohere2-Vision (`cohere2_vision`) | SigLIP |
 | `llama` | Llava 1.5 (`llava`), VipLlava (`vipllava`), LLaVA-NeXT (`llava_next`) | CLIP |
@@ -396,6 +401,8 @@ scatters, the family's `ROOT_SCATTER`.
 | `ministral3` | Mistral 3 (`mistral3`, Ministral 3) | Pixtral |
 | `qwen2_vl_text`, `qwen2_5_vl_text`, `qwen3_vl_text`, `qwen3_vl_moe_text` | Qwen2-VL (`qwen2_vl`), Qwen2.5-VL (`qwen2_5_vl`), Qwen3-VL (`qwen3_vl`), Qwen3-VL-MoE (`qwen3_vl_moe`) | the Qwen ViT |
 | `qwen3_5_text`, `qwen3_5_moe_text` | Qwen3.5 (`qwen3_5`), Qwen3.5-MoE (`qwen3_5_moe`) | the Qwen ViT |
+| `hyperclovax` | HyperCLOVA X Vision V2 (`hyperclovax_vision_v2`; transformers 5.18 and later) | the Qwen2.5-VL ViT (a `QwenVision`) at `model.model.vision_model`; `projector` is the linear `model.model.projector` after it |
+| `nemotron_h` | NemotronH Omni (`nemotron_h_omni`; transformers 5.18 and later) | RADIO (a `RadioVision`) at `model.vision_model`, every image's tokens in one row; `projector` is `model.multi_modal_projector` |
 | `llama4_text` | Llama 4 (`llama4`) | Llama 4's ViT |
 | `gemma4_text` | Gemma 4 (`gemma4`) | Gemma 4's ViT |
 | `gemma4_unified_text` | Gemma 4 unified (`gemma4_unified`) | the encoder-free embedder |

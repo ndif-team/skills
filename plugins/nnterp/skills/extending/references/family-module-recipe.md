@@ -249,8 +249,7 @@ nnsight resolves every key relative to every envoy in the tree (the `nnsight` sk
 - A key and value may both be dotted paths from one envoy (`"attn.c_proj": "attn.o_proj"`):
   the alias binds on the named child only. GPT-2 spells the attention's output projection
   and the MLP's down projection both `c_proj`, so a bare `"c_proj"` key cannot tell them
-  apart; `"attn.c_proj": "attn.o_proj"` and `"mlp.c_proj": "mlp.down_proj"` can. Dotted
-  aliases need nnsight 0.8 or later.
+  apart; `"attn.c_proj": "attn.o_proj"` and `"mlp.c_proj": "mlp.down_proj"` can.
 - A key may be a module **class**: nnsight binds it on every envoy with exactly one
   direct child of that class, for a native name whose meaning depends on the block.
   Nemotron-H's one `mixer` per block is keyed by class:
@@ -1474,10 +1473,6 @@ with GPT-2's `NATIVE`, `REFUSES_IN_PLACE_QKV` and `EXPECTED_UNAVAILABLE`, passes
 - **Import the modeling module only inside the family module.** An import at
   `nnterp/__init__.py` or in `components/` would load transformers modeling code on
   `import nnterp`.
-- **A silent segfault at import is pyarrow's, not nnterp's.** On glibc 2.31 (Ubuntu
-  20.04) with pyarrow installed, `import transformers.modeling_layers` before nnsight
-  crashes in pyarrow's jemalloc thread; nnterp's `conftest.py` imports nnsight first and
-  sets `JE_ARROW_MALLOC_CONF=background_thread:false` for every test process.
 - **Every family test loads eager.** Values still unavailable on that checkpoint go in
   `EXPECTED_UNAVAILABLE` with a substring of the reason.
 - **Interior values bind at different points of the forward.** A family-specific test
