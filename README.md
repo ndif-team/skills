@@ -6,9 +6,10 @@ and [NDIF](https://ndif.us/).
 Compatible with both **Claude Code** and **OpenAI Codex** via the
 [Agent Skills Specification](https://agentskills.io/).
 
-Three plugins: **nnsight**, for writing interpretability code, **nnterp**, for writing it
-once against one module vocabulary that runs on every transformer family, and **ndif**,
-for running your own NDIF server.
+Four plugins: **nnsight**, for writing interpretability code, **nnterp**, for writing it
+once against one module vocabulary that runs on every transformer family, **nnspec**, for
+running an experiment as a JSON document instead of code, and **ndif**, for running your
+own NDIF server.
 
 Every code example in the nnsight skills is executed by the test suite against a
 real model, so what an agent reads is what actually runs.
@@ -30,6 +31,9 @@ claude
 
 # Install the nnterp skills (one vocabulary across transformer families, on nnsight)
 /plugin install nnterp@ndif-team
+
+# Install the nnspec skills (experiments as JSON documents, no code)
+/plugin install nnspec@ndif-team
 
 # Install the NDIF self-hosting skills (optional — only if you run your own server)
 /plugin install ndif@ndif-team
@@ -127,6 +131,32 @@ checkpoint has before any trace. It needs nnsight `dev` at `d565f5f8` or later.
 Its code blocks are executed like the nnsight ones, against `openai-community/gpt2` and
 `HuggingFaceTB/SmolLM2-135M-Instruct`; they skip when `nnterp` is not installed.
 
+## nnspec (experiments as documents)
+
+[nnspec](https://github.com/JadenFiotto-Kaufman/nnspec) runs an interpretability experiment from one JSON
+document: the checkpoint, the data, the forwards and generations, the reads and writes on the model's
+internals, the ops that score them, and what to save. The same document runs on a local model (through
+nnterp and nnsight) or on an NDIF server, and a run writes tensors with a manifest that `nnspec table`
+prints. The skills are for agents *using* nnspec, not changing it.
+
+```bash
+/plugin install nnspec@ndif-team
+```
+
+| Skill | Use when... |
+| --- | --- |
+| `nnspec` | Writing or running any nnspec document: the format (model, data, sites, positions, reads and writes, ops, sweeps, saves), `nnspec run`, the engines, reading a run back. Start here. |
+| `nnspec-patching` | Which layer, position, head, neuron or path carries a behaviour: activation, head, neuron, path and attention-pattern patching, layer-by-position maps, attribution patching. |
+| `nnspec-ablation` | What a component contributes when removed: zero, mean, resample, optimal-constant, direction, noise and clamp ablation, head and key knockout, expert ablation, the hydra effect. |
+| `nnspec-lenses-and-attention` | What each layer predicts and where a head looks: logit and tuned lenses, readout, attention patterns, previous-token and induction stripes. |
+| `nnspec-steering-and-generation` | Pushing a model with a direction and scoring what it generates: steering vectors and their controls, did-it-say-the-answer, confidence, chat turns, teacher forcing. |
+| `nnspec-trained-featurizers` | Anything trained inside a run or loaded from a bundle: DAS and DBM, head masks, SAEs, probes, LoRA, cached harvests. |
+| `nnspec-debugging` | A refusal, a run that stops, numbers that are wrong when nothing was refused, two runs that differ, reproducing or cross-checking a result. |
+
+Every complete document in these skills is compiled by the test suite against nnspec (no model loads), so
+field, op and component names cannot drift; the numbers quoted come from runs on `openai-community/gpt2`
+and `HuggingFaceTB/SmolLM2-135M-Instruct`.
+
 ## NDIF (self-hosting)
 
 A second plugin, for people and agents who run their **own** NDIF server — the
@@ -165,6 +195,7 @@ Once installed, ask naturally:
 - "Build a steering vector that makes the model more positive"
 - "This nnsight script from a paper repo crashes — fix it"
 - "Run this experiment on Llama-70B via NDIF without downloading 3 GB of logits"
+- "Write an nnspec document that patches each layer's residual stream at the last token and tables the effect"
 
 ## Development
 
@@ -199,6 +230,11 @@ example.
 The ndif skills document a server rather than a library, so their `python` blocks
 are all marked `<!-- test: skip -->` and are reference material, not examples the
 suite runs.
+
+The nnspec skills' examples are JSON documents. `tests/test_documents.py` parses every
+`json` block under `plugins/nnspec` and compiles each complete document (one with `model`
+and `steps`) through `nnspec.Plan(...).compile()`, which needs no model; python blocks
+there are syntax-checked only.
 
 ### Adding a skill
 
@@ -242,6 +278,12 @@ skills/
 │   │       ├── nnterp/
 │   │       ├── patterns/
 │   │       └── extending/
+│   ├── nnspec/
+│   │   ├── .claude-plugin/plugin.json
+│   │   └── skills/
+│   │       ├── nnspec/
+│   │       ├── nnspec-patching/
+│   │       └── ...
 │   └── ndif/
 │       ├── .claude-plugin/plugin.json
 │       └── skills/
@@ -249,7 +291,7 @@ skills/
 │           ├── operate/
 │           ├── troubleshoot/
 │           └── develop/
-├── tests/                            # executes every code block
+├── tests/                            # executes every code block; compiles every nnspec document
 └── Makefile
 ```
 
