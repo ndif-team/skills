@@ -161,8 +161,8 @@ assert eager.support(layer=0)["self_attn.attention_probabilities"] is None      
 | `the queries, keys and values are not the arguments of one call in this forward that returns the head outputs (the attention does its own arithmetic, or changes the call's output before the projection), so there is no attention function to call again` (`nnterp.components.OWN_ARITHMETIC`) | `self_attn.interface` | BLOOM, MPT, Falcon and XGLM (their own arithmetic) and DeepSeek-V4 (the head outputs are the interface's output rotated back); elsewhere `interface` has the reason of the queries, keys, values, head outputs or pattern it works with ([attention-interior.md](attention-interior.md#calling-the-attention-function-again-interface)) |
 | `no <module> module on this block` (`input_layernorm`, `post_attention_layernorm`, `mlp`) | `attention_norm_output`, `layer_mid`, `mlp_norm_output`, `mlp_input` | the block has no module the value is keyed on (OPT's `mlp_input`) |
 | `a parallel block: the attention and the MLP read the same input, so there is no stream between them` (`nnterp.components.PARALLEL`) | `layer_mid` | GPT-J, CodeGen, Cohere, Phi, Falcon; GPT-NeoX and StableLM with `use_parallel_residual` |
-| `a post-norm block: the attention reads the residual stream itself, layer_input` / `... the MLP reads the residual stream itself, layer_mid` (`POST_NORM_ATTENTION`, `POST_NORM_MLP`) | `attention_norm_output` / `mlp_norm_output` | OLMo-2/3, EXAONE-4, FlexOlmo, OLMo-Hybrid's attention blocks |
-| `no o_proj module on this attention` / `no act_fn module on this mlp` / `no down_proj module on this mlp` | `attention_premix` / `mlp_activation` / `mlp_neurons` | the family aliases no module to the standard child name (DeepSeek-V4 and JetMoE say why in their own words) |
+| `a post-norm block: the attention reads the residual stream itself, layer_input` / `... the MLP reads the residual stream itself, layer_mid` (`POST_NORM_ATTENTION`, `POST_NORM_MLP`) | `attention_norm_output` / `mlp_norm_output` | OLMo-2/3, EXAONE-4, FlexOlmo, OLMo-Hybrid's attention blocks, OPT-350m (`do_layer_norm_before` false) |
+| `no o_proj module on this attention` / `no act_fn module on this mlp` / `no down_proj module on this mlp` | `attention_premix` / `mlp_activation` / `mlp_neurons` | the family aliases no module to the standard child name (JetMoE says why in its own words) |
 | `routed experts; read per-expert via the Moe component` | `mlp.mlp_activation`, `mlp.mlp_neurons` | a routed mixture of experts (dense blocks beside it serve them) |
 | `the state after each token is materialized only by the token-by-token kernel; the chunked kernel a prompt runs through carries it between chunks. Call nnterp.route_kernels(model.family, 'torch') before tracing this layer ...` | a DeltaNet's `linear_attn.state`, `.states` | the family is not routed |
 | `read inside transformers' pure-torch <kernel>, but this process dispatches it to an optimized kernel (<package>) with no Python source; uninstall it, or call nnterp.route_kernels(model.family, 'torch'), to read these` | every recurrent `linear_attn` value but `attention_output` | `mamba_ssm` / `flash-linear-attention` installed and the family not routed |
@@ -291,8 +291,10 @@ Within one invoke, values are read and edited in the order the forward reaches t
 dotted names (`model.order()` the root's), and `model.rank(name, layer)` gives one sortable
 `(side, r)` per value: `side` is `-1` for a root value before the blocks, the layer for a
 block value, `num_layers` for a root value after them. Like `support()`, both are asked
-outside a trace; the first call measures the order with one probe `scan` and keeps it on the
-model, so route kernels (`route_kernels`, `chunk_per_token`) before it.
+outside a trace; the first call measures the order with one probe run (a `scan` on a model
+not yet dispatched, a short `trace` on a dispatched one, whose modules a scan would leave
+holding fake tensors) and keeps it on the model, so route kernels (`route_kernels`,
+`chunk_per_token`) before it.
 
 Use them when one trace reads or edits values at several sites in an order the code
 decides: a helper that takes a list of `(value, block)` sites, a sweep that patches several

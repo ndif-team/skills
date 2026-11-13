@@ -158,7 +158,8 @@ except RuntimeError as error:
 | ``... prompt was split across steps by chunked prefill`` | `enable_chunked_prefill=True` was passed and this prompt exceeded the step's token budget → drop the flag (off by default), or raise `max_num_batched_tokens` |
 | ``enforce_eager=... contradicts taps=...`` | not a `RuntimeError`: a plain `ValueError` in your process when the engine is built, since the engine mode follows from `taps` → drop `enforce_eager` |
 | ``data_parallel_size > 1 is not supported on an nnsight engine`` | not a `RuntimeError`: a `NotImplementedError` in your process when the model is built → use `tensor_parallel_size`, or one `VLLM` per GPU |
-| ``nnsight does not support vLLM's compiled-graph Ray executor`` | `VLLM_USE_RAY_V2_EXECUTOR_BACKEND=0`, refused as the engine starts → unset it; vLLM's default Ray executor works |
+| ``vLLM chose its V1 model runner for this engine`` | `VLLM_USE_V2_MODEL_RUNNER=0`, or an engine option only vLLM's older runner supports; refused as the engine starts, so the message is in the `(EngineCore pid=...)` log → unset the variable, or drop the option the log names |
+| ``EngineDeadError`` on a request with `lora_request=`, and on every request after it | the engine could not load the adapter (a missing path, a rank over `max_lora_rank`); the real message is in the `(EngineCore pid=...)` log → rebuild the engine, and load adapters first with `model.vllm_entrypoint.llm_engine.add_lora(request)`, which raises an ordinary exception and leaves the engine serving |
 | a pickling error, such as ``cannot pickle 'generator' object`` | a saved value that plain `pickle` cannot carry home (a lambda, a generator, a locally defined class) → save a tensor, number or plain container instead |
 
 ## Remote

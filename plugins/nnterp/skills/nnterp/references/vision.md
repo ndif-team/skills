@@ -240,7 +240,8 @@ assert not torch.equal(edited, vlogits)
 
 Read order is the forward's: `vision.image_token_mask` first (it comes off the inputs, like
 `input_ids`; under `generate` on transformers 5.18 and later it comes after the tower,
-[below](#under-generate)), then `vision.patch_embeddings`, the tower's blocks (a block's attention
+[below](#under-generate)), then `token_embeddings` (the wrapper embeds the ids before it runs
+the tower; under `generate`, after the tower and the mask), then `vision.patch_embeddings`, the tower's blocks (a block's attention
 interior before its `layer_output`), `vision.tower_output`, `projector`, then
 `vision.image_features`, then the text model's values. A late read raises
 `OutOfOrderError`. `model.rank` and `model.order` do not cover the tower's values, and their

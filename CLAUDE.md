@@ -150,6 +150,6 @@ routes into its `docs/`.
 - NDIF server: `ndif-team/ndif` (`docs/concepts/request-lifecycle.md` is the
   keystone)
 - nnsight: `ndif-team/nnsight`, branch `dev`
-- nnterp: `ndif-team/nnterp` (every docs snippet runs against the tiny
-  checkpoints in its `tests/families/`)
+- nnterp: `ndif-team/nnterp`, branch `v2.0.0` (every docs snippet ran
+  against the tiny checkpoints in its `tests/families/`)
 - Tutorials and paper implementations: `ndif-team/nnsight-website`, `docs/`

@@ -223,6 +223,10 @@ SmolLM2. Noising swaps the roles; the code is symmetric.
   patch of `attention_keys` / `attention_values`, in place or by assignment, is local to
   the block it is made on; to patch what every borrower attends with, patch the source
   block's `k_proj` / `v_proj` output.
+- **A `layer_output` patch is not the whole state where blocks pass more forward**: Gemma-4
+  E2B/E4B (per-layer inputs, shared keys and values), DeepSeek-V4 (hash-routed blocks read
+  the token ids), GLM-5 and ZAYA (the block's second output). On GLM-5 and ZAYA patch
+  `layers[i].output` whole.
 - **Granite line in bf16**: a write at one position of a contribution shifts every
   position slightly (the scaled copy is divided back); patch in float32.
 - **Gemma-4, Doge, ZAYA**: a contribution patched at block `i` reaches the last

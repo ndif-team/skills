@@ -45,12 +45,14 @@ prompt = "The Eiffel Tower is in the city of"
 
 ## `EProperty`
 
-`EProperty(key=None, description=None, unavailable=None, select=None)` decorates a
+`EProperty(key=None, description=None, unavailable=None, select=None, in_place=False)` decorates a
 *preprocess*: a function of `(self, value)` mapping the served value to what the user
 reads. `key` is where the value lives, as a path from the host envoy; it defaults to the
 stub's name. `description` is what the repr prints. `unavailable` is a reason string or
 a function of the envoy returning one or `None`, checked on every read and write.
-`select` picks one element of the served value.
+`select` picks one element of the served value. `in_place=True` copies an assignment into
+the held tensor instead of swapping another in, for a module input the forward also holds
+under another name (`layer_mid`, which the block binds to `residual` too).
 
 ### The path
 

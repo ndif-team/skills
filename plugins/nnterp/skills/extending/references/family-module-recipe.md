@@ -70,10 +70,15 @@ families.lookup("zamba2", engine="vllm")
    subclass for a hybrid), overriding only what the forward spells differently.
 4. Key them in `ENVOYS` on the transformers module classes.
 5. When the config spells a root size its own way (`n_inner`, `ffn_dim`, `v_head_dim`),
-   define `def <size>(model)` at module level; when the model does something to the
-   head's output (a scale, a cast), define `def project_on_vocab(model, hidden)`. The
-   suite's `test_sizes_match_the_model` and `test_project_on_vocab_is_the_logit_lens`
-   check them.
+   define `def <size>(model)` at module level; when the model's path from the last
+   block's output to its logits is not `lm_head(norm(h))` plus the config's softcap (a
+   scale, a cast, a projection, a final norm the config can leave out, a wrapper that
+   drops a step its causal-LM class takes), define `def project_on_vocab(model, hidden)`.
+   Read the base model's `forward` after its block loop, the causal-LM class's after the
+   base call, and each wrapper's the family covers, and grep them for every config field
+   they read. The suite's `test_sizes_match_the_model` and
+   `test_project_on_vocab_is_the_logit_lens` check them on the pinned checkpoint, where a
+   scale of 1.0 or a missing branch passes either way.
 6. A family whose checkpoints also load as an image-text-to-text wrapper adds the
    wrapper's spellings and its tower ([A vision tower in a family](#a-vision-tower-in-a-family)).
 7. Add `tests/families/test_<model_type>.py` and run it.
@@ -340,22 +345,29 @@ which that table omits). A module re-exports another's with an import
 `Attention` then subclasses V2's latent attention).
 
 `project_on_vocab` is a `StandardizedCapability`: the root's is `lm_head(norm(hidden))`
-plus `final_logit_softcapping` when the config sets it, and a family whose model does
-something else to the head's output defines `def project_on_vocab(model, hidden)`,
-bound in the root's place, so the lens on the last block still equals `logits`:
+plus `final_logit_softcapping` when the config sets it, and a family whose model takes
+another path to its logits defines `def project_on_vocab(model, hidden)`, bound in the
+root's place, so the lens on the last block still equals `logits`. Where a class decides
+the step, the function checks the class, as the model does:
 
 <!-- test: skip -->
 ```python
 # nnterp/families/cohere.py
 def project_on_vocab(model: "StandardizedTransformer", hidden: torch.Tensor) -> torch.Tensor:
-    """The logit lens as the model makes its logits: the final norm, ``lm_head``, then times ``logit_scale``."""
-    return model.lm_head(model.norm(hidden)) * model.config.logit_scale
+    """The logit lens as the model makes its logits: the final norm, ``lm_head``, then times ``logit_scale`` where the class applies it."""
+    logits = model.lm_head(model.norm(hidden))
+    if isinstance(model._module, (CohereForCausalLM, Cohere2ForCausalLM)):
+        return logits * model.config.logit_scale
+    return logits
 ```
 
-The others: Cohere-2 (imports Cohere's), Granite (`/ logits_scaling`; GraniteMoE,
-GraniteMoE-Shared, GraniteMoE-Hybrid, Granite-SWA, GraniteMoE-SWA import it), Falcon-H1
-(`* lm_head_multiplier`), HyperCLOVA X (`* logits_scaling`), Mamba, Falcon-Mamba,
-Mamba-2 and Nemotron-H (the head in its own dtype, float32 logits), DeepSeek-V4 (collapses its parallel streams with `hc_head` first).
+The others: Cohere-2 (imports Cohere's), Granite
+(`/ logits_scaling`; GraniteMoE, GraniteMoE-Shared, GraniteMoE-Hybrid, Granite-SWA,
+GraniteMoE-SWA import it), Falcon-H1 (`* lm_head_multiplier`), HyperCLOVA X
+(`* logits_scaling`), Gemma-2 and Gemma-3 (the cap only on the causal-LM class), Mamba,
+Falcon-Mamba, Mamba-2 and Nemotron-H (the head in its own dtype, float32 logits), ZAYA (the
+float32 stream cast to the final norm's dtype first), OPT (`project_out` where the decoder
+has it), DeepSeek-V4 (collapses its parallel streams with `hc_head` first).
 Each block's own sizes are not module functions but properties on the family's envoy
 subclasses ([descriptors.md](descriptors.md)).
 

@@ -171,7 +171,8 @@ with moe_model.trace() as tracer:
         base = moe_model.logits[0, -1].float().log_softmax(-1)[target].save()
     for e in range(moe.num_experts):
         with tracer.invoke(prompt):
-            moe.expert_weights[:] = moe.expert_weights.masked_fill(moe.expert_indices == e, 0)   # this invoke's rows only
+            idx = moe.expert_indices                                                      # first: JetMoE computes the indices before the weights
+            moe.expert_weights[:] = moe.expert_weights.masked_fill(idx == e, 0)           # this invoke's rows only
             rows.append(moe_model.logits[0, -1].float().log_softmax(-1)[target].save())
 effects = torch.stack(rows) - base                  # [experts]: change in log p(target)
 ```
