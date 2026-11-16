@@ -2,7 +2,7 @@
 
 A run writes one directory: a file per saved value, `manifest.json` and `tokens.json`. `nnspec show` prints how
 the run went, `nnspec table` prints saved values as rows labelled with their tokens and data, and `Plan.load`
-reads it all back in Python. The examples are the nnspec skill's worked document, `documents/ioi_patch.json`,
+reads it all back in Python. The examples are [SKILL.md](../SKILL.md)'s worked document, `documents/ioi_patch.json`,
 and the documents of the other references.
 
 ## The directory
@@ -93,7 +93,6 @@ with every cell whole, where the aligned form cuts cells at 48 characters, as it
 
 ## In Python
 
-<!-- test: skip -->
 ```python
 from nnspec import Plan
 
@@ -117,7 +116,6 @@ plan.run.tokens["pairs.input"][0][-3:]                # ['Ġa', 'Ġdrink', 'Ġto
 A `top_k` over several axes has no rows to table. Read it with the python nnspec is installed in; for
 [ops](ops.md#transform)' `documents/head_rank.json`:
 
-<!-- test: skip -->
 ```python
 from nnspec import Plan
 
@@ -132,7 +130,6 @@ On a swept document `plan.steps[<step>]` is a list of points, each with its `at`
 values. With `ioi_patch.json`'s `v_cf` and `patch` both at `{"index": {"sweep": [-1, -2], "label": "p"}}`, run into
 `out/ioi_pos_sweep`, zip the read's points with the write's to check that they moved together:
 
-<!-- test: skip -->
 ```python
 plan = Plan.load("out/ioi_pos_sweep")
 for read, write in zip(plan.steps["counterfactual"], plan.steps["patched"]):
@@ -157,7 +154,6 @@ record holds its `schedule`. A field at its default is left out, so read the man
 
 ## A saved value elsewhere
 
-<!-- test: skip -->
 ```python
 from safetensors.torch import load_file
 
@@ -167,7 +163,7 @@ load_file("out/ioi_patch/patched_ld.safetensors")     # {'patched_ld': tensor([[
 - **A file holds the value under its save's name**; a swept file one tensor per point, keyed by coordinate; a dict value (`top_k`'s) one per member.
 - **The layout is the manifest's `dims`**: `[rows, pos]` here, rows in the dataset's order after narrowing.
 - **A `.json` save** (text) reads with `json.load`.
-- **Another document brings a saved value in with a `load` step**, `{"kind": "load", "from": "out/x", "value": "<save>"}`, with its layout, dataset and sweep axes; the cached-harvest recipe is the `nnspec-trained-featurizers` skill's.
+- **Another document brings a saved value in with a `load` step**, `{"kind": "load", "from": "out/x", "value": "<save>"}`, with its layout, dataset and sweep axes; the cached-harvest recipe is the [trained-featurizers guide](trained-featurizers.md)'s.
 
 ## Tabling needs the rows
 

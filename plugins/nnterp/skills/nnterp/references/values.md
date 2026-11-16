@@ -9,7 +9,6 @@ same thing. The attention interior has its own file,
 [mixture-of-experts.md](mixture-of-experts.md); recurrent mixers
 [recurrent-mixers.md](recurrent-mixers.md).
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -186,7 +185,6 @@ assert type(model.layers[2]).returns_tuple is False
 assert torch.equal(raw, out)                          # GPT-2: a tensor block
 ```
 
-<!-- test: skip -->
 ```python
 bloom = StandardizedTransformer("bigscience/bloom-560m", device="cpu", dispatch=True)
 
@@ -272,7 +270,6 @@ adds; the identity is what you rely on, not `self_attn.output[0]`.
 The skipped blocks below show the post-norm and residual-inside forms on public
 checkpoints:
 
-<!-- test: skip -->
 ```python
 gemma = StandardizedTransformer("google/gemma-2-2b", device="cpu", dispatch=True)
 
@@ -312,7 +309,6 @@ on 26B-A4B and 31B), then `*= layer_scalar`, a per-block buffer far from one
 A term from block `i` reaches the last stream times the scalars of blocks `i`
 through the last:
 
-<!-- test: skip -->
 ```python
 model = StandardizedTransformer("google/gemma-4-E2B", device="cpu", dispatch=True, dtype=torch.float32)
 has_ple = model.support().get("per_layer_output", "absent") is None        # decided outside the trace
@@ -334,7 +330,7 @@ weighted = {key: reach[key[1]] * t for key, t in terms.items()}           # what
 torch.testing.assert_close(reach[0] * base + sum(weighted.values()), final, rtol=1e-4, atol=1e-4)
 ```
 
-Attribute with `weighted` (through `lm_head`, as in the `patterns` skill).
+Attribute with `weighted` (through `lm_head`, as in the [patterns guide](patterns.md)).
 Steering a contribution at block `i` moves the last stream `reach[i]` times as
 much; `steer` writes `layer_output`, after the scalar. The logit lens is
 unaffected: the final RMS norm divides the scale back out.
@@ -344,7 +340,6 @@ unaffected: the final RMS norm divides the scale back out.
 one) and adds the modules' outputs unscaled: `h = input_residual * input +
 attention_output`, `layer_output = post_attention_residual * h + mlp_output`:
 
-<!-- test: skip -->
 ```python
 gate_in = [layer._module.input_residual.float() for layer in model.layers]          # [hidden] each
 gate_post = [layer._module.post_attention_residual.float() for layer in model.layers]
@@ -452,7 +447,6 @@ a bf16 softmax (off by up to ~2e-3): take `logits[:, -1].float().softmax(-1)` fo
 a metric. It can hold exact zeros, so a KL needs `torch.special.xlogy` or
 `F.kl_div` on log-softmax, never `p * (p.log() - q.log())` (NaN on Pythia).
 
-<!-- test: expect-error AttributeError -->
 ```python
 with model.trace(prompt):
     model.next_token_probs = model.next_token_probs * 0     # AttributeError: assign model.logits instead

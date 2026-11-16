@@ -25,7 +25,6 @@ wakes with the real tensor, runs until its next request, and hands control back.
 
 So inside a trace you hold **real `torch.Tensor`s**, not proxies or futures:
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -52,7 +51,6 @@ Within one invoke, you must touch modules in **forward-pass order**. The worker
 parks on each request; asking for layer 8 and then layer 2 means the model has
 already run past layer 2 when you ask, and nothing will ever wake you.
 
-<!-- test: expect-error OutOfOrderError -->
 ```python
 with model.trace("hello"):
     late = model.transformer.h[8].output
@@ -109,7 +107,7 @@ it can never read a name an invoke binds; accumulate into a saved container from
 inside the invokes instead — see
 [batching.md](batching.md#sharing-values-across-invokes). The body is ordinary
 Python against real values; for **remote** execution it is serialized and shipped,
-so locals from your own files need `nnsight.register(...)` (the `remote` skill).
+so locals from your own files need `nnsight.register(...)` (the [remote guide](remote.md)).
 
 ## Mental checklist when something misbehaves
 
@@ -123,4 +121,4 @@ so locals from your own files need `nnsight.register(...)` (the `remote` skill).
 | `NameError` on a cross-invoke value | the reader has not parked past the binder — park it, or `tracer.barrier(n)`; see [batching.md](batching.md#sharing-values-across-invokes) |
 | `NameError` in trace-body code outside the invokes | that code runs before every invoke; write into a `nnsight.save({})` from inside the invokes |
 
-Full error catalogue: the `debugging` skill.
+Full error catalogue: the [debugging guide](debugging.md).

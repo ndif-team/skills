@@ -4,7 +4,6 @@
 the same way `model.trace` interleaves the forward. Inside that block you can read
 and replace `.grad` on any tensor you captured during the forward.
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -238,7 +237,6 @@ assert torch.equal(logits_late, logits_plain)   # the late write did nothing
 On a forward-only trace it is a silent no-op — no error, no effect. Add a backward
 and the same code raises instead:
 
-<!-- test: expect-error RuntimeError -->
 ```python
 with model.trace(prompt):
     hidden = model.transformer.h[6].output
@@ -299,7 +297,7 @@ end of the run rather than hanging.
 
 - **Attribution patching** — gradients times clean/corrupt activation differences,
   a linear approximation of activation patching that costs 2 passes instead of N.
-  See the `attribution-patching` skill.
+  See the [attribution-patching guide](attribution-patching.md).
 - **Integrated gradients** — average `input × grad` along a path from a baseline;
   a loop of the pattern above.
 

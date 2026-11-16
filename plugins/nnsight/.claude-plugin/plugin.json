@@ -1,8 +1,17 @@
 {
   "name": "nnsight",
-  "version": "2.0.0",
-  "description": "Neural network interpretability with nnsight 0.8 - tracing, intervening, patching, steering, debugging, and remote execution on NDIF",
+  "description": "Read and edit the internals of any PyTorch model with nnsight: tracing, interventions, gradients, remote execution on NDIF, debugging, and a guide per interpretability technique",
   "author": {
-    "name": "NDIF Team"
-  }
+    "name": "NDIF Team",
+    "email": "info@ndif.us"
+  },
+  "repository": "https://github.com/ndif-team/skills",
+  "license": "MIT",
+  "keywords": [
+    "interpretability",
+    "nnsight",
+    "ndif",
+    "pytorch",
+    "activations"
+  ]
 }

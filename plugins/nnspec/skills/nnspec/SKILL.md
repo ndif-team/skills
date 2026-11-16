@@ -1,6 +1,6 @@
 ---
 name: nnspec
-description: Write, run and read back an nnspec experiment, a JSON document that reads and writes a transformer's internals by nnterp component name and scores them. Load it first for any nnspec task. It covers the document's keys (model, data, sites, interventions, featurizers, steps, saves), the step kinds forward, generate, op, fit and load, entries and their ops, pos and scopes, sweeps and labels, and saves. It covers checking with nnspec compile, running with nnspec run on the nnterp, hooks, ndif or vllm engine, and reading back with nnspec show, nnspec table, Plan.load, the manifest and the safetensors files. It answers what nnspec can express (nnspec describe) and lists the silent mistakes that run without a refusal. For a technique's recipe go on to nnspec-patching, nnspec-ablation, nnspec-lenses-and-attention, nnspec-steering-and-generation or nnspec-trained-featurizers. For a refusal or wrong numbers, go to nnspec-debugging.
+description: "Run an interpretability experiment on a transformer language model as one JSON document, with no intervention code to write. Load this first, before writing any code, whenever a request asks what a model's internals do and names no library: logit and tuned lens, activation, path and attribution patching, causal tracing, zero, mean and resample ablation, attention patterns and finding induction or other attention heads, steering vectors and scoring what a model generates, linear probes, SAEs, DAS, LoRA. Covers which layer, position, head or neuron carries a behaviour, what each layer predicts and what a direction does. Also for any nnspec task: writing a document (model, data, sites, steps, ops, sweeps, saves), nnspec compile, run and table, the nnterp, hooks, ndif and vllm engines, a refused document, or wrong numbers. When the experiment needs Python logic a document cannot express, use the nnterp skill; for a model family nnterp does not support, or raw module access, use the nnsight skill."
 ---
 
 # nnspec
@@ -9,6 +9,20 @@ nnspec runs an interpretability experiment on a transformer language model from 
 document holds the checkpoint, the data, the forwards and generations, the reads and writes at the model's
 components, the ops that score them, and what to save. `nnspec run` runs it in one nnsight session, naming
 components in nnterp's vocabulary, and writes each saved value to a directory that `nnspec table` prints as rows.
+
+This file is the document format. Each technique has its own guide, listed under [Guides](#guides): read
+the one that matches the task before writing a document.
+
+## Which library
+
+nnspec is the top of three libraries. When the user names a library, use it. Otherwise take the highest row that fits,
+and take a row only when its skill is available in this session:
+
+| Use | When |
+|---|---|
+| nnspec (this skill) | A standard experiment on a transformer language model (lens, patching, ablation, attention, steering, probes, SAEs, DAS) that fits a JSON document. No intervention code to write. |
+| `nnterp` skill | The experiment needs Python that a document cannot express, on a family nnterp knows. One module vocabulary on every family. |
+| `nnsight` skill | nnterp does not know the family, or the work needs access below nnterp's standard values: arbitrary modules, `.source`, your own or non-transformer models, diffusion, vLLM, tensor parallelism. Also existing nnsight code, and any error an nnsight trace raises. |
 
 Verified on nnspec `bb1c38a` with nnterp `e5d0f8e`, nnsight 0.8.2 and transformers 5.20.2; the documents run on
 the CPU on `openai-community/gpt2` in seconds, with their rows inline.
@@ -124,9 +138,9 @@ Each mistake below runs without a refusal and gives wrong numbers.
 - **A search of generated text loses the first token's space on a SentencePiece tokenizer.** Give the column `"strip": true` wherever `contains` or a scope searches a generation ([generate](references/generate.md#the-first-generated-tokens-space)).
 - **A mean over a generation skips rows it never reached.** Count the `alignment_missing` rows first ([positions](references/positions.md#rows-a-scope-never-reached)).
 - **A freeze listed after the patch it protects undoes the patch.** Of two writes on one component and layer the later wins; list the freeze first ([sites and interventions](references/sites-and-interventions.md#the-order-entries-run-in)).
-- **A `grad` null cannot catch the wrong metric.** A `grad` of the metric with `{"op": "mul", "with": 0}` appended must be exactly 0, which proves the gradient is of that entry and the wiring exact. That the entry is the metric you report takes a central difference at one point, and the ranking real patching of the top points ([check the gradient](../nnspec-patching/references/attribution.md#check-the-gradient)).
+- **A `grad` null cannot catch the wrong metric.** A `grad` of the metric with `{"op": "mul", "with": 0}` appended must be exactly 0, which proves the gradient is of that entry and the wiring exact. That the entry is the metric you report takes a central difference at one point, and the ranking real patching of the top points ([check the gradient](references/patching-attribution.md#check-the-gradient)).
 - **A published SAE with a wrong `centered`, `activation` or layer is not refused.** State all three inline from its release, and compare its mean L0 with the release's ([featurizers and fit](references/featurizers-and-fit.md#a-published-sparse-autoencoder)).
-- **A null that passes in bfloat16 certifies the wiring, not small effects.** Recompute a few points in float32 before reading an effect near bfloat16's rounding ([the float32 rule](../nnspec-debugging/SKILL.md#the-float32-rule)).
+- **A null that passes in bfloat16 certifies the wiring, not small effects.** Recompute a few points in float32 before reading an effect near bfloat16's rounding ([the float32 rule](references/debugging.md#the-float32-rule)).
 
 ## The document
 
@@ -251,7 +265,6 @@ nnspec run DOC [--engine nnterp|hooks|ndif|vllm] [--out DIR] [--batch-size N] [-
              [--readout full|at-reads] [--device D] [-o KEY=VALUE ...]
 ```
 
-<!-- test: skip -->
 ```python
 import nnspec
 plan = nnspec.run("documents/ioi_patch.json", out="out/ioi_patch", batch_size=8)   # the filled plan
@@ -279,14 +292,14 @@ memory.
 
 [Output](references/output.md) has the columns, the joins and the manifest.
 
-## Which skill
+## Guides
 
-- **`nnspec-patching`**: which layer, position, head, neuron or path carries a behaviour; interchange, path and attribution patching.
-- **`nnspec-ablation`**: what a component contributes when removed: zero, mean, resample, constant, neuron and expert ablation.
-- **`nnspec-lenses-and-attention`**: what each layer predicts (logit and tuned lens) and where a head looks.
-- **`nnspec-steering-and-generation`**: steering with a direction, and scoring what a generation says.
-- **`nnspec-trained-featurizers`**: DAS, DBM, head masks, SAEs, probes, LoRA, cached harvests and bundles.
-- **`nnspec-debugging`**: a refusal, numbers that look wrong, runs that differ, out of memory.
+- **[patching guide](references/patching.md)**: which layer, position, head, neuron or path carries a behaviour; interchange, path and attribution patching.
+- **[ablation guide](references/ablation.md)**: what a component contributes when removed: zero, mean, resample, constant, neuron and expert ablation.
+- **[lenses-and-attention guide](references/lenses-and-attention.md)**: what each layer predicts (logit and tuned lens) and where a head looks.
+- **[steering-and-generation guide](references/steering-and-generation.md)**: steering with a direction, and scoring what a generation says.
+- **[trained-featurizers guide](references/trained-featurizers.md)**: DAS, DBM, head masks, SAEs, probes, LoRA, cached harvests and bundles.
+- **[debugging guide](references/debugging.md)**: a refusal, numbers that look wrong, runs that differ, out of memory.
 
 Depth, and extending nnspec with a new op, kind, component or engine, are in the docs:
 `https://github.com/JadenFiotto-Kaufman/nnspec/tree/master/docs`.

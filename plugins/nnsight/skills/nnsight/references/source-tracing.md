@@ -7,7 +7,6 @@ probabilities, a pre-activation, an intermediate projection — use `.source`.
 nnsight rewrites the module's forward so every call site *and every assignment*
 becomes hookable, with the same `.input` / `.output` / `.skip` interface.
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -140,7 +139,7 @@ print(len(patterns), patterns[0].shape)
 ```
 
 Per-head metrics on these patterns (previous-token, induction, sink, entropy) are
-in the `attention-analysis` skill.
+in the [attention-analysis guide](attention-analysis.md).
 
 ## Drilling deeper
 
@@ -215,7 +214,6 @@ those under an `if` this config makes false. Asking for one fails with the
 operations and runs 28: `transpose_0` is the dead cross-attention key transpose,
 `transpose_2` the one GPT-2 performs.
 
-<!-- test: expect-error OutOfOrderError -->
 ```python
 with model.trace(prompt):
     dead = model.transformer.h[0].attn.source.transpose_0.output.save()

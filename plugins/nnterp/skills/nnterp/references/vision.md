@@ -12,7 +12,6 @@ tower and a Llama text model, every width 16, random weights), so they assert sh
 identities, never values. nnterp's own pages: `docs/usage/vision.md` and
 `docs/patterns/image-pathway.md`.
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -249,7 +248,6 @@ order differs by tower: on the Qwen ViT the merger (`projector`) runs inside the
 `tower_output` is served after it, so read `projector.input` and `projector.output` before
 `vision.tower_output`.
 
-<!-- test: expect-error NotImplementedError -->
 ```python
 with vlm.trace() as tracer:
     with tracer.invoke(vprompt, images=[image]):
@@ -320,7 +318,6 @@ the other blocks it is `Unavailable`. On `Qwen/Qwen3-VL-4B-Instruct`, asked the 
 red square on white, zeroing `image_features` alone still answers "Red"; zeroing
 `deepstack_output` on blocks 0-2 too answers "White".
 
-<!-- test: skip -->
 ```python
 qwen = StandardizedTransformer("Qwen/Qwen3-VL-4B-Instruct", task="image-text-to-text", dispatch=True, dtype=torch.bfloat16)
 content = [{"type": "image"}, {"type": "text", "text": "What color is the square?"}]
@@ -359,7 +356,6 @@ Gemma 3, Gemma 4 and Gemma 4 unified build the wrapper for the default
 load has no processor. There `model.vision.support()` is empty, `model.support()` has no
 `vision.` rows, and every tower value raises `Unavailable`, inside a trace too:
 
-<!-- test: expect-error Unavailable -->
 ```python
 text_only = StandardizedTransformer("trl-internal-testing/tiny-LlavaForConditionalGeneration", device="cpu", dispatch=True)
 assert text_only.vision.support() == {} and not any(k.startswith("vision.") for k in text_only.support())

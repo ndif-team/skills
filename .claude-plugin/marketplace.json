@@ -4,26 +4,29 @@
     "name": "NDIF Team",
     "email": "info@ndif.us"
   },
+  "metadata": {
+    "description": "Agent skills for neural network interpretability with nnsight, nnterp and nnspec, and for running your own NDIF server"
+  },
   "plugins": [
     {
-      "name": "nnsight",
-      "source": "./plugins/nnsight",
-      "description": "Neural network interpretability with nnsight and NDIF - tracing and intervening on model internals, debugging, remote execution, logit lens, activation patching, attribution patching, causal tracing, and steering"
+      "name": "nnspec",
+      "source": "./plugins/nnspec",
+      "description": "Interpretability experiments as JSON documents: lenses, patching, ablation, attention, steering, probes, SAEs and DAS with no intervention code"
     },
     {
       "name": "nnterp",
       "source": "./plugins/nnterp",
-      "description": "Architecture-agnostic interpretability with nnterp, a layer on nnsight that gives every transformer family the same module names and standard values - usage of the values, recipes that run unchanged across families, and extending it with a new family"
+      "description": "Interpretability code written once against one module vocabulary and one set of standard values across 98 transformer families, on nnsight"
+    },
+    {
+      "name": "nnsight",
+      "source": "./plugins/nnsight",
+      "description": "Read and edit the internals of any PyTorch model with nnsight: tracing, interventions, gradients, remote execution on NDIF, debugging, and a guide per interpretability technique"
     },
     {
       "name": "ndif",
       "source": "./plugins/ndif",
-      "description": "Self-hosting NDIF, the server behind nnsight's remote=True - standing one up with docker run, compose, or the ndif CLI; deploying, pinning and sizing models; troubleshooting; and changing the server itself"
-    },
-    {
-      "name": "nnspec",
-      "source": "./plugins/nnspec",
-      "description": "Interpretability experiments as JSON documents with nnspec - writing and running a document on nnterp, hooks, NDIF or vLLM, reading it back, and the recipes: patching, ablation, lenses and attention, steering and generation, trained featurizers (DAS, DBM, head masks, SAEs, probes, LoRA), and debugging a refusal or wrong numbers"
+      "description": "Run your own NDIF server, the backend behind nnsight's remote=True: stand it up, deploy and size models, fix it, and change its code"
     }
   ]
 }

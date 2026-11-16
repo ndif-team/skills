@@ -12,7 +12,6 @@ constructor in [api-reference.md](api-reference.md#model-classes).
 `LanguageModel` is a deprecated alias that warns; write
 `TransformersModel(repo_id, task="text-generation")`.
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -52,7 +51,7 @@ assert next(cpu_model.parameters()).device.type == "cpu"
 ```
 
 `dtype=` also takes a quantization name (`"nf4"`, `"int8"`, ...) for a checkpoint
-too big for the GPU you have; load the `quantization` skill before using one, since
+too big for the GPU you have; load the [quantization guide](quantization.md) before using one, since
 three of the formats fail silently rather than raising.
 
 ## Finding module paths
@@ -119,7 +118,7 @@ Two router traps that turn a plausible intervention into a no-op or a wrong inde
 - **The router returns `(logits, weights, index)`, and the block uses `[1]` and
   `[2]`.** Masking `gate.output[0]` is a silent no-op on `TransformersModel` —
   softmax and top-k already ran. Write the routing **weights** (`[1]`) or the
-  expert rows. (The `vllm` skill's `gate.output[0][:, e] = -inf` recipe is right
+  expert rows. (The [vllm guide](vllm.md)'s `gate.output[0][:, e] = -inf` recipe is right
   only for vLLM, whose router returns `(logits, bias)`.)
 - **Everything below the router is flat `(B*T, ...)`** — `gate.output`,
   `experts.output` and every `.source` op under them lose the batch axis, so the
@@ -179,7 +178,7 @@ An alias points at the *same* envoy, so cache keys and iteration are unaffected.
 For a maintained version of this idea across many architectures — one set of
 names (`model.layers[i].self_attn`, `.mlp`, `model.norm`) and standard values
 (`layer_output`, `attention_output`, `mlp_output`) on every family — see the
-nnterp plugin's `nnterp:nnterp` skill.
+`nnterp` skill.
 
 ## Any PyTorch module
 

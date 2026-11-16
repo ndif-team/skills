@@ -36,7 +36,6 @@ kernel), with the family module before loading or `model.family` after.
 `route_kernels(family, "default")` restores them; `route_delta_rule(family,
 "recurrent" | "chunked")` is the DeltaNet spelling of the same call.
 
-<!-- test: skip -->
 ```python
 import torch
 import nnterp
@@ -82,7 +81,6 @@ is off by ~70%); Mamba-1's and Mamba-2's add the `D` skip.
 
 ## Reading the values
 
-<!-- test: skip -->
 ```python
 with model.trace(prompt):
     q = mix.attention_queries.save()        # [batch, seq, heads, key_dim]
@@ -105,7 +103,6 @@ for hundreds of lines, so read `support(layer=i)`.
 
 ## The state after every token
 
-<!-- test: skip -->
 ```python
 with model.trace(prompt):
     states = mix.states.save()                 # [batch, seq, heads, key_dim, value_dim]
@@ -144,7 +141,6 @@ the state is not:
 A prompt runs the chunk (or scan) kernel and each decode step the single-step
 kernel; the values follow whichever fires, and the state hands off:
 
-<!-- test: skip -->
 ```python
 entering, leaving = [], []                       # outside the block: a name bound inside does not survive it
 with model.generate(prompt, max_new_tokens=3, do_sample=False) as tracer:
@@ -167,7 +163,6 @@ separate runs when unsure.
 
 Writing `state_input` at a decode step continues from another prompt's memory:
 
-<!-- test: skip -->
 ```python
 with model.trace("My favourite food is pizza with"):
     other_state = mix.state_output.save()

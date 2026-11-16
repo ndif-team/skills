@@ -40,7 +40,7 @@ assert len(nnterp.families.known()) == 99      # 98 families + kimi_k25, Kimi K2
 | `RecurrentMixer`, `LinearAttention`, `SelectiveScan`, `StateSpace` | the recurrent-mixer base and its DeltaNet, Mamba-1 and Mamba-2 subclasses |
 | `Vision` | a vision-language wrapper's tower root, `model.vision`; its block and wrapper envoys are in `nnterp.components` (below) |
 | `Standard` | the envoy base of them all: `values()`, `support()`, `sourced` |
-| `EProperty`, `DerivedEProperty`, `unavailable` | the descriptors a value is made of, and a value a family lacks (the `extending` skill); `TokenEProperty` is in `nnterp.components` |
+| `EProperty`, `DerivedEProperty`, `unavailable` | the descriptors a value is made of, and a value a family lacks (the [extending guide](extending.md)); `TokenEProperty` is in `nnterp.components` |
 | `route_kernels`, `route_delta_rule`, `chunk_per_token` | the recurrent kernel switch (process-wide), its DeltaNet spelling, Mamba-2's per-token chunking (per model) |
 | `Unavailable`, `UnsupportedFamily` | the two exceptions nnterp raises itself |
 | `axis_size(envoy, axis)` | the size of a layout axis that is a fact about the model (`num_heads`, `hidden_size`, ...) for a value served on `envoy` |
@@ -57,7 +57,7 @@ StandardizedTransformer(repo_id, *args, family=None, rename=None, envoys=None, t
 | argument | meaning |
 |---|---|
 | `repo_id` | a Hub repo id, or an already-loaded `torch.nn.Module` (its own `config` is read) |
-| `family` | the family for this load instead of the one looked up: a module or object with `RENAME` and `ENVOYS` (the `extending` skill); nothing is registered |
+| `family` | the family for this load instead of the one looked up: a module or object with `RENAME` and `ENVOYS` (the [extending guide](extending.md)); nothing is registered |
 | `rename` | extra nnsight aliases merged over the family's `RENAME`; a key given here wins |
 | `envoys` | extra `envoys=` entries merged over the family's `ENVOYS`; keys are module **types** or paths (native, or any alias spelling); type keys are tried first, so a family's type key wins over a path key |
 | `tokenizer_kwargs` | attributes set on the loaded tokenizer: `{"padding_side": "left", "pad_token": ...}` |

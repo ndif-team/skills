@@ -1,13 +1,25 @@
 ---
 name: nnsight
-description: "Read, modify, and analyze the internals of neural networks with nnsight — tracing activations with model.trace, intervening on modules, batching interventions, gradients, caching, generation, and running on NDIF. Use for any task that touches model internals rather than just model outputs: interpretability experiments, activation extraction, ablation, patching, steering, probing, circuit analysis, or debugging existing nnsight code — and whenever you would otherwise reach for PyTorch forward hooks (register_forward_hook) to read or edit activations. Covers nnsight 0.8 (TransformersModel, tracer.result, no .value) — load this before writing any nnsight code, since idioms from older versions are still widespread and silently wrong."
+description: "Read and edit the internals of any PyTorch model with nnsight: model.trace, .save(), interventions, batched invokes, gradients, .source, generation, and remote execution on NDIF (remote=True) for models too large to run locally. Load before writing, fixing or explaining any nnsight code, however short: idioms from before 0.8 (.value, LanguageModel, proxies) are widespread and silently wrong. Use for an nnsight error such as OutOfOrderError, a hang or a wrong result, porting old code, a model family nnterp does not support, arbitrary module or .source access, diffusion and vision-language models, vLLM, tensor parallelism and 4/8-bit loading, and wherever PyTorch forward hooks would otherwise be written. Bundles a guide per technique: logit lens, activation and attribution patching, causal tracing, ablation, attention analysis, circuit discovery, probing, SAEs, steering, editing and LoRA. The base layer under nnterp and nnspec: for a standard experiment on a supported transformer prefer nnspec, then nnterp."
 ---
 
 # nnsight
 
 nnsight reads, replaces and backpropagates through every intermediate value in a
 model's forward pass, locally or on NDIF for models too large for your machine.
-Techniques built on it have their own skills (listed at the bottom).
+This file is the core API. Each technique and runtime has its own guide, listed
+under [Guides](#guides): read the one that matches the task before writing code.
+
+## Which library
+
+nnsight is the base of three libraries. When the user names a library, use it. Otherwise take the highest row that fits,
+and take a row only when its skill is available in this session:
+
+| Use | When |
+|---|---|
+| `nnspec` skill | A standard experiment on a transformer language model (lens, patching, ablation, attention, steering, probes, SAEs, DAS) that fits a JSON document. No intervention code to write. |
+| `nnterp` skill | The experiment needs Python that a document cannot express, on a family nnterp knows. One module vocabulary on every family. |
+| nnsight (this skill) | nnterp does not know the family, or the work needs access below nnterp's standard values: arbitrary modules, `.source`, your own or non-transformer models, diffusion, vLLM, tensor parallelism. Also existing nnsight code, and any error an nnsight trace raises. |
 
 ## Orientation
 
@@ -58,7 +70,7 @@ assert len(per_layer) == 12
 There is no `.value` in 0.8 — the saved variable *is* the tensor. Saved
 activations arrive with `requires_grad=True` and a live `grad_fn` that keeps the
 forward graph alive: `.detach()` anything you keep or reuse (full story: the
-`sae-and-dictionary-learning` skill and
+[sae-and-dictionary-learning guide](references/sae-and-dictionary-learning.md) and
 [references/gradients.md](references/gradients.md)).
 
 **2. Access modules in forward-pass order.** Reading layer 8 then layer 2 raises
@@ -83,7 +95,7 @@ N traces to fetch N layers is N forward passes (remotely, N round-trips).
 **5. Old nnsight code is everywhere and it is wrong here.** `.value`,
 `nnsight.list()`, `tracer.next()`, `with tracer.all():`, `LanguageModel`,
 "proxies" — all pre-0.8. If you are adapting code from a tutorial or a paper repo,
-convert it first; see the `debugging` skill.
+convert it first; see the [debugging guide](references/debugging.md).
 
 ## Picking a run method
 
@@ -159,14 +171,13 @@ The same trace runs on NDIF against a model you can't fit locally — add
 `remote=True` and reduce metrics *before* saving, since every `.save()` is a
 download:
 
-<!-- test: remote -->
 ```python
 with model.trace(prompt, remote=True):
     last = model.transformer.h[-1].output[:, -1].detach().cpu().save()
 ```
 
 Anything beyond one trace should be a `model.session(remote=True)` — one job
-instead of N round-trips. Load the `remote` skill before writing remote code.
+instead of N round-trips. Load the [remote guide](references/remote.md) before writing remote code.
 
 ## References
 
@@ -188,28 +199,31 @@ Scripts (run them, don't read them): `scripts/inspect_model.py <repo_id>
 without weights; `scripts/check_env.py [--remote]` — versions, GPUs, NDIF key and
 host, deployed models.
 
-## Related skills
+## Guides
+
+Read the guide for the task before writing code. Each is self-contained, and
+carries the traps specific to its technique.
 
 Techniques:
 
-- `ablation` — remove a component (zero, mean, resample) to test necessity
-- `activation-patching` — copy activations between runs to localize a behavior
-- `attribution-patching` — gradient approximation of patching, for screening
-- `causal-tracing` — ROME-style corrupt-and-restore to find where a fact lives
-- `attention-analysis` — attention patterns, per-head metrics, head types
-- `logit-lens` — decode intermediate residual streams through the unembedding
-- `probing` — classifiers on activations: what is decodable, and where
-- `circuit-discovery` — find and validate the subgraph a task uses
-- `model-steering` — add directions to the residual stream at inference
-- `model-editing-and-lora` — persistent weight/activation edits, ROME, LoRA
-- `sae-and-dictionary-learning` — sparse autoencoders: attach, read, train
-- `interp-experiment-design` — metrics, prompt sets, controls, baselines
+- [ablation](references/ablation.md) — remove a component (zero, mean, resample) to test necessity
+- [activation-patching](references/activation-patching.md) — copy activations between runs to localize a behavior
+- [attribution-patching](references/attribution-patching.md) — gradient approximation of patching, for screening
+- [causal-tracing](references/causal-tracing.md) — ROME-style corrupt-and-restore to find where a fact lives
+- [attention-analysis](references/attention-analysis.md) — attention patterns, per-head metrics, head types
+- [logit-lens](references/logit-lens.md) — decode intermediate residual streams through the unembedding
+- [probing](references/probing.md) — classifiers on activations: what is decodable, and where
+- [circuit-discovery](references/circuit-discovery.md) — find and validate the subgraph a task uses
+- [model-steering](references/model-steering.md) — add directions to the residual stream at inference
+- [model-editing-and-lora](references/model-editing-and-lora.md) — persistent weight/activation edits, ROME, LoRA
+- [sae-and-dictionary-learning](references/sae-and-dictionary-learning.md) — sparse autoencoders: attach, read, train
+- [interp-experiment-design](references/interp-experiment-design.md) — metrics, prompt sets, controls, baselines
 
 Infrastructure:
 
-- `remote` — running on NDIF: sessions, request batching, download size
-- `debugging` — an error, a hang, an empty result, or pre-0.8 code to port
-- `vllm` — nnsight inside the vLLM engine: throughput, serving, taps
-- `tensor-parallel` — a model sharded across GPUs with transformers TP
-- `quantization` — 4/8-bit loading and what it changes in a trace
-- `diffusion-and-multimodal` — VLMs, diffusion pipelines, audio/vision encoders
+- [remote](references/remote.md) — running on NDIF: sessions, request batching, download size
+- [debugging](references/debugging.md) — an error, a hang, an empty result, or pre-0.8 code to port
+- [vllm](references/vllm.md) — nnsight inside the vLLM engine: throughput, serving, taps
+- [tensor-parallel](references/tensor-parallel.md) — a model sharded across GPUs with transformers TP
+- [quantization](references/quantization.md) — 4/8-bit loading and what it changes in a trace
+- [diffusion-and-multimodal](references/diffusion-and-multimodal.md) — VLMs, diffusion pipelines, audio/vision encoders

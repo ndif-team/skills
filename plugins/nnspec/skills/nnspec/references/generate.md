@@ -3,7 +3,7 @@
 A `generate` step runs the model's `generate` on every row of its `input`. Its value is the new token ids,
 `[rows, new]`; `detokenize` makes them text. Its entries read and write at the forward calls their `pos`'s
 `frame` names: call 0 is the prefill, call k ≥ 1 decode call k. Scoring what a generation says, steering it and
-generating from chats are the `nnspec-steering-and-generation` skill's; this page is the mechanics.
+generating from chats are the [steering-and-generation guide](steering-and-generation.md)'s; this page is the mechanics.
 
 ## Options
 

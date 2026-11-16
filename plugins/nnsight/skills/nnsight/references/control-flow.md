@@ -2,7 +2,6 @@
 
 Four ways to change *what runs*, rather than what a value is.
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -152,7 +151,7 @@ print([round(n.item(), 1) for n in norms])
 ```
 
 Sessions matter most **remotely**, where a session is one job instead of N — see
-the `remote` skill.
+the [remote guide](remote.md).
 
 ## model.edit() — interventions that persist
 

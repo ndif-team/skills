@@ -30,7 +30,7 @@ On GPT-2 these hold to the bit: `layer_input` + `attention_output` is `layer_mid
 is `layer_output`, block 2's `layer_output` is block 3's `layer_input`, and `lm_head_output` is `logits`.
 Check them on another architecture before relying on one. A mixture of experts adds routing and expert
 components (`router_logits`, `expert_outputs`, …), each with its when-to-read line and recipes in the
-`nnspec-ablation` skill ([experts](../../nnspec-ablation/references/keys-experts-and-hydra.md#expert-knockout)).
+[ablation guide](ablation.md) ([experts](ablation-keys-experts-and-hydra.md#expert-knockout)).
 
 ### Attention needs eager
 
@@ -99,7 +99,7 @@ tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave 
 - **A write selects on one axis**; a read may select heads and dimensions together.
 - **A `select` applies at every layer of its site**: `{"component": "mlp_activation", "layers": [3, 5], "select": {"intermediate_size": [1, 2]}}` is neurons 1 and 2 at both layers. Other picks at each layer are one site per layer, each with its own `select`.
 - **A pick outside the axis, or an axis the component lacks, is refused**: `select num_heads [12] outside the model's 12`; `layer_output has no axis 'num_heads' to select; its axes: hidden_size`.
-- **`{"key": {"offset": -1}}` is each query's previous token** on an attention pattern, a read only; the `nnspec-lenses-and-attention` skill has its recipes.
+- **`{"key": {"offset": -1}}` is each query's previous token** on an attention pattern, a read only; the [lenses-and-attention guide](lenses-and-attention.md) has its recipes.
 - **`readout` needs the whole stream, and a metric the whole vocabulary**: select after them, in a second read, never before.
 
 ## Read or write
@@ -241,18 +241,18 @@ mary        0    13   Ġto        When Mary and John went to the store, John gav
 tom         1    13   Ġto        When Tom and Anna went to the park, Anna gave a…  0.5705670714378357  0.0        Tom    Anna  2.5811233520507812
 ```
 
-- **The null must be exactly 0**: a `grad` of the metric's entry with `{"op": "mul", "with": 0}` appended. It proves the gradient is of the entry you zeroed and the wiring exact, not that the entry is the metric you report. A central difference at one point checks that, and real patching of the top points the ranking ([check the gradient](../../nnspec-patching/references/attribution.md#check-the-gradient)).
+- **The null must be exactly 0**: a `grad` of the metric's entry with `{"op": "mul", "with": 0}` appended. It proves the gradient is of the entry you zeroed and the wiring exact, not that the entry is the metric you report. A central difference at one point checks that, and real patching of the top points the ranking ([check the gradient](patching-attribution.md#check-the-gradient)).
 - **Not `scale` 0 for the null**: after a metric it is refused as an edit, and alone at the head it zeroes the logits every later entry reads.
 - **Rows do not mix in a forward**, so each row gets its own gradient.
 - **At one site a `grad` reads as a read does**: listed after a write it differentiates the written value.
 - **No gradient reaches the model's weights**, and one backward runs per distinct `of`.
 - **`grad` is refused in a `generate`, in a fit's body, under `tp` and on the vllm engine.**
 
-Attribution patching built on `grad` is the `nnspec-patching` skill's.
+Attribution patching built on `grad` is the [patching guide](patching.md)'s.
 
 ## The null control
 
 Write back what was read, on the same input, at the same place: its scores must equal the clean run's, as
-`null_ld` equals `clean_ld` in the nnspec skill's worked document. The other edits have nulls of the same kind:
+`null_ld` equals `clean_ld` in [SKILL.md](../SKILL.md)'s worked document. The other edits have nulls of the same kind:
 `add` at `"scale": 0.0`, `scale` at `"factor": 1.0`, a permutation that is the identity. Using the nulls to
-diagnose a run is the `nnspec-debugging` skill's.
+diagnose a run is the [debugging guide](debugging.md)'s.

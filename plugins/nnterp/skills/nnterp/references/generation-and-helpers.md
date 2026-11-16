@@ -1,6 +1,5 @@
 # Generation, the helper modules, and `remote=True`
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -90,7 +89,7 @@ patch what chosen heads read on every step without touching the cache, call
 `self_attn.interface` on edited copies and write the chosen heads of
 `attention_head_outputs`
 ([attention-interior.md](attention-interior.md#calling-the-attention-function-again-interface);
-the `patterns` skill's head-selective K/V patching runs it under `generate`). The keys and
+the [patterns guide](patterns.md)'s head-selective K/V patching runs it under `generate`). The keys and
 values grow with the cache and the queries do not, so a head-wise edit of `attention_keys`
 on a decode step touches the whole context.
 
@@ -127,7 +126,6 @@ so the mask and the features read in that order on every version; read the mask 
 tower value in separate generates. An edit placed before any step lands
 on the prompt call, so the whole generation runs without (or with the edited) image:
 
-<!-- test: setup -->
 ```python
 from PIL import Image
 
@@ -282,7 +280,7 @@ passes through to every trace, and a `get_probs_func` must forward it.
 ## `remote=True`: the contract
 
 `remote=True` on a `StandardizedTransformer` is nnsight's remote trace with
-nnterp's names and values in the block; the `remote` skill covers NDIF itself.
+nnterp's names and values in the block; the `nnsight` skill's remote guide covers NDIF itself.
 What nnterp adds:
 
 - **The request reaches a plain deployment.** The model key names
@@ -319,7 +317,6 @@ assert pattern.shape == (1, 12, n, n)
 assert torch.allclose(local_logits.to(plain_logits.device), plain_logits)
 ```
 
-<!-- test: remote -->
 ```python
 with model.trace(prompt, remote=True):
     last = model.layers[-1].layer_output[:, -1].save()
