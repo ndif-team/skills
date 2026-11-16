@@ -316,7 +316,9 @@ text blocks 0, 1 and 2, outside the blocks. `layers[k].deepstack_output`
 `layers[k+1].input[mask] == layers[k].layer_output[mask] + layers[k].deepstack_output`. On
 the other blocks it is `Unavailable`. On `Qwen/Qwen3-VL-4B-Instruct`, asked the color of a
 red square on white, zeroing `image_features` alone still answers "Red"; zeroing
-`deepstack_output` on blocks 0-2 too answers "White".
+`deepstack_output` on blocks 0-2 too answers "White". A wrapper that adds the image this
+second way has a `deepstack_output` row in `model.support()`; one without it (Qwen2-VL,
+Qwen3.5, the Llava wrappers) takes the image through `vision.image_features` alone.
 
 ```python
 qwen = StandardizedTransformer("Qwen/Qwen3-VL-4B-Instruct", task="image-text-to-text", dispatch=True, dtype=torch.bfloat16)

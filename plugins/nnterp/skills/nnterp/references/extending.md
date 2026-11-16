@@ -141,8 +141,9 @@ The root's `num_layers`, `hidden_size`, `vocab_size`, `num_heads`, `num_kv_heads
 family module defines `def <size>(model)`, which wins on read. `project_on_vocab` is a
 `StandardizedCapability`, the same for a method: `def project_on_vocab(model, hidden)`
 in the family module is bound in the root's place, so the lens on the last block still
-equals `logits` where the family applies a step after the head (a scale, a softcap, a
-stream collapse). Both are read-only; assigning raises `AttributeError` naming the function
+equals `logits` where the family applies a step after the head (a scale, a stream
+collapse; the root's own lens already applies the config's `final_logit_softcapping`, so a
+model that only softcaps needs no function). Both are read-only; assigning raises `AttributeError` naming the function
 to write. Which families define which: `docs/reference/families.md`, "Logits, scales and
 sizes".
 
@@ -169,6 +170,7 @@ Keep the name, the layout annotation and the description; change only the locati
 | has no per-head value slice, behind a plain `o_proj` (latent values, a norm on the values) | `def value_weight(self, kv_head): raise Unavailable(f"{self.path}.value_weight is not available: <why>")`; `output_weight` is still served | deepseek_v2.py, gemma4_text.py, zaya.py |
 | has no output projection its heads share (one per expert) | `def no_head_weights(self): return "<why>"`, the one place `value_weight` and `output_weight` both ask | jetmoe.py, deepseek_v4.py |
 | rotates another way (cos and sin from elsewhere, another apply function, a slice outside it) | override `rotary_embedding(x, position_ids)` or `apply_rotary(x, embedding)` on the `Attention`, so `rotate` keeps giving the served rotated values | gptj.py, granite_swa.py, phi.py, llama4_text.py |
+| norms the queries or keys after the rotary | nothing: the values before the rotary and `rotate` stay the rotary's input and output, and `attention_queries` is the norm of `rotate(...)` | hunyuan_v1_dense.py, llama4_text.py |
 | picks its operation by a config flag | a key function of the envoy returning the path: `EProperty(by_alibi("F_softmax_0", "F_softmax_1", "input"))` | falcon.py |
 | the value is a binding in the *block's* forward, read after the block starts | `@EProperty("../source.<op>.output")` on the child, `sourced = True` on the block's class | llama4_text.py |
 | keeps heads first | `return seq_first(value)` in the preprocess and in `@value.postprocess` | mpt.py, falcon.py |

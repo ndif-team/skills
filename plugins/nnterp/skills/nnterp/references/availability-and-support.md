@@ -82,6 +82,11 @@ support = hybrid.support()
 A pure state-space model (Mamba-130m) repeats one reason per block, hundreds of
 lines; read `support(layer=i)` there.
 
+`self_attn.value_weight` and `output_weight` are methods, with no row in any of the three
+forms: call them. On a model without weights they raise `Unavailable` with "... on the meta
+device: the model is not dispatched" wherever a loaded model would serve them; any other
+reason (latent attention's on DeepSeek-V3) is the real answer.
+
 ## Reading an unavailable value
 
 Reading or writing one raises `nnterp.Unavailable` (a `RuntimeError`) with the

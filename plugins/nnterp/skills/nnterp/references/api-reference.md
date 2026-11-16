@@ -225,3 +225,20 @@ Llama-shaped: the standard names and the base values hold as they are (`llama`,
 
 Not shipped: `zamba`, `zamba2` (a shared transformer's output is added to the
 mixer's input, not the stream, so the standard contributions mean nothing there).
+
+## Coming from nnterp 1.x
+
+| nnterp 1.x | nnterp 2 |
+|---|---|
+| `model.layers_output[i]`, `model.layers_input[i]` | `model.layers[i].layer_output`, `model.layers[i].input` |
+| `model.attentions_output[i]`, `model.mlps_output[i]` | `model.layers[i].self_attn.attention_output`, `model.layers[i].mlp.mlp_output`: what the sublayer adds to the stream, which is the module's output on GPT-2 and Llama and not on every family |
+| `model.attentions[i]`, `model.mlps[i]`, `model.ln_final` | `model.layers[i].self_attn`, `model.layers[i].mlp`, `model.norm` |
+| `model.attention_probabilities[i]` with `enable_attention_probs=True` | `model.layers[i].self_attn.attention_probabilities` with `attn_implementation="eager"` at load |
+| `model.skip_layer(i)` | `model.skip_layers(i, i)` |
+| `StandardizedTransformer(repo, remote=True)` | `model.trace(prompt, remote=True)` |
+| `nnterp.interventions` (`logit_lens`, `patchscope_lens`, `TargetPrompt`) | removed: the [patterns guide](patterns.md)'s logit lens and patching recipes |
+| `nnterp.nnsight_utils.get_layer_output` and the other `get_*` | removed: the values above |
+
+A load takes the checkpoint's dtype (often bf16), where a 1.x script on transformers 4 ran in
+float32: pass `dtype=torch.float32` to compare with old numbers. The full table is on the site
+(https://ndif-team.github.io/nnterp/getting-started/#coming-from-nnterp-1x).

@@ -16,6 +16,10 @@ home is the `nnsight` skill: its `SKILL.md` for `trace`, `generate`, `.save()`, 
 `tracer.iter` and `.source`, and its remote, vllm, tensor-parallel and debugging guides for
 NDIF, the other engines, and an error you cannot place.
 
+Two of its rules hold in every nnterp script. Only a name bound to a `.save()`d value
+survives a trace: make a list before the trace and append `.save()`d values to it. And a
+saved value keeps its autograd graph: `.detach()` what you keep (`float()` on it warns).
+
 ## Which library
 
 nnterp sits between nnspec and nnsight. When the user names a library, use it. Otherwise take the highest row that fits,
@@ -77,7 +81,10 @@ contributions, on sequential, parallel and post-norm blocks alike. `model.layers
 `model.transformer.h[5]`, an alias, so native paths keep working. `attn_implementation="eager"`
 is what makes the attention interior readable (queries, keys, values, scores, the pattern,
 head outputs); everything else works under transformers' default `sdpa`. The dtype is the
-checkpoint's (often bf16).
+checkpoint's (often bf16) unless the load passes `dtype=torch.float32`; `device="cuda"` loads
+onto the GPU. `model.trace(prompt)` tokenizes as `model.tokenizer(prompt)` does, special
+tokens included (a BOS on Llama-3 and Gemma, none on GPT-2 or Qwen3), and pads a list of
+prompts on the left, so `[:, -1]` is each prompt's last token.
 
 ## The vocabulary
 
@@ -175,8 +182,8 @@ with model.trace(prompt):
 assert not torch.allclose(changed, logits) and not torch.allclose(zeroed, logits)
 ```
 
-An in-place edit reaches the model because the value is the live tensor; an assignment
-replaces it, and where the block or attention module returns a tuple the other elements are
+An in-place edit reaches the model because the value is the live tensor (torch refuses one
+on a split view, as GPT-2's queries are: assign there); an assignment replaces it, and where the block or attention module returns a tuple the other elements are
 put back for you. A read after an in-place edit returns the edited tensor: `.clone()` first
 when you need the value before it.
 
@@ -191,7 +198,8 @@ pick another, or use `nnterp.prompt_utils.get_first_tokens`.
 
 **`[0]` takes a batch row.** The values are the tensor on every family, including attention
 modules and blocks whose raw `.output` is a tuple. Indexing `[0]` to unwrap, as code written
-against `.output` does, silently takes batch row 0:
+against `.output` does, silently takes batch row 0, and so does `layers[i].output[0]` on the
+many families whose block returns a plain tensor (GPT-2, Llama, Gemma-3):
 
 ```python
 with model.trace(prompt):
@@ -231,7 +239,11 @@ log-softmaxes: `next_token_probs` can hold exact zeros, where `p * (p.log() - q.
 `model.support()` says which values a checkpoint has, from the config, without running
 anything: every root and block value by dotted name, `None` where every block has it, else
 `{block: reason}`. `model.support(layer=i)` is one block, flat. Reading an unavailable value
-raises `nnterp.Unavailable` with the same reason, before the model runs. A model built
+raises `nnterp.Unavailable` with the same reason, before the model runs.
+`self_attn.value_weight` and `output_weight` are methods, with no row: call them. On a model
+without weights they raise `Unavailable` saying the model is not dispatched wherever a loaded
+model would serve them; any other reason (latent attention's on DeepSeek-V3) is the real
+answer. A model built
 without `dispatch=True` sits on the meta device, so asking costs no weights:
 
 ```python
@@ -336,14 +348,15 @@ grows with depth). `skip_layers` consumes `layers[start].input`: read it first o
 | read or edit expert routing (Qwen-MoE, DeepSeek-V3, GPT-OSS): router logits, expert weights and indices, ablating or rerouting an expert | [mixture-of-experts.md](references/mixture-of-experts.md) |
 | read or edit a recurrent mixer's values or state (Qwen3.5's DeltaNet blocks, Nemotron-H's Mamba-2 blocks, Mamba); `nnterp.route_kernels` goes before the first trace where `support()` asks for it | [recurrent-mixers.md](references/recurrent-mixers.md) |
 | follow an image into a vision-language model (Qwen3.5, Gemma 3, Llava): load with `task="image-text-to-text"`, read `vision.image_token_mask` first, edit `vision.image_features` | [vision.md](references/vision.md) |
-| read values under `generate` and `tracer.iter`: per-step shapes, edits that stay in the KV cache | [generation-and-helpers.md](references/generation-and-helpers.md#the-values-under-generate) |
+| read values under `generate` and `tracer.iter`: per-step shapes, edits that stay in the KV cache; `tracer.result` is the prompt's ids, special tokens included, then the new ones | [generation-and-helpers.md](references/generation-and-helpers.md#the-values-under-generate) |
 | collect activations at one position over many prompts, or a target word's probability mass | [generation-and-helpers.md](references/generation-and-helpers.md#nnterpnnsight_utils-activations-over-prompts) |
 | run for throughput or as a served engine (`StandardizedVLLM`), or shard a model too big for one GPU | [generation-and-helpers.md](references/generation-and-helpers.md#the-vllm-engine-standardizedvllm) |
 | run on NDIF with `remote=True` (the server needs nnterp installed) | [generation-and-helpers.md](references/generation-and-helpers.md#remotetrue-the-contract) |
 | know where a family puts a contribution, tuple blocks, the root values and layouts; size a tensor without a family's config key (`nnterp.axis_size`) | [values.md](references/values.md) |
 | read a `support()` reason or a `SourceNotAvailable`; guard a script | [availability-and-support.md](references/availability-and-support.md) |
 | look up an exported name, or the 98 families grouped by quirk | [api-reference.md](references/api-reference.md) |
-| load a checkpoint with no family (it loads with a best-effort default and a `UserWarning`; `support()` says what it serves), or add a family or a value of your own | the [extending guide](references/extending.md) |
+| load a checkpoint with no family (it loads with a best-effort default and a `UserWarning`; `support()` says what it serves; `project_on_vocab`, a method, refuses when called), or add a family or a value of your own | the [extending guide](references/extending.md) |
+| port a script written for nnterp 1.x (`layers_output`, `attentions_output`, `nnterp.interventions`, `enable_attention_probs`) | [api-reference.md](references/api-reference.md#coming-from-nnterp-1x) |
 
 nnterp's repo (https://github.com/ndif-team/nnterp) has a page per feature under
 `docs/usage/` and a row per family in `docs/reference/families.md`; the site serves every

@@ -220,7 +220,7 @@ too: they are served on the text model's blocks. `support()` names the reason pe
 
 Assignment reaches the model on every family. An in-place edit does too, except where the
 value is a split view of one fused tensor and torch refuses it as it does GPT-2's queries
-(`RuntimeError: Output 0 of Select is a view and is being modified inplace`): DBRX's and
+(`RuntimeError: ... is a view and is being modified inplace`): DBRX's and
 GPT-NeoX's queries and keys, JetMoE's keys, and latent attention's shared rope key. Assign
 there, or edit under `torch.no_grad()`.
 
@@ -577,7 +577,7 @@ GPT-2's `c_attn` produces one tensor that `split` divides into q, k, v; MPT's
 ```python
 with model.trace(prompt):
     attn.attention_queries[:, 0] = 0
-    # RuntimeError: Output 0 of Select is a view and is being modified inplace ...
+    # RuntimeError: ... is a view and is being modified inplace ...
 ```
 
 Assign instead (`attn.attention_queries = attn.attention_queries * 0`), or edit
