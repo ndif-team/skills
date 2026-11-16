@@ -3,9 +3,8 @@
 nnterp gives every transformer family one vocabulary (`model.layers[i].self_attn`,
 `.mlp`, `.linear_attn`, `model.norm`, ...) and standard values (`layer_output`,
 `attention_output`, `attention_probabilities`, `router_logits`, ...) through one module
-per family under `nnterp/families/`, named after `config.model_type`
-(`len(nnterp.families.known())` is 99: 98 families, plus `kimi_k25`, Kimi K2's family
-under its wrapper's name). This guide is for when that is not enough: a `model_type`
+per family under `nnterp/families/`, named after `config.model_type`. This guide is for
+when that is not enough: a `model_type`
 nnterp does not ship, a forward that puts a value where the base classes do not look, or
 a value nnterp does not have. The examples run on `openai-community/gpt2` and
 `HuggingFaceTB/SmolLM2-135M-Instruct`. The nnterp repo's
@@ -20,31 +19,22 @@ listed at https://ndif-team.github.io/nnterp/llms.txt.
 
 1. **Operation names are version-bound.** A release that renames a local or adds a
    binding before an op renames it; `print(envoy.source)` on the version you run.
-2. **`hasattr(envoy, value)` never answers `False`.** Unavailable: it raises
-   `nnterp.Unavailable`. Available, outside a trace: a value at the module boundary or
-   one `source` level deep raises nnsight's `ValueError: Cannot access ... outside of
-   interleaving`; one inside a call (`attention_probabilities`) raises
-   `SourceNotAvailable: recursive .source is only available inside a trace`. Use `support()`.
-3. **An out-of-order read inside a call raises `OutOfOrderError` naming the call's
-   `.fn`**, not the value: `layer_output` then `attention_probabilities` fails with
-   `'...attn.source.attention_interface_1.fn.i0' was requested but the model already
-   ran past it`. Read a module's interior values before its boundary values.
-4. **After `../`, native names only.** `EProperty("../ln_2.output")` on a GPT-2 attention
+2. **After `../`, native names only.** `EProperty("../ln_2.output")` on a GPT-2 attention
    works; `"../post_attention_layernorm.output"` builds a location nothing serves and
    the trace fails with `OutOfOrderError` on `...h.0.post_attention_layernorm.output.i0`.
    A child segment below the host (`"embed_tokens.output"`) does take aliases.
-5. **`envoys=` matches by module type first, then by path (native, or any alias
+3. **`envoys=` matches by module type first, then by path (native, or any alias
    spelling of it), so type keys win.** On GPT-2 `envoys={"layers.0.input_layernorm": X}`
    binds `X` on `ln_1`, and `envoys={"layers.0.mlp": X}` loses to the family's `GPT2MLP` key.
-6. **A root size or `project_on_vocab` override is a module-level function.** The root
+4. **A root size or `project_on_vocab` override is a module-level function.** The root
    looks up `model.family.<name>`; a `head_dim` on the family's `Attention` class is the
    per-module size, which the root never reads.
-7. **A child's module often lacks what its value needs.** An envoy reaches its parent
+5. **A child's module often lacks what its value needs.** An envoy reaches its parent
    and the model through `.parent` and `.root`; the family's `Layer.__init__` hands down
    what the child's module lacks (`self.mlp.router = self.router`).
-8. **`inputs` serves `(args, kwargs)`; `input` the first argument.** `select=` names one
+6. **`inputs` serves `(args, kwargs)`; `input` the first argument.** `select=` names one
    element of `inputs` (int: positional, str: keyword) and repacks a write.
-9. **`register()` is process-wide, silent, and read at load.** A model built before it
+7. **`register()` is process-wide, silent, and read at load.** A model built before it
    keeps the shipped family; undo with `del families.REGISTRY[model_type]`. With no
    types given it registers the one the family's `__name__` ends in, so a variant named
    `my_gpt2` covers `my_gpt2`, not `gpt2`: name the types, `register(variant, "gpt2")`.
@@ -114,20 +104,17 @@ ENVOYS = {<X>DecoderLayer: Layer, <X>Attention: Attention, <X>MLP: Mlp}
   `nnterp.components`).
 - **`Layer`, `Attention`, `Mlp`** exist even when nothing changes (the suite asserts the
   block envoys are exactly the family's classes). Override `off_interface()` for a config
-  flag that routes the attention off transformers' interface (GPT-2), and `no_rotary()` for
-  a block that applies no rotary embedding (absolute positions, ALiBi, a NoPE block: GPT-2,
-  BLOOM, SmolLM3's `no_rope_layers`), the one place the queries and keys before the rotary
-  and `Attention.rotate` ask; redefine values for
-  own arithmetic (GPT-J, BLOOM, MPT, Falcon), a residual added inside (BLOOM, MPT), a
-  post-norm (Gemma-2/3/4, OLMo-2/3) or a scaled add (Granite's `residual_multiplier`).
+  flag that routes the attention off transformers' interface, and `no_rotary()` for a block
+  that applies no rotary embedding (absolute positions, ALiBi, a NoPE block), the one place
+  the queries and keys before the rotary and `Attention.rotate` ask; redefine values where
+  the forward differs ([the override toolkit](#the-override-toolkit)).
   `Attention.interface` needs nothing from a family: `attention_call`
   (`nnterp.components.attention`) reads which call to re-run off the family's own
   `attention_queries` / `attention_keys` / `attention_values` / `attention_head_outputs`
   keys (the operation whose positional arguments the first three are, when its first return
   is the head outputs: `attention_interface_1`, or `_attn` on GPT-J), and a family whose
   values are not one call's arguments reports `OWN_ARITHMETIC` (`nnterp.components`) without
-  saying so (BLOOM, MPT, Falcon, XGLM; DeepSeek-V4, whose head outputs are read after the
-  module rotates the call's output back).
+  saying so.
 - **A mixture of experts** is an `nnterp.components.Moe` keyed on the MoE module class:
   `class Mlp(Moe)` where every MLP is one (Mixtral), `class Moe(Moe, Mlp)` beside a
   dense `Mlp` (DeepSeek-V3). Alias the router `router` and the shared expert
@@ -140,9 +127,8 @@ ENVOYS = {<X>DecoderLayer: Layer, <X>Attention: Attention, <X>MLP: Mlp}
   (`nnterp.components.recurrent.kernel`). Key it in `ENVOYS` so `route_kernels` finds it;
   `docs/developing/recurrent-mixer-internals.md` is the contract.
 - **A block hands its children what their modules lack**, in `Layer.__init__` after
-  `super().__init__`: Gemma-4 hands `self.mlp.router = self.router` (the mixture's router
-  is the block's child), the Granite families hand `residual_multiplier` to their `Mlp`
-  and mixers. Handed envoys survive the weight swap. Runnable on GPT-2:
+  `super().__init__` (Gemma-4: `self.mlp.router = self.router`, the mixture's router being
+  the block's child). Handed envoys survive the weight swap. Runnable on GPT-2:
   [references/descriptors.md](extending-descriptors.md).
 
 Shipped modules quoted, the rules, the test file: [references/family-module-recipe.md](extending-family-module-recipe.md).
@@ -155,16 +141,16 @@ The root's `num_layers`, `hidden_size`, `vocab_size`, `num_heads`, `num_kv_heads
 family module defines `def <size>(model)`, which wins on read. `project_on_vocab` is a
 `StandardizedCapability`, the same for a method: `def project_on_vocab(model, hidden)`
 in the family module is bound in the root's place, so the lens on the last block still
-equals `logits` (Cohere/Cohere-2 `* logit_scale`, Granite and its five relatives
-`/ logits_scaling`, Falcon-H1, HyperCLOVA X, the Mamba families, Nemotron-H, DeepSeek-V4). Both are
-read-only; assigning raises `AttributeError` naming the function to write. Which
-families define which size: `docs/reference/families.md`, "Logits, scales and sizes".
+equals `logits` where the family applies a step after the head (a scale, a softcap, a
+stream collapse). Both are read-only; assigning raises `AttributeError` naming the function
+to write. Which families define which: `docs/reference/families.md`, "Logits, scales and
+sizes".
 
 Each block's own sizes are plain properties on its envoys, read off the module:
 `layers[i].self_attn.num_heads`, `.num_kv_heads`, `.head_dim`, `.qk_head_dim` and
-`layers[i].mlp.intermediate_size` (one routed expert's on a mixture). They differ from
-the root's on Gemma-4, MiMo-V2-Flash and Laguna; a module that keeps a size under
-another name overrides the property on the family's subclass (JetMoE's `Mlp`).
+`layers[i].mlp.intermediate_size` (one routed expert's on a mixture), where blocks differ
+from the root's. A module that keeps a size under another name overrides the property on
+the family's subclass (JetMoE's `Mlp`).
 
 ## The override toolkit
 

@@ -5,14 +5,16 @@ description: "Write interpretability code once against nnterp's StandardizedTran
 
 # nnterp
 
-nnterp is a thin layer on nnsight 0.8. `StandardizedTransformer` is a
-`TransformersModel` whose envoy tree also answers to one set of names on every
-family, and whose blocks carry *standard values* (`layer_output`,
-`attention_output`, `mlp_output`, `attention_probabilities`, `logits`, ...) that
-mean the same thing everywhere. Everything nnsight does (`trace`, `generate`,
-`.save()`, `tracer.invoke`, `tracer.iter`, `.source`, `remote=True`) works
-unchanged; this skill covers only what nnterp adds. Load the `nnsight` skill for
-the underlying API.
+nnterp is a layer over nnsight. `StandardizedTransformer` is a `TransformersModel` whose
+module tree answers to one set of names on every family nnterp ships (98, from GPT-2 to
+DeepSeek and the Qwen3.5 hybrids), and whose blocks carry *standard values*
+(`layer_output`, `attention_output`, `attention_probabilities`, `logits`, ...) that mean the
+same thing on each, so one script runs on every family without a branch.
+
+This skill covers what nnterp adds. The API underneath is nnsight's and works unchanged; its
+home is the `nnsight` skill: its `SKILL.md` for `trace`, `generate`, `.save()`, invokes,
+`tracer.iter` and `.source`, and its remote, vllm, tensor-parallel and debugging guides for
+NDIF, the other engines, and an error you cannot place.
 
 ## Which library
 
@@ -25,6 +27,8 @@ and take a row only when its skill is available in this session:
 | nnterp (this skill) | The experiment needs Python that a document cannot express, on a family nnterp knows. One module vocabulary on every family. |
 | `nnsight` skill | nnterp does not know the family, or the work needs access below nnterp's standard values: arbitrary modules, `.source`, your own or non-transformer models, diffusion, vLLM, tensor parallelism. Also existing nnsight code, and any error an nnsight trace raises. |
 
+## Guides
+
 Two guides go with this file. Read the one that matches before writing code:
 
 - [patterns](references/patterns.md): the techniques (logit lens, direct logit
@@ -33,16 +37,17 @@ Two guides go with this file. Read the one that matches before writing code:
 - [extending](references/extending.md): adding a family nnterp does not know,
   overriding a value, or defining a value of your own.
 
-## Orientation
+The depth files for single topics are listed under [When you need more](#when-you-need-more).
+
+## Load, read, and the contribution identity
 
 ```python
-import warnings
 import torch
 import nnsight
 import nnterp
 from nnterp import StandardizedTransformer, Unavailable
 
-# device= picks the device; device_map="cpu" is ignored by the pipeline nnsight loads through
+# device= places the model; device_map="cpu" is ignored by the pipeline nnsight loads through
 model = StandardizedTransformer("openai-community/gpt2", device="cpu", dispatch=True, attn_implementation="eager")
 prompt = "The Eiffel Tower is in the city of"
 
@@ -53,269 +58,30 @@ paris = ids[0]
 
 ```python
 with model.trace(prompt):
-    x = model.layers[5].input.save()                            # residual stream entering block 5
-    attn = model.layers[5].self_attn.attention_output.save()    # what attention adds to it
-    mlp = model.layers[5].mlp.mlp_output.save()                 # what the MLP adds
-    resid = model.layers[5].layer_output.save()                 # the stream leaving the block
+    x = model.layers[5].input.save()                                     # the stream entering block 5
+    pattern = model.layers[5].self_attn.attention_probabilities.save()   # inside the attention: read before its output
+    attn = model.layers[5].self_attn.attention_output.save()             # what the attention adds to the stream
+    mlp = model.layers[5].mlp.mlp_output.save()                          # what the MLP adds
+    resid = model.layers[5].layer_output.save()                          # the stream leaving the block
     logits = model.logits.save()
 
-assert model.family.__name__ == "nnterp.families.gpt2" and len(nnterp.families.known()) == 99   # 98 families + kimi_k25
+assert model.family is nnterp.families.gpt2
 assert (model.num_layers, model.hidden_size, model.num_heads) == (12, 768, 12)
-assert x.shape == attn.shape == mlp.shape == resid.shape == (1, 10, 768)
+assert x.shape == attn.shape == mlp.shape == resid.shape == (1, 10, 768) and pattern.shape == (1, 12, 10, 10)
 assert torch.equal(x + attn + mlp, resid)                       # the contribution identity, exact in fp32
 assert logits[0, -1].argmax() == paris
 ```
 
-`model.layers[5]` *is* `model.transformer.h[5]` (an alias, not a copy), so native
-paths keep working.
-
-## The things that break agent-written nnterp code
-
-**1. The target token picks BOS.** `tokenizer.encode(" Paris")[0]` is the BOS
-token on Llama-3 and Gemma tokenizers, and every recipe then runs "fine" and
-prints 0.000; `input_ids[-1]` picks the wrong piece of a multi-token word. Take
-`model.tokenizer(" Paris", add_special_tokens=False).input_ids[0]` and assert the
-list has one element (above). On a Llama-2 / Mistral sentencepiece tokenizer
-`" Paris"` is `['▁', 'Paris']` and `[0]` is the lone space: tokenize `"Paris"`
-there (`['▁Paris']`). A word that splits (`' Par', 'is'` on Granite) is not one
-logit; pick another word or use `nnterp.prompt_utils.get_first_tokens`.
-
-**2. The attention interior needs `attn_implementation="eager"`.** The default
-(`sdpa` on most families) leaves `attention_probabilities`, queries, keys,
-values, scores and head outputs unavailable. `support()` reads the config, so it
-answers without loading weights:
-
-```python
-plain = StandardizedTransformer("openai-community/gpt2")        # meta device, transformers' default
-reason = plain.support(layer=0)["self_attn.attention_probabilities"]
-assert reason == "read inside the eager attention forward, but this model runs 'sdpa'; load with attn_implementation='eager'"
-assert plain.support(layer=0)["self_attn.attention_output"] is None    # boundary values never need eager
-assert plain.support(layer=0)["self_attn.attention_premix"] is None    # the heads at o_proj: a module boundary
-```
-
-**3. `support()`, not `hasattr`.** `hasattr(envoy, value)` is never `False`: it
-raises `nnterp.Unavailable` for an unavailable value, and outside a trace an
-available one raises `ValueError` (or `SourceNotAvailable` for one inside the
-attention call). Ask `model.support()` outside the trace.
-
-```python
-hasattr(plain.layers[0].self_attn, "attention_probabilities")     # Unavailable, not False
-```
-
-**4. The values are tensors. Never index `[0]` to unwrap.** `layer_output`,
-`attention_output` and `mlp_output` are the tensor on every family, including
-tuple blocks (GPT-J, BLOOM, MPT, Falcon) and every attention module, whose raw
-`.output` is `(attn_output, attn_weights)`. `[0]` selects batch row 0, silently:
-
-```python
-with model.trace(prompt):
-    raw = model.layers[3].self_attn.output.save()
-    wrong = model.layers[3].layer_output[0].save()
-
-assert isinstance(raw, tuple) and wrong.shape == (10, 768)       # batch row 0, not "the tensor"
-```
-
-**5. `attention_output` is the contribution, and not every block is a plain sum.**
 `layers[i].input + attention_output + mlp_output == layer_output` defines the two
-contributions on sequential, parallel and post-norm blocks (on Gemma-2/3/4, GLM-4,
-AFMoE, HyperCLOVA X, OLMo-2/3, EXAONE-4, FlexOlmo and OLMo-Hybrid's attention blocks
-they are the post-norms' outputs; on BLOOM/MPT the tensor before an add inside the
-module). Five families break the plain sum, and naive direct logit attribution there
-is wrong by orders of magnitude:
-
-| family | the block | what a term from block `i` reaches the last stream as |
-|---|---|---|
-| Gemma-4 | `(input + attn + mlp [+ per_layer_output]) * layer_scalar` | times every `layer_scalar` from `i` on (0.005 to 0.99 each) |
-| Doge, ZAYA | the stream itself is rescaled per channel by each merge's learned parameters | times the gates of every later merge |
-| Granite line, HyperCLOVA X | contributions are the scaled terms (`* residual_multiplier`) | the plain sum holds (not on GraniteMoE-SWA with a shared expert: [references/values.md](references/values.md)); the head scales the logits (`logits_scaling`) |
-| DeepSeek-V4 | `layer_output` is `[batch, seq, streams, hidden]` (`Streams`) | mixed by `attention_comb` / `mlp_comb`; only the stream mean is additive |
-
-The recipes (stream weights for Gemma-4 and Doge, the stream formula for
-DeepSeek-V4): [references/values.md](references/values.md).
-
-**6. Reads follow the forward, within one invoke.** `input_ids` before any
-block; within a block `layer_input`, `attention_norm_output`, the attention's
-interior (the queries and keys before the rotary, then the queries, keys, values and
-`interface`, scores, `attention_probabilities`, `attention_premix`),
-`attention_output`, `layer_mid`, `mlp_norm_output`, `mlp_input`, `mlp_activation`,
-`mlp_neurons`, `mlp_output`, `layer_output` (`model.order(i)` lists a block's
-values in forward order); block 3 before block 5; `final_norm_output`,
-`lm_head_output`, `logits` and `next_token_probs` last. A late read raises
-`OutOfOrderError`, which names an internal location (`...attention_interface_1.fn.i0`),
-not the value:
-
-```python
-with model.trace(prompt):
-    late_attn = model.layers[3].self_attn.attention_output.save()
-    late_pattern = model.layers[3].self_attn.attention_probabilities.save()   # inside the attention: too late
-```
-
-When code decides which values to read or edit (a list of sites, a sweep over several
-values per block, a port of code that hooked modules in its own order), sort the sites by
-`model.rank(name, layer)` before the trace instead of keeping a table of what comes first:
-that table differs per family (on Falcon without alibi the values come before the queries;
-a mixture's shared expert runs first on some families and last on others), and `rank` is
-measured on the loaded checkpoint. `model.order(i)` lists block `i`'s values in that order,
-equal ranks sharing one location. Both are asked outside the trace, by `support()`'s
-dotted names; `rank` raises `Unavailable` for a value the checkpoint lacks:
-
-```python
-sites = [("layer_output", 3), ("self_attn.attention_probabilities", 3), ("mlp.mlp_output", 1)]
-sites.sort(key=lambda site: model.rank(*site))                 # (block, r): forward order on any family
-assert sites == [("mlp.mlp_output", 1), ("self_attn.attention_probabilities", 3), ("layer_output", 3)]
-assert model.order(3)["self_attn.attention_probabilities"] < model.order(3)["self_attn.attention_output"]
-
-def value_at(name, layer):                                     # "self_attn.attention_probabilities" -> (envoy, attribute)
-    host = model.layers[layer]
-    *path, attr = name.split(".")
-    for part in path:
-        host = getattr(host, part)
-    return host, attr
-
-saved = []
-with model.trace(prompt):
-    for name, layer in sites:                                  # issued in rank order: no OutOfOrderError
-        host, attr = value_at(name, layer)
-        saved.append(getattr(host, attr).save())
-
-assert [tuple(s.shape) for s in saved] == [(1, 10, 768), (1, 12, 10, 10), (1, 10, 768)]
-```
-
-An edit lands at its value's location as a read does, so a list of edits sorts the same
-way. The ranks also explain a failure after the fact: compare them for the reads around an
-`OutOfOrderError` or a shifted `tracer.iter` list.
-
-Two `OutOfOrderError`s are not about the order `rank` gives. A child module's value
-(`self_attn.q_proj.output`) then an interior value of that attention (`attention_queries`)
-fails in the first such trace on a model whose `self_attn.source` nothing has touched yet;
-once the model is dispatched (`dispatch=True`, or after its first trace), touch
-`model.layers[i].self_attn.source` outside the trace. A recurrent mixer's
-submodule value (`linear_attn.in_proj_qkv.output`) and its kernel values (`attention_queries`,
-`state_output`, ...) cannot share a trace in either order: use two traces.
-
-Three variants do not raise. Under `generate` + `tracer.iter`, a late read raises on step 0
-but on a later step (a loop from `iter[1:]`) *binds the next step's value*, so per-step lists
-come back shifted by one; a value inside the attention call shifts from step 0 too (the scores
-and the pattern always; the queries, keys, values and head outputs when the loop is the first
-to touch that attention's `.source`). A
-read pinned to a step the run never reaches (past `max_new_tokens`, or that
-shifted read on the last step) cuts the block short with a `UserWarning`: later
-names are unbound, so look for the warning when a saved name is missing. On a Mamba-1 decode step, `attention_head_outputs` read before
-`state_output` returns the next step's state ([references/recurrent-mixers.md](references/recurrent-mixers.md)).
-`skip_layers` consumes `layers[start].input`: read it first or not at all.
-
-**7. Two invokes of one trace each read and edit their own rows of every attention-interior
-value**, on every family but XGLM's keys and values (BLOOM, XGLM and Falcon with alibi read
-theirs where the batch still leads, before the forward flattens batch and heads for its `bmm`;
-XGLM's keys and values are read flat after its cache update, so there a read returns every
-invoke's rows and an edit in one invoke reaches them all). At one location the invoke written
-first is served first, so an empty `tracer.invoke()` after an invoke that edits the scores
-reads the edited pattern.
-
-**8. Overwriting `attention_scores` lifts the causal mask.** The scores are read
-after masking, so `scores[:] = 0` attends to the future. Add to them
-(`scores[..., k] += c`, or `-inf` to block a key) instead.
-
-**9. GPT-2's and GPT-BigCode's queries, and MPT's queries, keys and values, are split
-views torch will not edit in place**; so are Mamba-1's, and before the rotary DBRX's and
-GPT-NeoX's queries and keys, JetMoE's keys and latent attention's shared rope key. torch
-refuses an in-place edit with grad on; assign instead (or edit under `torch.no_grad()`):
-
-```python
-with model.trace(prompt):
-    model.layers[0].self_attn.attention_queries[:, 0] = 0      # RuntimeError: ... is a view ...
-```
-
-```python
-with model.trace(prompt):
-    model.layers[0].self_attn.attention_queries = model.layers[0].self_attn.attention_queries * 0
-    edited = model.logits.save()
-
-assert not torch.allclose(edited, logits)
-```
-
-GPT-2's and GPT-BigCode's keys and values take an in-place edit, and it lands.
-
-**10. Recurrent mixers route kernels before the first trace.** On Mamba,
-Falcon-Mamba and Jamba with `mamba_ssm` installed, a CPU run crashes with
-`Expected u.is_cuda()` (even for `layer_output`) until
-`nnterp.route_kernels(model.family, "torch")`, and without it `attention_head_outputs`,
-`state_output` and the per-token state still need that call (they are read inside the
-pure-torch kernels, which the unrouted forward reaches through transformers' dispatcher);
-on DeltaNet hybrids the per-token `state`/`states` need the same call; on Mamba-2 families
-it is needed only with `mamba_ssm` installed, and `states` needs
-`nnterp.chunk_per_token(model)`.
-
-**11. Hybrids: decide `self_attn` vs `linear_attn` outside the trace**, with
-`getattr(layer, "self_attn", None) is not None`; `getattr` inside a trace can trip
-a served value. `linear_attn` is a DeltaNet, a Mamba-1 scan or a Mamba-2 mixer;
-the same names mean different things on each.
-
-**12. `envoys=` keys match a module type first, then a path (native, or any alias
-spelling of it).** A family keys its envoys on module types, so a path key such as
-`"layers.0.mlp"` binds but loses to the family's `GPT2MLP` key; displace a family envoy
-by keying on its type.
-
-**13. A vision-language wrapper loaded without `task="image-text-to-text"` sees no image.**
-The default `task="text-generation"` load has no processor, so the tower never runs:
-`model.vision.support()` is `{}`, `model.support()` has no `vision.` rows, and every tower
-value raises `Unavailable`, inside a trace too, with the reason `a text-only load: no
-processor, so no image reaches the model; load with task='image-text-to-text'`.
-
-**14. Read `vision.image_token_mask` first and `vision.image_features` after the tower;
-one image-carrying invoke per trace.** The mask comes off the inputs, like `input_ids`;
-`token_embeddings` comes next (the wrapper embeds the ids before it runs the tower), and
-`image_features` is read at the scatter, after the tower's values and before
-`layers[0].input`. Under `generate` on transformers 5.18 and later the images are encoded
-before the first forward, so the tower's values come before the mask; mask then
-`image_features` holds on every version. Two invokes of `model.trace(prompt, images=[...])` raise
-`NotImplementedError: Can't batch these inputs`. Chat-message inputs that embed the image do
-batch, and then `vision.image_features` is flat over the whole batch's image tokens in each
-invoke, so a write in one invoke reaches every row. Put several images in one invoke, and
-run clean and ablated as two traces.
-
-**15. Boolean indexing with the mask flattens the batch.** `out[mask]` is
-`[image_tokens, hidden]` over every row in row-major order (the order of `image_features`),
-not `[batch, ...]`. Index one row (`out[0, mask[0]]`) or mask instead of indexing
-(`out.masked_fill(~mask[..., None], 0)`) to keep the batch.
-
-**16. A query or key moved to another position goes in before the rotary.**
-`attention_queries` and `attention_keys` are rotated for the positions they ran at: a
-rotated query written at another position or into another prompt is attended with the
-wrong position. Write `attention_queries_prerope` / `attention_keys_prerope` instead; the
-block rotates what you wrote for the position it lands at
-([Before the rotary embedding](#before-the-rotary-embedding)). Hand-rotating
-`self_attn.q_proj.output` is wrong too: Phi-3 has no `q_proj`, and Qwen3, OLMo-2/3 and
-Gemma norm between the projection and the rotary. `self_attn.rotate` is the rotary
-alone: HunYuan and Llama 4 norm the queries and keys after it, JetMoE tiles its keys,
-Ministral 3 scales its queries past `original_max_position_embeddings` (16384), so there
-`attention_queries` is not `rotate(...)` itself (on Ministral 3, on longer prompts only).
-
-**17. Read `self_attn.interface` once per forward, and call it before the scores.**
-Reading it takes the attention call's arguments, so it goes where the queries, keys and
-values are, in any order with them; calling it takes the function the forward is about to
-run, so call it before reading or writing the scores, the pattern or the head outputs. Call
-the result as often as you need. A second read after a call, or a call after those reads,
-asks for a point the forward has passed and raises `OutOfOrderError`, under `tracer.iter`
-too; a first read placed after them under `tracer.iter` raises on step 0 and binds the next
-step's call on a later step, as a late read does there (trap 6). Within one invoke, a padded batch included,
-it reproduces the model bit for bit; across invokes only to rounding (about `1e-8` in
-float32), so put prompts in one invoke (`model.trace([a, b])`) when that matters
-([Calling the attention function again](#calling-the-attention-function-again-interface)).
-
-**18. A head's weights are `value_weight` / `output_weight`, not slices of `.weight`.**
-Under a PEFT adapter (`peft=` at load) `self_attn.v_proj.weight` is the base weight alone;
-`value_weight(kv)` and `output_weight(j)` give the weight the LoRA layer applies (the base
-plus every active, unmerged adapter's delta, what `merge()` would leave), so an adapted
-model's weights need no merge-and-clone. They also read the fused and transposed layouts
-(Phi-3 has no `v_proj`, GPT-2's `c_attn` is `[in, out]`), and `attention_input_gain` and
-`attention_output_gain` are the gains of the norms before and after the attention, whatever
-their parameterization (Gemma's `1 + weight`), ones where the block has no such norm
-([The weights per head](#the-weights-per-head)).
+contributions, on sequential, parallel and post-norm blocks alike. `model.layers[5]` *is*
+`model.transformer.h[5]`, an alias, so native paths keep working. `attn_implementation="eager"`
+is what makes the attention interior readable (queries, keys, values, scores, the pattern,
+head outputs); everything else works under transformers' default `sdpa`. The dtype is the
+checkpoint's (often bf16).
 
 ## The vocabulary
 
-Llama's block names, with the containers lifted out of the inner `.model`:
+Llama's names, with the containers lifted out of the inner `.model`:
 
 | standard name | GPT-2 | Llama | GPT-NeoX |
 |---|---|---|---|
@@ -329,196 +95,71 @@ Llama's block names, with the containers lifted out of the inner `.model`:
 | `model.norm` | `transformer.ln_f` | `model.norm` | `gpt_neox.final_layer_norm` |
 | `model.lm_head` | same | same | same |
 
-`self_attn.input` is what enters the attention and `mlp.input` what enters the
-MLP, on every family. The norm aliases (`input_layernorm`, `post_attention_layernorm`)
-mean different things per family (a sandwich block's `post_attention_layernorm` follows
-the attention); read the boundary values `attention_norm_output`, `layer_mid` and
-`mlp_norm_output` instead, which each family points at its own modules. `o_proj`,
-`act_fn` and `down_proj` are the output projection, the activation and the down
-projection on every family that has them. A recurrent block has `linear_attn` instead
-of `self_attn`; OPT and XGLM have no `mlp` module; Mamba and Mamba-2 blocks have
-neither attention nor MLP.
+`self_attn.input` is what enters the attention and `mlp.input` what enters the MLP, on every
+family. The norm aliases (`input_layernorm`, `post_attention_layernorm`) mean different
+things per family (on Gemma-2/3/4 `post_attention_layernorm` follows the attention): read
+the boundary values `attention_norm_output`, `layer_mid` and `mlp_norm_output` instead,
+which each family points at its own modules.
 
-## The standard values
+A hybrid block has `linear_attn`, a recurrent mixer, instead of `self_attn` (three blocks in
+four on Qwen3.5). Decide which blocks have which outside the trace; `getattr` inside one can
+trip a served value:
 
-| value | on | layout | notes |
+```python
+attn_blocks = [i for i, layer in enumerate(model.layers) if getattr(layer, "self_attn", None) is not None]
+assert attn_blocks == list(range(12))       # every block, on GPT-2
+```
+
+## The values most experiments touch
+
+| value | on | layout | what it is |
 |---|---|---|---|
-| `layer_input` | `layers[i]` | `Residual` | the stream entering the block, `layers[i].input` |
-| `attention_norm_output` | `layers[i]` | `Residual` | the normed stream the attention is called with (`input_layernorm.output`) |
-| `layer_mid` | `layers[i]` | `Residual` | the stream between the sublayers, `layer_input + attention_output`; none on a parallel block; an assignment is an in-place write ([references/values.md](references/values.md)) |
-| `mlp_norm_output`, `mlp_input` | `layers[i]` | `Residual` | the MLP's pre-norm output; what the MLP is called with (`mlp.input`; the norm's output on GraniteMoE-Shared/-SWA/-Hybrid, whose two experts are both called with it; the dense MLP's input alone on a Gemma-4 mixture block) |
-| `layer_output` | `layers[i]` | `Residual` | the stream leaving the block; `Streams` on DeepSeek-V4 (as is `layer_input` there) |
-| `attention_output` | `self_attn` / `linear_attn` | `Residual` | the contribution |
-| `attention_premix` | `self_attn` | `HeadOutputs` | `o_proj.input` split by head, after any gate; any `attn_implementation` |
-| `mlp_activation`, `mlp_neurons` | `mlp` | `Neurons` | `act_fn.output`; `down_proj.input` (`act(gate) * up` on a gated MLP, the activation on a plain one); none on a routed mixture |
-| `mlp_output` | `mlp` | `Residual` | the contribution |
-| `attention_queries_prerope`, `attention_keys_prerope` | `self_attn` | `Queries`, `Keys` | what the rotary embedding receives: after the projection and any q/k norm, before the rotation; any `attn_implementation`; [below](#before-the-rotary-embedding) |
-| `attention_queries`, `_keys`, `_values` | `self_attn` | `Queries`, `Keys`, `Values` | seq on axis 2; queries and keys after the rotary; keys/values before `repeat_kv`; eager |
-| `attention_scores` | `self_attn` | `Pattern` | masked, scaled, pre-softmax; eager |
-| `attention_probabilities` | `self_attn` | `Pattern` | the tensor the values are mixed with; eager |
-| `attention_head_outputs` | `self_attn` | `HeadOutputs` | `[batch, seq, heads, head_dim]`, before the output projection; eager |
-| `interface` | `self_attn` | a function, `f(Queries, Keys, Values) -> (HeadOutputs, Pattern)` | the attention function the block called, bound to this call's mask, scale, dropout and sliding window; read-only; eager; [below](#calling-the-attention-function-again-interface) |
-| `router_logits`, `expert_weights`, `expert_indices`, `expert_outputs`, `routed_output`, `shared_expert_output` | `mlp` on a `Moe` | `RouterLogits`, `ExpertWeights`, ... | [references/mixture-of-experts.md](references/mixture-of-experts.md) |
-| `state_input`, `state_output`, `state`, `states`, `decays`, `betas`, ... | `linear_attn` | `State`, `Gates`, `Scan*`, `SSD*` | [references/recurrent-mixers.md](references/recurrent-mixers.md) |
-| `per_layer_output` | `layers[i]` (Gemma-4 E2B/E4B) | `Residual` | the block's third add |
-| `attention_post`, `attention_comb`, `mlp_post`, `mlp_comb` | `layers[i]` (DeepSeek-V4) | `StreamWeights`, `StreamMixing` | the hyper-connection weights |
-| `final_norm_output` | root | `Residual` | `norm.output`: the stream the head projects |
-| `lm_head_output` | root | `Logits` | `lm_head.output`: the head's logits before a softcap or scale |
-| `logits` | root | `Logits` | the output's `.logits` (softcapped, scaled); `lm_head_output` is raw |
-| `next_token_probs` | root | `NextTokenProbs` | `logits[:, -1].softmax(-1)`, in the model dtype; read-only |
-| `token_embeddings` | root | `Residual` | `embed_tokens.output`; `layers[0].input` is what enters block 0 |
-| `input_ids`, `attention_mask`, `input_size` | root | `Tokens` | read first; the first two assignable |
-| `layer_output`, `attention_output`, `mlp_output` | `vision.layers[i]` (`.self_attn`, `.mlp`) | `Patches` | the tower's stream and contributions, `[images, patches, vision_hidden]`; the interior as on a text block |
-| `patch_embeddings`, `tower_output` | `vision` | `Patches` | the patch embedding's output; the last block's stream after `vision.norm`, before pooling or adapter |
-| `image_token_mask` | `vision` | `ImageTokenMask` | `[batch, seq]` bool, `input_ids == image_token_id`; read first; read-only |
-| `image_features` | `vision` | `ImageFeatures` | `[image_tokens, hidden]`, flat: what the wrapper scatters in, `layers[0].input[mask] == image_features` |
+| `layer_input`, `layer_output` | `layers[i]` | `Residual` `[batch, seq, hidden]` | the stream entering the block (`layers[i].input`) and leaving it |
+| `attention_output`, `mlp_output` | `self_attn` / `linear_attn`, `mlp` | `Residual` | what each sublayer adds to the stream |
+| `attention_norm_output` | `layers[i]` | `Residual` | the normed stream the attention is called with |
+| `layer_mid` | `layers[i]` | `Residual` | the stream between the sublayers, `layer_input + attention_output`; none on a parallel block; an assignment writes in place |
+| `mlp_norm_output`, `mlp_input` | `layers[i]` | `Residual` | the MLP's normed input; what the MLP is called with |
+| `attention_premix` | `self_attn` | `HeadOutputs` `[batch, seq, heads, head_dim]` | `o_proj.input` split by head, after any gate; any `attn_implementation` |
+| `mlp_activation`, `mlp_neurons` | `mlp` | `Neurons` `[batch, seq, intermediate]` | `act_fn.output`; `down_proj.input` (`act(gate) * up` on a gated MLP) |
+| `attention_queries`, `_keys`, `_values` | `self_attn` | `Queries`, `Keys`, `Values` `[batch, heads, seq, head_dim]` | after the rotary; keys and values `num_kv_heads` wide; eager |
+| `attention_scores`, `attention_probabilities` | `self_attn` | `Pattern` `[batch, heads, query, key]` | masked, scaled, before the softmax; the pattern the values are mixed with; eager |
+| `attention_head_outputs` | `self_attn` | `HeadOutputs` | each head's output, before the output projection; eager |
+| `token_embeddings`, `final_norm_output` | root | `Residual` | `embed_tokens.output`; `norm.output`, what the head projects |
+| `lm_head_output`, `logits` | root | `Logits` | the head's raw output; the model's logits, after any softcap or scale |
+| `next_token_probs` | root | `NextTokenProbs` `[batch, vocab]` | `logits[:, -1].softmax(-1)` in the model dtype; read-only |
+| `input_ids`, `attention_mask` | root | `Tokens` | the model's inputs: read first; assignable |
 
-Every layout is a named `jaxtyping` alias (`nnterp.components.Residual`, `Pattern`,
-...; the root's from `nnterp.standardized`): `value.layout` is that alias,
-`value.dims` its axes, and `print(envoy)` lists each value as
-`(name) -> Layout [axes]: description`:
-
-```python
-from nnterp.components import Pattern
-
-assert type(model.layers[0].self_attn).attention_probabilities.layout is Pattern
-print(type(model.layers[0].self_attn).attention_probabilities)
-# (attention_probabilities) -> Pattern [batch num_heads query key]: The attention pattern the values are mixed with
-```
-
-An axis named after a size the model holds (`hidden_size`, `num_heads`, `num_kv_heads`,
-`head_dim`, `vocab_size`, `num_experts`; the constants `HIDDEN`, `HEADS`, ... in
-`nnterp.components`) is resolved by `nnterp.axis_size(envoy, axis)` to a
-number for a value served on that envoy, the block's own count where blocks differ. Use it
-to check or allocate shapes without naming a family's config key; `batch`, `seq`, `query`
-and `key` are the tensor's own, and the recurrent layouts' `heads`, `key_dim`, `value_dim`,
-`channels`, `state_dim` and `groups` name no such size (take them off a read tensor): both
-raise `ValueError`:
-
-```python
-from nnterp import axis_size
-
-assert type(model.layers[0].self_attn).attention_probabilities.dims == ("batch", "num_heads", "query", "key")
-assert axis_size(model.layers[0].self_attn, "num_heads") == 12 and axis_size(model.layers[0], "hidden_size") == 768
-```
-
-**Between and inside the sublayers.** The module boundaries are values too, so a recipe
-that wants the stream after the attention, the normed input of a sublayer, a neuron or a
-head's output at the projection never names a per-family module:
+A mixture of experts adds its routing values, a recurrent mixer its state, a
+vision-language wrapper its tower's values ([below](#when-you-need-more)). Batch is axis 0;
+the sequence axis is 1, except on the queries, keys and values, where it is 2: the last token
+is `value[:, -1]` for a residual value and `value[:, :, -1]` for those three.
 
 ```python
 with model.trace(prompt):
     block = model.layers[5]
     x = block.layer_input.save()
-    normed = block.attention_norm_output.save()          # what the attention is called with
-    premix = block.self_attn.attention_premix.save()     # o_proj's input by head: [batch, seq, heads, head_dim]
+    premix = block.self_attn.attention_premix.save()     # o_proj's input, by head
     attn = block.self_attn.attention_output.save()
     mid = block.layer_mid.save()                         # the stream between the sublayers
-    neurons = block.mlp.mlp_neurons.save()               # down_proj's input: [batch, seq, intermediate_size]
-    head = model.lm_head_output.save()                   # lm_head's own output, before any softcap
+    neurons = block.mlp.mlp_neurons.save()               # down_proj's input
+    head = model.lm_head_output.save()
 
-assert torch.equal(mid, x + attn) and normed.shape == x.shape
+assert torch.equal(mid, x + attn)
 assert premix.shape == (1, 10, 12, 64) and neurons.shape == (1, 10, 3072)
 assert torch.equal(head, logits)                         # GPT-2's head applies nothing after lm_head
 ```
 
-For one head, `attention_premix` is the value to ablate or attribute when the model is not
-loaded eager: it is served under any `attn_implementation`, and on a plain attention it is
-the same tensor as `attention_head_outputs`, which needs eager (on Qwen3-Next and Laguna the
-premix is after the gate, the head outputs before it). For one neuron, `mlp_neurons` is the
-per-neuron coefficient the down projection sums into the stream; `mlp_activation` is
-`act_fn`'s output, which on a gated MLP is not yet multiplied by the up projection.
+To ablate or attribute one head without an eager load, use `attention_premix`: on a plain
+attention it is the same tensor as `attention_head_outputs`, which needs eager. For one
+neuron, `mlp_neurons` is the coefficient the down projection sums into the stream.
 
-Each is defined on the pre-norm block; a family whose block is built otherwise points it
-at its own module or marks it unavailable with the reason (a parallel block has no
-`layer_mid`, a routed mixture no `mlp_activation` / `mlp_neurons`). Per block structure,
-gated vs plain MLPs, and the root pair: [references/values.md](references/values.md#the-module-boundaries).
+**Sizes.** `model.num_layers`, `hidden_size`, `vocab_size`, `num_heads`, `num_kv_heads`,
+`head_dim` and `intermediate_size` are the config's, whatever the family calls them. Where
+blocks differ (Gemma-4's full blocks have other head sizes than its sliding ones) read the
+block's own: `layers[i].self_attn.num_heads` / `.num_kv_heads` / `.head_dim`,
+`layers[i].mlp.intermediate_size`.
 
-**Sizes.** The root's (`num_layers`, `hidden_size`, `vocab_size`, `num_heads`,
-`num_kv_heads`, `head_dim`, `qk_head_dim`, `intermediate_size`) are the config's,
-spelled per family. Where blocks differ (Gemma-4's full blocks, MiMo-V2-Flash,
-Laguna, Gemma-4 E2B's double-wide MLPs) read the block's own:
-`layers[i].self_attn.num_heads` / `.num_kv_heads` / `.head_dim` / `.qk_head_dim`
-and `layers[i].mlp.intermediate_size` (one expert's on a mixture).
-
-## The same script on another family
-
-```python
-llama = StandardizedTransformer("HuggingFaceTB/SmolLM2-135M-Instruct", device="cpu", dispatch=True, attn_implementation="eager")
-lparis = llama.tokenizer(" Paris", add_special_tokens=False).input_ids[0]
-```
-
-```python
-with llama.trace(prompt):
-    x = llama.layers[5].input.save()
-    k = llama.layers[5].self_attn.attention_keys.save()
-    pattern = llama.layers[5].self_attn.attention_probabilities.save()
-    attn = llama.layers[5].self_attn.attention_output.save()
-    mlp = llama.layers[5].mlp.mlp_output.save()
-    resid = llama.layers[5].layer_output.save()
-    ll = llama.logits.save()
-
-n = len(llama.tokenizer(prompt).input_ids)
-assert (llama.num_layers, llama.hidden_size, llama.num_heads, llama.num_kv_heads) == (30, 576, 9, 3)
-assert resid.shape == (1, n, 576) and resid.dtype == torch.bfloat16     # the checkpoint's dtype
-assert k.shape == (1, 3, n, 64) and pattern.shape == (1, 9, n, n)       # kv_heads vs query heads
-assert torch.equal(x + attn + mlp, resid)
-assert ll[0, -1].argmax() == lparis
-```
-
-Same body, different family, no `[0]`. In bf16 the pattern's rows sum to 1
-within about 4e-3, and `next_token_probs` is a bf16 softmax (off by up to ~2e-3):
-compare with `atol`, and take `logits[:, -1].float().softmax(-1)` for metrics.
-
-## Vision-language models
-
-```python
-from PIL import Image
-
-vlm = StandardizedTransformer("trl-internal-testing/tiny-LlavaForConditionalGeneration",
-                              task="image-text-to-text", device="cpu", dispatch=True)   # the processor comes with the task
-image = Image.new("RGB", (64, 64), "red")
-messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What is this?"}]}]
-vprompt = vlm.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)   # places the image token
-```
-
-```python
-with vlm.trace(vprompt, images=[image]):
-    mask = vlm.vision.image_token_mask.save()            # [batch, seq] bool; first: it comes off the inputs
-    patches = vlm.vision.layers[0].layer_output.save()   # Patches: [images, patches, vision_hidden]
-    features = vlm.vision.image_features.save()          # [image_tokens, hidden], flat
-    first = vlm.layers[0].input.save()
-    out = vlm.layers[0].layer_output.save()
-    vlm.layers[1].layer_output[mask] = 0                 # a one-sided edit: the image positions only
-    edited = vlm.logits.save()
-
-assert vlm.family is nnterp.families.llama               # the family is the text model's
-assert mask.shape == (1, 592) and mask.sum() == 576
-assert patches.shape == (1, 577, 16)                     # CLIP: the CLS token first, then 576 patches
-assert features.shape == (576, 16)
-assert torch.equal(first[mask], features)                # the scatter identity, exact
-assert out[mask].shape == (576, 16) and out[~mask].shape == (16, 16)   # image rows, text rows
-assert edited.shape == (1, 592, 32064)
-```
-
-`model.vision` is the tower (a `Vision`), `vision.layers[i]` its blocks with
-`self_attn` and `mlp` and the same block values (the module boundaries too), laid out `Patches`,
-and `model.projector` the last module before the image enters the text model;
-`model.layers` stays the text model's. The tower's sizes are on `model.vision`
-(`num_layers`, `vision_hidden_size`, `num_heads`, `patch_size`, ...). The one rule for
-`vision.image_features`: it is read at the scatter, the tensor the wrapper writes
-into the token embeddings, so `layers[0].input[mask] == image_features` on every
-wrapper; ablate or patch the image there. `projector.output` differs from it on
-LLaVA-NeXT, LLaVA-OneVision, Gemma 4 unified and Qwen2.5-VL. Names per tower (SigLIP, CLIP,
-Pixtral, the Qwen ViT, Llama 4, Gemma 4), the Qwen ViT's packed row and DeepStack,
-`generate`, availability and the 19 host families:
-[references/vision.md](references/vision.md).
-
-## Writing values
-
-In-place edits reach the model because the value is the live tensor;
-assignment replaces it. On a tuple block or an attention module the other
-elements are put back for you:
+## Writing a value
 
 ```python
 with model.trace(prompt):
@@ -534,240 +175,127 @@ with model.trace(prompt):
 assert not torch.allclose(changed, logits) and not torch.allclose(zeroed, logits)
 ```
 
-On Granite (and GraniteMoE, ZAYA) a contribution is a scaled copy divided back
-on write: in bf16 an edit at one position shifts every position by up to half the
-edit's own effect; compare such edits in float32. On Gemma-4 `attention_keys` and
-`attention_values` are served as a copy private to each block: an edit, in place or by
-assignment, changes what that block attends with and nothing else; to change what every
-borrower of a KV-sharing source block attends with, edit the source block's `k_proj` /
-`v_proj` output.
+An in-place edit reaches the model because the value is the live tensor; an assignment
+replaces it, and where the block or attention module returns a tuple the other elements are
+put back for you. A read after an in-place edit returns the edited tensor: `.clone()` first
+when you need the value before it.
 
-## Before the rotary embedding
+## Traps that corrupt a result silently
 
-`attention_queries` and `attention_keys` are rotated for the positions they run at.
-`self_attn.attention_queries_prerope` and `self_attn.attention_keys_prerope` are the same
-queries and keys one step earlier, as the block's rotary embedding receives them: after the
-projection and any query or key norm (Qwen3's `q_norm` / `k_norm`, OLMo-2/3, Gemma-3/4),
-before the rotation, laid out `Queries` and `Keys` (the keys before the cache and
-`repeat_kv`). `self_attn.rotate(x, positions)` applies that block's own rotary embedding to
-any tensor laid out like them, at the absolute positions you give it, and needs no trace:
-`rotate(attention_queries_prerope, range(seq))` is `attention_queries` bit for bit. Both
-values are read on the attention module's own forward, not inside the eager interface, so
-they are served under any `attn_implementation`, and they come before `attention_queries`
-in a trace (`model.order(i)` ranks them first).
+**The target token is BOS.** `tokenizer.encode(" Paris")[0]` is the BOS token on Llama-3 and
+Gemma tokenizers, and every metric then runs and prints 0.000. Take
+`tokenizer(word, add_special_tokens=False).input_ids` and assert one element, as the setup
+block does. A Llama-2 or Mistral sentencepiece tokenizer splits `" Paris"` into
+`['▁', 'Paris']`: tokenize `"Paris"` there. A word that splits otherwise is not one logit:
+pick another, or use `nnterp.prompt_utils.get_first_tokens`.
 
-Use them instead of `attention_queries` / `attention_keys`:
-
-- **To move a query or key to another position or prompt.** A rotated query carries its
-  position in its rotation; written elsewhere it is attended with the wrong one. Write the
-  value before the rotary instead: the block rotates what you wrote for the position it
-  lands at, so the transplant is one assignment.
-- **For an edit that must come before the rotation**: a direction found on the unrotated
-  queries or keys (a probe, a steering vector), which the rotary would turn by a different
-  angle at every position.
-- **To recompute attention with keys from elsewhere**: `rotate` the source keys at the
-  destination positions, outside the trace.
-
-And instead of `self_attn.q_proj.output`, whose layout nnterp does not promise (Phi-3 and
-GPT-NeoX fuse the queries, keys and values into one projection; Phi-3 has no `q_proj`), and
-which on Qwen3, OLMo-2/3 and Gemma misses the norm between the projection and the rotary.
-GPT-2 has no rotary, so this runs on SmolLM2 (`llama`, loaded above):
+**`[0]` takes a batch row.** The values are the tensor on every family, including attention
+modules and blocks whose raw `.output` is a tuple. Indexing `[0]` to unwrap, as code written
+against `.output` does, silently takes batch row 0:
 
 ```python
-attn = llama.layers[1].self_attn
+with model.trace(prompt):
+    raw = model.layers[3].self_attn.output.save()
+    wrong = model.layers[3].layer_output[0].save()
 
-source, target = "The capital of France is Paris", "My favourite city in the whole world is Rome"
-with llama.trace(source):
-    q_src = attn.attention_queries_prerope.save()       # [1, num_heads, seq, head_dim], not rotated yet
-    k_src = attn.attention_keys_prerope.save()          # [1, num_kv_heads, seq, head_dim]
-with llama.trace(target):
-    attn.attention_queries_prerope[:, :, -1] = q_src[:, :, -1]   # the source's last query, rotated for the target's last position
-    moved = attn.attention_queries.save()
-    logits = llama.logits.save()
-
-seq = k_src.shape[2]
-assert torch.equal(moved[:, :, -1:], attn.rotate(q_src[:, :, -1:], [moved.shape[2] - 1]))
-later = attn.rotate(k_src, range(5, 5 + seq))           # the source's keys as if five positions later
-assert q_src.shape == (1, 9, seq, 64) and later.shape == k_src.shape == (1, 3, seq, 64)
+assert isinstance(raw, tuple) and wrong.shape == (10, 768)       # batch row 0, not "the tensor"
 ```
 
-On a block without a rotary embedding both values are `Unavailable`, and `rotate` raises
-`Unavailable` with the same reason, which `support()` gives per block:
+**Gemma-4's blocks are not a plain sum.** A Gemma-4 block multiplies its sum by a per-block
+`layer_scalar` (0.005 to 0.99): `(input + attention_output + mlp_output [+ per_layer_output])
+* layer_scalar == layer_output`. A term added in block `i` reaches the last stream times every
+scalar from `i` on, and naive direct logit attribution ranks the wrong terms by orders of
+magnitude. Doge, ZAYA and DeepSeek-V4 (whose `layer_output` is
+`[batch, seq, streams, hidden]`) break the plain sum too. The weighted sums, exact:
+[references/values.md](references/values.md#blocks-that-are-not-a-plain-sum). The logit lens
+through `project_on_vocab` is unaffected.
+
+**A late read under `tracer.iter` binds the next step.** In a plain trace a read placed after
+the model ran past it raises `OutOfOrderError`. Inside `tracer.iter` it raises on step 0, but
+on a later step it binds the same location on the *next* step, so a per-step list comes back
+shifted by one; the scores and the pattern, read inside the attention call, shift from step 0.
+Put a step's reads in forward order (`model.rank`, below) and check each step's shapes
+(`[batch, 1, ...]` on a decode step).
+
+**Overwriting `attention_scores` lifts the causal mask.** The scores are read after masking,
+so `scores[:] = 0` lets every query attend to the future. Add to them
+(`scores[..., k] += c`, or `-inf` to block key `k`).
+
+**bf16 metrics.** On a bf16 checkpoint `next_token_probs` is a bf16 softmax, off by up to
+~2e-3, and a pattern's rows sum to one within ~4e-3. Take `logits[:, -1].float().softmax(-1)`
+for a metric, compare with a tolerance, and compute a KL with `F.kl_div` on float32
+log-softmaxes: `next_token_probs` can hold exact zeros, where `p * (p.log() - q.log())` is NaN.
+
+## Finding out what a checkpoint has
+
+`model.support()` says which values a checkpoint has, from the config, without running
+anything: every root and block value by dotted name, `None` where every block has it, else
+`{block: reason}`. `model.support(layer=i)` is one block, flat. Reading an unavailable value
+raises `nnterp.Unavailable` with the same reason, before the model runs. A model built
+without `dispatch=True` sits on the meta device, so asking costs no weights:
 
 ```python
-assert plain.support(layer=0)["self_attn.attention_queries_prerope"] == (
-    "no rotary embedding: GPT-2 adds learned absolute position embeddings (wpe) to the stream")
+plain = StandardizedTransformer("openai-community/gpt2")        # meta device, transformers' default attention
+reason = plain.support(layer=0)["self_attn.attention_probabilities"]
+assert reason == "read inside the eager attention forward, but this model runs 'sdpa'; load with attn_implementation='eager'"
+assert plain.support(layer=0)["self_attn.attention_output"] is None    # boundary values never need eager
+assert plain.support().get("mlp.mlp_output", "absent") is None         # .get: a module no block has has no key
 ```
 
-That is GPT-2, GPT-BigCode, GPT-Neo, OPT and XGLM (absolute positions), BLOOM, MPT and Falcon
-with `alibi` (ALiBi), the attention blocks of Jamba, Nemotron-H and Kimi-Linear, and the NoPE
-blocks: the full-attention blocks of Cohere 2, AFMoE and a hybrid EXAONE 4, the blocks
-SmolLM3's and Llama 4's `no_rope_layers` mark, a Granite-SWA block whose `layer_rope_theta`
-is 0. Under latent attention (DeepSeek-V2/V3, Kimi-K2, GLM-5, ...) `attention_keys_prerope`
-is the one rope key per position that every head shares, `[batch, 1, seq, qk_rope_head_dim]`
-(`SharedRopeKeys`). Assignment reaches the model on every family; an in-place edit is
-refused on the split views of trap 9.
+Branch on `support()` outside the trace. `hasattr(envoy, value)` cannot answer: it raises
+`Unavailable` for an unavailable value, and `ValueError` (or `SourceNotAvailable`) outside a
+trace for an available one.
 
-On `StandardizedVLLM` both values are served (the arguments of vLLM's own
-`self.rotary_emb(positions, q, k)` call, private copies, rotated for where a write lands),
-but **`rotate` runs inside a trace only** there: it calls the engine's rotary embedding, and
-outside a trace raises `RuntimeError`. Neither value is served on the families vLLM runs
-through its transformers backend (OLMo, OLMo 2, SmolLM3, StarCoder2) or under its latent
-attention (DeepSeek-V2/V3, Kimi-K2, GLM-4.7-Flash): read them, and rotate, on a
-`StandardizedTransformer` there. Where a family's values differ, positions under rope
-scaling and `generate`, and the vLLM recipe:
-[references/attention-interior.md](references/attention-interior.md#before-the-rotary-embedding-attention_queries_prerope-attention_keys_prerope-rotate).
-
-## Calling the attention function again: `interface`
-
-To recompute a block's attention with other keys or values, or to patch what some heads
-read without touching the KV cache, call the block's own attention function.
-`model.layers[i].self_attn.interface` is the function this block's forward called
-(`eager_attention_forward`, or the family's own: Gemma-2's with its logit softcap, GPT-OSS's
-with its sink column; the `_attn` method on GPT-J, GPT-Neo, CodeGen and GPT-NeoX-Japanese),
-bound to everything else the call received this time: the mask, the scale, the dropout, the
-sliding window. `attn.interface(q, k, v)` takes tensors in the layouts of
-`attention_queries`, `attention_keys` and `attention_values` (keys and values `num_kv_heads`
-wide: it repeats them for each group itself), with the live call's query and key lengths,
-and returns `(head_outputs, pattern)` in the layouts of `attention_head_outputs` and
-`attention_probabilities`; on the served tensors it is those two values bit for bit. It
-computes and returns: nothing reaches the model, the cache, the other heads or the other
-rows until you write a result. GPT-2 serves it (`model`, loaded eager above); its queries are
-split views (trap 9), so edit a clone, as below:
+`print(envoy)` lists the values an envoy carries, one line each, `(name) -> Layout [axes]:
+description`, whether or not this checkpoint has them; the descriptor answers too:
 
 ```python
-attn = model.layers[5].self_attn
-fact = "The capital of France is"
-
-with model.trace(fact):
-    q, k, v = attn.attention_queries, attn.attention_keys, attn.attention_values
-    heads, pattern = attn.interface(q, k, v)         # the function this call ran, run again on the same tensors
-    probs = attn.attention_probabilities.save()      # read after the call: the pattern comes later in the forward
-    served = attn.attention_head_outputs.save()
-    heads, pattern = heads.save(), pattern.save()
-
-assert torch.equal(heads, served) and torch.equal(pattern, probs)   # the same function on the same shapes
-assert heads.shape == (1, 5, 12, 64) and pattern.shape == (1, 12, 5, 5)
+print(type(model.layers[0].self_attn).attention_probabilities)
+# (attention_probabilities) -> Pattern [batch num_heads query key]: The attention pattern the values are mixed with
+assert type(model.layers[0].self_attn).attention_probabilities.dims == ("batch", "num_heads", "query", "key")
 ```
 
-Use it instead of writing `attention_keys` or `attention_values`:
-
-- **For an edit of keys or values that must not reach the KV cache or the other heads of a
-  group.** Writing `attention_keys` changes the keys every query head of the group reads, at
-  every query row, and under `generate` an in-place edit stays in the cache for every later
-  step (an assignment replaces the argument of that one forward). Call `interface` on
-  edited copies instead and write only the heads you chose.
-- **For a per-row patch**: compute with the edited tensors, then write the rows you want of
-  `attention_head_outputs` (the last one, for the prediction).
-- **For a recompute that must match the model bit for bit.** A hand-written
-  `softmax(q @ k.T * scale)` needs the module's scale, misses Gemma-2's softcap and a sink
-  column, and rounds differently in bf16 when its matmuls have other shapes than the
-  model's; the call runs the model's function on the model's shapes.
-
-Read it once and call the result as often as you need (trap 17). Under grouped-query
-attention a key/value head edited in a copy moves the whole group in the result, and only
-the heads you write reach the model; SmolLM2 has three query heads per key/value head
-(`llama`, loaded above):
+Reads and edits follow the forward within one invoke: in a block, the attention's interior,
+then `attention_output`, the MLP's values, `layer_output`; block 3 before block 5; `logits`
+last. A read placed after the forward passed it raises `OutOfOrderError`, naming an internal
+location (`...attention_interface_1.fn.i0`), not the value:
 
 ```python
-attn = llama.layers[14].self_attn
-
-with llama.trace(fact):
-    interface = attn.interface                       # read once, with the queries, keys and values
-    q, k, v = attn.attention_queries, attn.attention_keys, attn.attention_values
-    k2 = k.clone()                                   # a copy: k is what the model attends with (and, under generate, the cache)
-    k2[:, 1, 0] = 0                                  # key/value head 1, position 0
-    clean, _ = interface(q, k, v)
-    edited, _ = interface(q, k2, v)                  # called again: same mask, same scale
-    attn.attention_head_outputs[:, -1, 4] = edited[:, -1, 4]   # head 4, last row: the only write
-    moved = edited.ne(clean).flatten(0, 1).any(0).any(-1).save()
-
-assert moved.nonzero().flatten().tolist() == [3, 4, 5]   # the result moves for the whole group; only head 4 is written
+with model.trace(prompt):
+    late_attn = model.layers[3].self_attn.attention_output.save()
+    late_pattern = model.layers[3].self_attn.attention_probabilities.save()   # inside the attention: too late
 ```
 
-A key or query edited before the rotary goes in rotated for its position,
-`interface(q, attn.rotate(k_prerope, positions), v)`, with `attention_keys_prerope` read
-first, since the forward reaches it before the interface
-([Before the rotary embedding](#before-the-rotary-embedding)). Inside `tracer.iter` it is
-that step's call: on a decode step the queries have one row, the keys and values are the
-whole cache, and the mask is the step's. On a model split tensor-parallel it takes the
-gathered queries, keys and values and runs every head on every rank. In training mode with
-a dropout the call draws its own mask. Chosen heads reading another run's keys and values
-over a span, on the prompt and on every `generate` step, is the [patterns guide](references/patterns.md)'s
-head-selective K/V patching.
-
-`support()` reports `self_attn.interface` unavailable where the values it works with are
-(any `attn_implementation` but `"eager"`, with the same reason) and, with
-`nnterp.components.OWN_ARITHMETIC` (`the queries, keys and values are not the arguments of
-one call in this forward that returns the head outputs ...`), where no such call exists:
-BLOOM, MPT, Falcon and XGLM do their own arithmetic, and DeepSeek-V4 rotates the
-interface's output back before its projection. On a vision tower it is served on SigLIP,
-CLIP, Pixtral, Gemma 4 and Llama 4; the Qwen ViT and RADIO make one call per image and
-report that. `StandardizedVLLM` does not serve it: the engine's attention is a kernel that
-writes the step's keys and values into its cache as it runs.
+`model.order(i)` lists block `i`'s available values in forward order, measured on the loaded
+checkpoint, and `model.rank(name, layer)` is a sortable key, both by `support()`'s names.
+When code decides what to read or edit (a sweep over several values per block, a port of
+code that hooked modules in its own order), sort the sites by `rank`; the order differs per
+family:
 
 ```python
-eager_reason = plain.support(layer=0)["self_attn.attention_probabilities"]
-assert plain.support(layer=0)["self_attn.interface"] == eager_reason   # sdpa: the reason of the values it works with
+sites = [("layer_output", 3), ("self_attn.attention_probabilities", 3), ("mlp.mlp_output", 1)]
+sites.sort(key=lambda site: model.rank(*site))                 # forward order, on any family
+assert sites == [("mlp.mlp_output", 1), ("self_attn.attention_probabilities", 3), ("layer_output", 3)]
+
+saved = []
+with model.trace(prompt):
+    for name, layer in sites:
+        host = model.layers[layer]
+        for part in name.split("."):                           # "self_attn.attention_probabilities" -> the value
+            host = getattr(host, part)
+        saved.append(host.save())
+
+assert [tuple(s.shape) for s in saved] == [(1, 10, 768), (1, 12, 10, 10), (1, 10, 768)]
 ```
 
-Everything else (decode steps, padded batches, the per-family calls, the cache under
-`generate`):
-[references/attention-interior.md](references/attention-interior.md#calling-the-attention-function-again-interface).
+Before writing against an unfamiliar checkpoint, run the script (meta device, no weights): it
+prints the family, the standard-name to native-path table, the sizes, `support()` and a
+block's repr (`--eager`: as an eager load reports them; `--task image-text-to-text`: a
+vision-language wrapper's tower too).
 
-## The weights per head
-
-Four accessors read a head's weights off the modules, outside a trace or inside one:
-`self_attn.value_weight(kv)` is key/value head `kv`'s slice of the value projection,
-`[head_dim, hidden_size]`; `self_attn.output_weight(j)` is head `j`'s slice of the output
-projection, `[hidden_size, head_dim]` (what maps its slice of `attention_premix` to the
-projection's output); `layers[i].attention_input_gain` is the per-channel gain between the
-stream and what the attention reads, `[hidden_size]`: the pre-attention norm's gain
-(`weight`, Gemma's `1 + weight`), ones on a post-norm block (OLMo-2/3); and
-`layers[i].attention_output_gain` is the gain of the norm a block applies to the attention's
-output before adding it (OLMo-2/3, Gemma-2/3/4), ones where the output is added as it is.
-Use them for anything that multiplies a
-head's weights: an OV circuit, a head's write of a stream direction, direct logit
-attribution through `output_weight`, and an adapted model's weights without merging (trap
-18). Query head `j` reads key/value head `j // (num_heads // num_kv_heads)`:
-
-```python
-layer = llama.layers[14]
-attn = layer.self_attn
-group = attn.num_heads // attn.num_kv_heads                # 3 on SmolLM2
-
-with llama.trace(fact):
-    x = attn.input.save()                                  # what the attention is called with: the normed stream
-    v = attn.attention_values.save()                       # [batch, num_kv_heads, seq, head_dim]
-
-value = attn.value_weight(1)                               # [head_dim, hidden_size]; SmolLM2's v_proj has no bias
-torch.testing.assert_close(x.float() @ value.float().T, v[:, 1].float(), rtol=2e-2, atol=2e-2)   # bf16: to rounding
-
-h = llama.embed_tokens.weight[lparis].float()
-h = h / h.pow(2).mean().sqrt()                             # unit RMS, as the block's norm leaves the stream
-j = 4                                                      # reads key/value head 4 // 3 = 1
-W_V, W_O = attn.value_weight(j // group).float(), attn.output_weight(j).float()   # the gains are float32
-ov = layer.attention_output_gain * (W_O @ W_V @ (layer.attention_input_gain * h))
-assert ov.shape == (576,)                                  # what head 4 writes, per unit of attention on " Paris"
-assert model.layers[5].self_attn.value_weight(0).shape == (64, 768)   # GPT-2's fused, transposed c_attn, read for you
 ```
-
-The weights are the parameter's dtype and device, views of the parameter where torch
-allows, and raise `Unavailable` on an undispatched or quantized model; the gains are
-float32. The layouts the families
-fuse (Phi-3's `qkv_proj`, GPT-NeoX's and BLOOM's per-head `query_key_value`, Falcon's three,
-MPT's and DBRX's `Wqkv`, CodeGen's four parts, GPT-2's `Conv1D`) are read for you; the
-weights carry no bias. Where the value projection has one, every value (and so a head's
-output: a pattern row sums to one) carries it, and
-`attention_values[:, kv] - self_attn.input @ value_weight(kv).T`, from one eager trace, is
-that bias at every position, whatever the family's layout. `value_weight` alone is refused
-where a value head is not one slice of a projection, and `output_weight` is still served:
-latent attention (DeepSeek-V2/V3, Kimi-K2, GLM-5, GLM-4.7-Flash, Youtu, Kimi-Linear),
-Gemma-4 (`v_norm` on the values) and ZAYA. `self_attn.no_head_weights()` is the one reason
-both raise: DeepSeek-V4, JetMoE, the default family, a vision tower, a model split
-tensor-parallel, and `StandardizedVLLM` (which refuses the gains too). Details and the
-layout table:
-[references/attention-interior.md](references/attention-interior.md#the-weights-per-head).
+python scripts/inspect_family.py <repo_id> [--layer N] [--eager] [--task image-text-to-text]
+```
 
 ## Methods over the values
 
@@ -790,128 +318,34 @@ assert torch.equal(model.project_on_vocab(last), out)            # exact at the 
 print(model.get_topk_closest_tokens(mid[0, -1], k=3))            # [{token: probability}]
 ```
 
-`project_on_vocab` is the model's own path from the stream to its logits: norm,
-`lm_head`, then the softcap (Gemma-2/4), `logit_scale` (Cohere's causal-LM classes, not
-the Aya Vision wrappers) or `/ logits_scaling` (Granite); `hc_head` first on DeepSeek-V4,
-and `project_out` in place of the final norm on OPT-350m, which has none. `steer` moves
-`vector` to the stream's device and dtype; scale the factor to the stream's norm
-(`layer_output[0, -1].norm()`, which grows with depth).
-On DeepSeek-V4 the vector goes into every stream and each sublayer reads a weighted sum
-of the streams, so it arrives multiplied by that sum (between 0 and 4).
-`get_topk_closest_tokens` takes a residual-stream tensor, not logits, and keys on
-the decoded string: byte tokens that decode to `'�'` collapse into one entry.
+`project_on_vocab` is the model's own path from the stream to its logits: the final norm,
+`lm_head`, then any softcap or scale (Gemma-2's and Gemma-4's softcap included), so the lens
+on the last block equals `logits` on every family. `steer` adds `factor * vector` in place to
+`layer_output`; scale the factor to the stream's norm (`layer_output[0, -1].norm()`, which
+grows with depth). `skip_layers` consumes `layers[start].input`: read it first or not at all.
+`get_topk_closest_tokens` takes a residual-stream tensor, not logits.
 
-## `support()`
+## When you need more
 
-`model.support()` is every root and block value by dotted name: `None` when
-available on every block, else `{block: reason}`. `model.support(layer=i)` is one
-block, flat; `envoy.support()` one envoy. A module no block has (OPT's `mlp`) has
-no key: `support().get("mlp.mlp_output", "absent")` on a family you do not know.
-Reading an unavailable value raises `nnterp.Unavailable` with the same reason,
-before the model runs. Reasons, `SourceNotAvailable`, guarding a script:
-[references/availability-and-support.md](references/availability-and-support.md).
-
-Before writing against an unfamiliar checkpoint, run the script (meta device, no
-weights): it prints the family, the standard-name to native-path table, the
-sizes, `support()` and a block's repr (with `--task image-text-to-text`, a
-vision-language wrapper's tower names, sizes and `model.vision.support()` too):
-
-```
-python scripts/inspect_family.py <repo_id> [--layer N] [--eager] [--task image-text-to-text]
-```
-
-## Families
-
-98 families; `nnterp.families.known()` lists 99 modules, counting `kimi_k25` (Kimi K2's
-family under its wrapper's name). 19 of the families also host a vision tower on their
-image-text-to-text wrappers (the family is the text model's: Llava resolves to `llama`);
-the wrappers table is in [references/vision.md](references/vision.md#which-wrappers).
-What a recipe must survive is grouped by quirk in
-[references/api-reference.md](references/api-reference.md); the full per-family table is
-nnterp's `docs/reference/families.md`, and the encyclopedia
-(https://ndif-team.github.io/nnterp/encyclopedia/) has a page per family with its block
-drawn. The `docs/...` paths this skill cites are in https://github.com/ndif-team/nnterp;
-the documentation site serves every page as Markdown, listed at
-https://ndif-team.github.io/nnterp/llms.txt.
-
-A `model_type` with no family loads with the best-effort `nnterp.families.default` and a
-`UserWarning` (`nnterp has no family for model_type ...`): it serves `layer_output`, the
-module boundaries its aliases reach, the root values, the sizes and the attention
-interior, not `attention_output`, `mlp_output`, `layer_mid`, `mlp_norm_output`, a
-mixture's interior or `project_on_vocab`, and raises `UnsupportedFamily` when it cannot
-standardize the checkpoint (no blocks, embedding, final norm or head under a name it
-knows, or a stream of the wrong shape). Before a load, `nnterp.families.resolve(config)`
-(the checkpoint's `AutoConfig`) is the family the load would use, `nnterp.families.default`
-where none covers it; `nnterp.families.covers(model_type)` answers for one type only, so it
-is `False` on a vision-language wrapper's config (Qwen3.5's `qwen3_5`) whose text model
-has a family. The [extending guide](references/extending.md) adds a family, registers one, or passes one to a single load with
-`family=`.
-
-## The vLLM engine and several GPUs
-
-`nnterp.StandardizedVLLM(repo_id, dispatch=True, ...)` is the same vocabulary, values
-and layouts on nnsight's `VLLM` engine (60 families). Pick it for throughput: many
-concurrent prompts, long generations, a served engine. Stay on `StandardizedTransformer`
-for gradients, an edit of the attention pattern or a decode step's pattern,
-`self_attn.interface`, and the values the engine does not have (a gated MLP's
-`mlp_activation`; `attention_mask`, since a request is one unpadded sequence; and
-`lm_head_output` where vLLM's logits processor softcaps or scales, Gemma-2, Cohere and
-Granite, where it is unavailable naming which; elsewhere it is the logits, read and
-written as `logits`). `model.order()` / `model.rank()` work on it: the transformers
-model's ranks, measured on a weightless `StandardizedTransformer` of the checkpoint, for
-the values the engine serves; `model.generation_config` is the checkpoint's. Both are
-`nnterp.Standardized`, so a helper written against the standard names takes either.
-What differs, from the repo's `docs/usage/vllm.md`:
-
-```python
-from nnterp import StandardizedVLLM
-
-vmodel = StandardizedVLLM("HuggingFaceTB/SmolLM2-135M-Instruct", dispatch=True, gpu_memory_utilization=0.2, max_model_len=1024)
-layer = vmodel.layers[12]
-with vmodel.trace("The Eiffel Tower is in the city of", temperature=0.0, max_tokens=1):   # sampling settings on trace
-    stream_in = layer.layer_input.save()          # never layers[i].input: natively the positions
-    stream = layer.layer_output.save()            # [1, tokens, hidden_size]: one prompt per invoke, a private copy
-    vlogits = vmodel.logits.save()                # [1, 1, vocab_size]: the last position only
-```
-
-The pattern and scores are recomputed from the queries and keys (read-only, prefill only),
-`self_attn.rotate`, `project_on_vocab` and `get_topk_closest_tokens` run inside a trace only
-(they call the engine's modules; outside one the last two fail with `RuntimeError: Tensor on
-device meta ...`), and an assigned value must keep the shape it was served with. Errors from
-the engine's worker arrive as `RuntimeError` naming the original type, an unavailable read
-inside a trace included (`RuntimeError: Unavailable: ...`, not `nnterp.Unavailable`): guard
-with `support()` before the trace. Collect into a container saved inside the trace
-(`lens = nnsight.save({})`, then `lens[i] = ...`), which works on both engines; on the engine
-a container made outside the trace and filled with `.save()`d entries comes back empty,
-without an error. vLLM itself is the `nnsight` skill's vllm guide.
-
-A model too big for one GPU loads sharded with
-`distributed_config=DistributedConfig(tp_size=N)` under `torchrun`: every value reads whole
-on every rank (the attention interior and `mlp_activation` gathered where a rank holds a
-piece, edits split back), except a split mixture's `expert_outputs`, a per-rank partial sum
-(read `routed_output`). Read values unconditionally, never under a branch on the rank
-(`docs/usage/loading.md`; the `nnsight` skill's tensor-parallel guide).
-
-## References
-
-| File | Covers |
+| when you need to | read |
 |---|---|
-| [references/values.md](references/values.md) | the boundary values and the identity, tuple blocks, where families relocate a contribution, the non-additive families with their stream-weight recipes, root values, sizes, layouts |
-| [references/attention-interior.md](references/attention-interior.md) | queries/keys/values/scores/probabilities/head outputs, family caveats (GPT-2, MPT, Falcon, sinks, latent attention, Gemma-4 borrowed keys), what edits do to the mask, under `generate`; the queries and keys before the rotary and `rotate` (moving a query or key to another position, per-family differences, rope scaling, on vLLM); `interface`, the block's attention function called again (edits of keys or values that must not reach the cache or the rest of a group, per-row patches, exact recomputes; where it is unavailable); the weights per head (`value_weight`, `output_weight`, `attention_input_gain`: layouts, PEFT adapters, the gain, where refused) |
-| [references/mixture-of-experts.md](references/mixture-of-experts.md) | a `Moe`'s six values, usage / entropy / ablation / rerouting recipes with pad masking, bf16 and invoke caveats, per-family gaps |
-| [references/recurrent-mixers.md](references/recurrent-mixers.md) | `LinearAttention` (DeltaNet), `SelectiveScan` (Mamba-1), `StateSpace` (Mamba-2): what each name means on each, kernels, per-token state, read-order traps |
-| [references/availability-and-support.md](references/availability-and-support.md) | `support()` forms, the reasons, `Unavailable` vs `SourceNotAvailable`, guarding a script |
-| [references/vision.md](references/vision.md) | vision-language models: the tower names per tower, the image values and `Patches`, where the image meets the text model, image vs text positions, inputs and read order, `generate`, the Qwen ViT, availability, the wrappers |
-| [references/generation-and-helpers.md](references/generation-and-helpers.md) | values under `generate` with `tracer.iter`, `nnterp.prompt_utils`, `nnterp.nnsight_utils`, padding, `remote=True` |
-| [references/api-reference.md](references/api-reference.md) | every exported symbol, and the 98 families grouped by quirk |
+| move a query or key to another position or prompt, or edit it before the rotation: write `attention_queries_prerope` / `attention_keys_prerope` (any `attn_implementation`); `attention_queries` / `_keys` are rotated for where they ran | [attention-interior.md](references/attention-interior.md#before-the-rotary-embedding-attention_queries_prerope-attention_keys_prerope-rotate) |
+| recompute a block's attention with other keys or values, or patch what some heads read without the KV cache or the rest of their group seeing it: `self_attn.interface` | [attention-interior.md](references/attention-interior.md#calling-the-attention-function-again-interface) |
+| multiply a head's weights (an OV circuit, attribution through the output projection): `self_attn.value_weight(kv)`, `output_weight(j)`, `layers[i].attention_input_gain` / `attention_output_gain`, never slices of `.weight` (fused and transposed layouts; under a PEFT adapter `.weight` is the base alone) | [attention-interior.md](references/attention-interior.md#the-weights-per-head) |
+| go deeper into the attention interior: sinks (GPT-OSS), latent attention (DeepSeek), grouped-query widths, edits under `generate` | [attention-interior.md](references/attention-interior.md) |
+| read or edit expert routing (Qwen-MoE, DeepSeek-V3, GPT-OSS): router logits, expert weights and indices, ablating or rerouting an expert | [mixture-of-experts.md](references/mixture-of-experts.md) |
+| read or edit a recurrent mixer's values or state (Qwen3.5's DeltaNet blocks, Nemotron-H's Mamba-2 blocks, Mamba); `nnterp.route_kernels` goes before the first trace where `support()` asks for it | [recurrent-mixers.md](references/recurrent-mixers.md) |
+| follow an image into a vision-language model (Qwen3.5, Gemma 3, Llava): load with `task="image-text-to-text"`, read `vision.image_token_mask` first, edit `vision.image_features` | [vision.md](references/vision.md) |
+| read values under `generate` and `tracer.iter`: per-step shapes, edits that stay in the KV cache | [generation-and-helpers.md](references/generation-and-helpers.md#the-values-under-generate) |
+| collect activations at one position over many prompts, or a target word's probability mass | [generation-and-helpers.md](references/generation-and-helpers.md#nnterpnnsight_utils-activations-over-prompts) |
+| run for throughput or as a served engine (`StandardizedVLLM`), or shard a model too big for one GPU | [generation-and-helpers.md](references/generation-and-helpers.md#the-vllm-engine-standardizedvllm) |
+| run on NDIF with `remote=True` (the server needs nnterp installed) | [generation-and-helpers.md](references/generation-and-helpers.md#remotetrue-the-contract) |
+| know where a family puts a contribution, tuple blocks, the root values and layouts; size a tensor without a family's config key (`nnterp.axis_size`) | [values.md](references/values.md) |
+| read a `support()` reason or a `SourceNotAvailable`; guard a script | [availability-and-support.md](references/availability-and-support.md) |
+| look up an exported name, or the 98 families grouped by quirk | [api-reference.md](references/api-reference.md) |
+| load a checkpoint with no family (it loads with a best-effort default and a `UserWarning`; `support()` says what it serves), or add a family or a value of your own | the [extending guide](references/extending.md) |
 
-The nnterp repo's pages go deeper: `docs/usage/*.md` (one page per feature),
-`docs/reference/families.md`, `docs/patterns/*.md`.
-
-## Guides
-
-- `nnsight`: the underlying API (`.save()`, invokes, `tracer.iter`, `.source`, `rename`)
-- [patterns](references/patterns.md): logit lens, attribution, ablation, patching, steering, probing, sweeps written once against these values
-- [extending](references/extending.md): a checkpoint nnterp does not know, overriding a value, a value of your own
-- `debugging`: an error, a hang, an empty result
-- `remote`: running on NDIF; nnterp must be installed server-side
+nnterp's repo (https://github.com/ndif-team/nnterp) has a page per feature under
+`docs/usage/` and a row per family in `docs/reference/families.md`; the site serves every
+page as Markdown (https://ndif-team.github.io/nnterp/llms.txt), and its encyclopedia
+(https://ndif-team.github.io/nnterp/encyclopedia/) draws each family's block.

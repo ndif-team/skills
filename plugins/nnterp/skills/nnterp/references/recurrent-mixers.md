@@ -198,6 +198,9 @@ back by inverting them, so they are one argument:
   DeltaNet an unrouted `state` / `states` raises `Unavailable` naming
   `route_kernels`.
 - **`state_input` is `None` on a fresh prompt**; save it only when it is not.
+- **A submodule's value and the kernel values do not share a trace.** A mixer's submodule
+  value (`linear_attn.in_proj_qkv.output`) and its kernel values (`attention_queries`,
+  `state_output`, ...) raise `OutOfOrderError` in either order: use two traces.
 - **Remotely, the per-token state is unavailable**: routing rebinds kernels in
   *your* process. The call-level values are ordinary source values there.
 - **`layer_output` is float32** on Mamba / Falcon-Mamba (`residual_in_fp32`),

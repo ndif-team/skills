@@ -170,7 +170,7 @@ assert ((stacked >= 0) & (stacked <= 1 + 1e-3)).all()
 On the 7B's red square the mean mass is 0.73 at block 0 and 0.42 at block 1, under 0.1
 from block 3 on, then between 0.1 and 0.26 across blocks 10 to 24, where single heads put
 0.75 to 0.95 of their mass on the image (blocks 12, 14, 18, 19, 22). Those are the heads to
-take to `references/patterns-patching-and-attention.md`. In a two-image prompt, a head's mass on
+take to [patterns-patching-and-attention.md](patterns-patching-and-attention.md). In a two-image prompt, a head's mass on
 one image is the same expression with that image's slice of the mask.
 
 ## Edit the image positions of a text block

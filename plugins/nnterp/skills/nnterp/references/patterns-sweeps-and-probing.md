@@ -248,7 +248,7 @@ capacity is held fixed. `idx=0` or a positive `idx` needs right padding.
 A gated DeltaNet block (Qwen3-Next, Qwen3.5) has no pattern. Each head keeps a
 recurrent state `[key_dim, value_dim]`; every token decays it, writes its key/value
 pair in scaled by a beta, and the query reads against it. Mamba-1 and Mamba-2 blocks
-keep a state too, with other layouts and fewer writable forms (the `references/recurrent-mixers.md` has the "same name, different meaning" table).
+keep a state too, with other layouts and fewer writable forms (the [recurrent-mixers.md](recurrent-mixers.md) has the "same name, different meaning" table).
 The blocks below are not in the executed set; every one ran on the tiny Qwen3.5
 checkpoint nnterp's suite pins, with the assertions shown.
 

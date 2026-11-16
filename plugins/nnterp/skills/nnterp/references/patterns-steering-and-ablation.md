@@ -337,7 +337,7 @@ for i, probs in enumerate(outs):
 ```
 
 The same loop runs on a non-hybrid, where every `mixer(layer)` is `self_attn`; the
-per-family version is in `references/patterns-sweeps-and-probing.md`.
+per-family version is in [patterns-sweeps-and-probing.md](patterns-sweeps-and-probing.md).
 
 ### Measuring
 

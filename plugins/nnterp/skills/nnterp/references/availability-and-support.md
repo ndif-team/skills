@@ -324,6 +324,12 @@ of the checkpoint, for the values the engine serves; a value the engine lacks ra
 plain.rank("self_attn.attention_probabilities", 0)      # sdpa: the reason is support()'s
 ```
 
+One `OutOfOrderError` is not about the order `rank` gives. A child module's value
+(`self_attn.q_proj.output`) then an interior value of that attention (`attention_queries`)
+fails in the first such trace on a model whose `self_attn.source` nothing has touched yet;
+once the model is dispatched (`dispatch=True`, or after its first trace), touch
+`model.layers[i].self_attn.source` outside the trace.
+
 ## Gotchas
 
 - `hasattr(envoy, "attention_probabilities")` raises; use `support()`.

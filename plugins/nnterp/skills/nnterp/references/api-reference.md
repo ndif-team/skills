@@ -34,7 +34,7 @@ assert len(nnterp.families.known()) == 99      # 98 families + kimi_k25, Kimi K2
 | name | what it is |
 |---|---|
 | `StandardizedTransformer` | the model class: a `TransformersModel` renamed to the standard vocabulary and wrapped in the family's envoys |
-| `StandardizedVLLM` | the same over nnsight's `VLLM` engine, families from `nnterp.families.vllm` ([SKILL.md](../SKILL.md#the-vllm-engine-and-several-gpus)) |
+| `StandardizedVLLM` | the same over nnsight's `VLLM` engine, families from `nnterp.families.vllm` ([generation-and-helpers.md](generation-and-helpers.md#the-vllm-engine-standardizedvllm)) |
 | `Standardized` | what the two share (sizes, `support()`, the methods); `isinstance(model, Standardized)` accepts either engine |
 | `Layer`, `Attention`, `Mlp`, `Moe` | the base envoys a family subclasses; the hosts of the standard values |
 | `RecurrentMixer`, `LinearAttention`, `SelectiveScan`, `StateSpace` | the recurrent-mixer base and its DeltaNet, Mamba-1 and Mamba-2 subclasses |
