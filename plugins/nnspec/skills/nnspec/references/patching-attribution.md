@@ -1,69 +1,41 @@
 # Attribution patching
 
-Attribution patching estimates what patching would measure, to first order: the metric's gradient at a site
-on the base run, times the counterfactual's value there less the base's, summed over the site's features. One
+Attribution patching estimates what patching would measure, to first order: the metric's gradient at a site on
+the base run, times the counterfactual's value there less the base's, summed over the site's features. One
 backward gives the gradient at every site of a forward, so a map over every head costs two forwards where
-patching costs one per head. In nnspec the gradient is a read: an entry whose first op is `grad`. Rank with
-attribution, then confirm what you report with real patching ([the top points](#confirm-the-top-points)).
+patching costs one per head. Rank with attribution, then confirm what you report with real patching
+([the top points](#confirm-the-top-points)).
+
+A gradient is a read: an entry whose first op is `grad`, naming bare in `of` a later entry of its own forward.
+[A gradient at a site](sites-and-interventions.md#a-gradient-at-a-site) has its rules and where it is refused
+(a `generate` step, a fit's body, `tp`, the vllm engine).
 
 ## What breaks
 
-- **The `mul 0` null proves the wiring, not the metric.** It is a second entry at the head with the metric's
-  ops and `{"op": "mul", "with": 0}` appended, and a `grad` of it. Its gradient is exactly 0 when the `grad` is
-  of the entry you zeroed and the wiring is exact: 0.0 on every value of the `[12, 8, 1, 12, 64]` gradient
-  below. It cannot tell you that entry is the metric you meant to report; the central difference at one point
-  does ([check the gradient](#check-the-gradient)), and real patching of the top points does for the ranking.
-- **`scale` 0 is not the null.** It is an edit, so after a metric it is refused:
-
-  ```text
-  nnspec: steps.base.interventions.zero.ops[1]: 'scale' is an edit, which writes back, and it follows 'logit_diff', which turned the value into ['rows', 'pos']: there is no live value to write; an edit comes before it, or put the transform in a later entry at this site
-  ```
-
-  `mul` writes nothing, so the null can stand anywhere in the forward.
-- **A central difference along every element at once checks nothing on a LayerNorm model.** Adding one number
-  to every element of GPT-2's residual stream leaves the logits unchanged, since each LayerNorm subtracts the
-  mean: the gradient summed over `hidden_size` is 7.15e-07 below. Check along the counterfactual's difference
-  instead, the direction attribution uses.
-- **The estimate is linear, and patching is not.** At the token the counterfactual changes, early layers,
-  patching moves the weekday logit difference by +3.386 at layer 0, and attribution estimates +2.070.
-- **`grad` differentiates the sum of `of` over every axis it has.** Read the metric at one position (`pos: -1`)
+- **The `mul 0` null proves the wiring, not the metric.** A second entry with the metric's ops and `{"op":
+  "mul", "with": 0}` appended, and a `grad` of it, must be exactly 0: the gradient is then of the entry you
+  zeroed and nothing else. A `grad` of another differentiable entry, or of the metric at a wrong selection,
+  passes it and gives a plausible map; the [central difference](#check-the-gradient) catches both.
+- **Write that null with `mul`, not `scale`.** `scale` is an edit, which writes back: after a metric it is
+  refused.
+- **`grad` differentiates the sum of `of` over every axis it has.** Read the metric at one position (`pos: -1`),
   so each row contributes one number.
-- **On the residual stream the last layers at the last token rank high**, and a patch there reproduces the
-  counterfactual, so their sign agrees by construction. Layers 11 and 10 at the last token top the map below
-  (3.368 and 3.273); test a ranking on points off the last token, or on heads.
-- **`of` names an entry of the same forward, bare, at a site the forward reaches later.** `grad` is refused in
-  a `generate`, in a fit's body and under `tp`.
-- **A bfloat16 model's gradient is bfloat16.** Recompute the components you report in float32 (the
-  [debugging guide](debugging.md) has the rule).
+- **The estimate is linear, and patching is not.** Where one patch restores the whole answer attribution falls
+  short: the ranking survives, the size does not ([the map](#every-layer-and-position-from-one-backward)).
+- **On the residual stream the last layers at the last token rank first**, and a patch there reproduces the
+  counterfactual by construction. Test a ranking on points off the last token, or on heads.
+- **A bfloat16 model's gradient is bfloat16.** Recompute the components you report in float32
+  ([the float32 rule](debugging.md#the-float32-rule)).
 
 ## Every head from one backward
 
 Read every head's result at `layers: ":"` on both prompts, take its gradient in the base forward, and combine
-them in op steps after it. This runs on the IOI rows of `documents/head_patching.json` (in
-[heads, neurons and paths](patching-heads-neurons-and-paths.md)), so its map can be checked against real head patching.
+them in op steps. `attribution_heads.json` has the `model` and `data` of `head_patching.json` in
+[heads, neurons and paths](patching-heads-neurons-and-paths.md#one-head-at-a-time), so its map checks against
+real head patching, and these keys:
 
 ```json
 {
-  "description": "Attribution patching of every head on the indirect-object task: each head's result at the last token, the gradient of the logit difference there on the base run, times the counterfactual's result less the base's, summed over head_dim. A counterfactual forward and a base forward with its backward give a [layers, num_heads] map. g0 is the gradient of the metric times 0 and must be exactly zero; self_gap is the base read again in a forward that takes no gradient, and must be exactly zero.",
-  "model": {"key": "openai-community/gpt2", "revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e", "dtype": "float32"},
-  "data": {"pairs": {"rows": [
-    {"example_id": "Mary-John", "input": "When Mary and John went to the store, John gave a drink to",
-     "counterfactual": "When Mary and John went to the store, Mary gave a drink to", "base_answer": " Mary", "cf_answer": " John"},
-    {"example_id": "John-Mary", "input": "When John and Mary went to the store, Mary gave a drink to",
-     "counterfactual": "When John and Mary went to the store, John gave a drink to", "base_answer": " John", "cf_answer": " Mary"},
-    {"example_id": "Alice-Bob", "input": "When Alice and Bob went to the store, Bob gave a drink to",
-     "counterfactual": "When Alice and Bob went to the store, Alice gave a drink to", "base_answer": " Alice", "cf_answer": " Bob"},
-    {"example_id": "Bob-Alice", "input": "When Bob and Alice went to the store, Alice gave a drink to",
-     "counterfactual": "When Bob and Alice went to the store, Bob gave a drink to", "base_answer": " Bob", "cf_answer": " Alice"},
-    {"example_id": "Sarah-David", "input": "When Sarah and David went to the store, David gave a drink to",
-     "counterfactual": "When Sarah and David went to the store, Sarah gave a drink to", "base_answer": " Sarah", "cf_answer": " David"},
-    {"example_id": "David-Sarah", "input": "When David and Sarah went to the store, Sarah gave a drink to",
-     "counterfactual": "When David and Sarah went to the store, David gave a drink to", "base_answer": " David", "cf_answer": " Sarah"},
-    {"example_id": "Anna-Mark", "input": "When Anna and Mark went to the store, Mark gave a drink to",
-     "counterfactual": "When Anna and Mark went to the store, Anna gave a drink to", "base_answer": " Anna", "cf_answer": " Mark"},
-    {"example_id": "Mark-Anna", "input": "When Mark and Anna went to the store, Anna gave a drink to",
-     "counterfactual": "When Mark and Anna went to the store, Mark gave a drink to", "base_answer": " Mark", "cf_answer": " Anna"}
-  ]}},
   "sites": {"heads": {"component": "attention_premix", "layers": ":"}, "head": {"component": "lm_head_output"}},
   "steps": {
     "counterfactual": {"kind": "forward", "input": "pairs.counterfactual", "interventions": {"z": {"site": "heads", "pos": -1}}},
@@ -89,19 +61,18 @@ them in op steps after it. This runs on the IOI rows of `documents/head_patching
 }
 ```
 
-- **`base` takes one backward per distinct `of`**, here two: one for `metric`, one for the null `zero`. Each
-  fills its `grad` reads at all 12 layers, `[layers, rows, pos, num_heads, head_dim]`.
+- **`base` takes one backward per distinct `of`**, here two, `metric` and the null `zero`. Each fills its
+  `grad` reads at all 12 layers, `[layers, rows, pos, num_heads, head_dim]`.
 - **`metric` writes nothing**, so `base` is the clean run and `base.z` the base's own results.
-- **`scale` in an op step multiplies two values elementwise**; `sum` over `pos` and `head_dim` leaves one
-  number per layer, row and head, and `mean` over `rows` leaves the `[layers, num_heads]` map.
-- **`own` is the self-counterfactual null**: the base read in a forward without gradients. Its difference from
-  `base.z` must be exactly zero, which checks that the two reads are one selection.
+- **`scale` in an op step multiplies two values elementwise**; `sum` over `pos` and `head_dim`, then `mean`
+  over `rows`, leaves the `[layers, num_heads]` map.
+- **`own` is a second null**: the base read again in a forward that takes no gradient. `self_max` must be
+  exactly 0, which checks that the two reads are one selection.
 
 ```text
 $ nnspec table out/attribution_heads g0_max self_max
 g0_max  self_max
 0.0     0.0
-
 $ nnspec table out/attribution_heads map
 layer  num_heads  value
 7      3          0.6353127360343933
@@ -114,8 +85,7 @@ layer  num_heads  value
 ...
 ```
 
-The run takes seconds on a CPU, against under a minute for the 144 patched forwards of head patching. Beside
-the patching effects of `documents/head_patching.json` (its `ld_mean` less `clean_mean` at each head):
+Beside the patching effects of `head_patching.json` (its `ld_mean` less `clean_mean` at each head):
 
 | head | patching | attribution |
 |---|---|---|
@@ -124,19 +94,17 @@ the patching effects of `documents/head_patching.json` (its `ld_mean` less `clea
 | 7.9 | +0.906 | +0.870 |
 | 8.6 | +0.817 | +0.738 |
 | 7.3 | +0.674 | +0.635 |
-| 11.10 | −1.195 | −1.211 |
-| 10.7 | −1.561 | −1.295 |
+| 11.10 | -1.195 | -1.211 |
+| 10.7 | -1.561 | -1.295 |
 
-The two rank the top eight heads in the same order, and their correlation over all 144 heads is 0.996. That
-agreement is this task's, at the last token: check it on yours before trusting a ranking.
+The two rank the eight largest heads in the same order, and their correlation over all 144 heads is 0.996.
+That agreement is this task's, at the last token: check it on yours before trusting a ranking.
 
 ## Check the gradient
 
-The null passes a `grad` of an entry other than the metric you report, and one of the metric at a wrong selection.
-A central difference catches both: compare it once per new document with two forwards that move the site by plus
-and minus a step along the counterfactual's difference. The step is swept under one label, so the nudges and the
-division zip. This fragment is the `sites`, `interventions` and `steps` of `documents/gradient_check.json`, whose
-`model` and `data` are those of the document above:
+Once per new document, compare the attribution at one site with a central difference: two forwards that move
+the site by plus and minus a step along the counterfactual's difference. The step is swept under one label, so
+the nudges and the division zip. `gradient_check.json` has the `model` and `data` above and these keys:
 
 ```json
 {
@@ -164,23 +132,18 @@ division zip. This fragment is the `sites`, `interventions` and `steps` of `docu
     "rise": {"kind": "op", "op": "sub", "of": "up.metric", "with": "down.metric"},
     "half": {"kind": "op", "op": "scale", "of": "rise", "factor": 0.5},
     "central": {"kind": "op", "op": "div", "of": "half", "with": {"sweep": [1.0, 0.3, 0.1, 0.03, 0.01], "label": "step"}},
-    "gap": {"kind": "op", "op": "sub", "of": "taken.h", "with": "central"},
-    "h_abs": {"kind": "op", "op": "abs", "of": "taken.h"},
-    "gap_abs": {"kind": "op", "op": "abs", "of": "gap"},
-    "ones_abs": {"kind": "op", "op": "abs", "of": "taken.ones"},
-    "h_max": {"kind": "op", "op": "max", "of": "h_abs"},
-    "gap_max": {"kind": "op", "op": "max", "of": "gap_abs"},
-    "ones_max": {"kind": "op", "op": "max", "of": "ones_abs"}
-  },
-  "saves": ["taken.h", "central", "h_max", "gap_max", "ones_max"]
+    "gap": {"kind": "op", "op": "sub", "of": "taken.h", "with": "central"}
+  }
 }
 ```
+
+An `abs` step and then a `max` step over each of `taken.h`, `gap` and `taken.ones` give the saved `h_max`,
+`gap_max` and `ones_max`.
 
 ```text
 $ nnspec table out/gradient_check h_max ones_max
 h_max                ones_max
 0.24178534746170044  7.152557373046875e-07
-
 $ nnspec table out/gradient_check gap_max
 at             value
 {"step":1.0}   0.004122670739889145
@@ -190,95 +153,59 @@ at             value
 {"step":0.01}  0.002079218626022339
 ```
 
-- **The gap falls as the step falls, then rises once float32 rounding takes over.** From step 1.0 to 0.3 it
-  falls 8 times, near the 11 the step squared predicts; below 0.1 the forwards' rounding, divided by the step,
-  grows.
+- **The gap falls as the step falls, then rises once float32 rounding takes over**: below 0.1 the forwards'
+  rounding, divided by the step, grows.
 - **Pass where the smallest gap is a small fraction of `h_max`**, the largest attribution at the point: 0.00024
   against 0.242 here, a thousandth. Set the tolerance before the run.
 - **A gap far above it that does not shrink with the step** is a `grad` of an entry other than the metric you
   report, or of it at the wrong selection.
-- **`ones_max`, the gradient summed over `hidden_size`, is 7.15e-07**: the all-ones direction is invisible to
-  GPT-2's LayerNorms, so a check along it passes whatever the gradient is.
+- **Check along the counterfactual's difference, never along every element at once.** `ones_max`, the gradient
+  summed over `hidden_size`, is 7.15e-07: adding one number to every element is invisible to GPT-2's
+  LayerNorms, so a check along it passes whatever the gradient is.
 
 ## Every layer and position from one backward
 
 A site at `layers: ":"` read at a window of static width gives a `[layers, rows, pos, hidden_size]` gradient
-from the same one backward. This fragment is the `sites` and `steps` of `documents/attribution_map.json`, whose
-`model` and `data` are those of `documents/interchange.json` in [SKILL.md](patching.md):
+from the same one backward. `attribution_map.json`, on the `model` and `data` of `interchange.json` in
+[patching](patching.md), is `attribution_heads.json` without its nulls: `z` and `dz` read at the site
+`{"component": "layer_output", "layers": ":"}` and `"pos": {"index": "0:7"}`, `metric` as there, then
+`difference`, `term`, a `sum` of `term` over `hidden_size` alone, and `map`, its `mean` over `rows`.
 
-```json
-{
-  "sites": {"resid": {"component": "layer_output", "layers": ":"}, "head": {"component": "lm_head_output"}},
-  "steps": {
-    "counterfactual": {"kind": "forward", "input": "pairs.counterfactual", "interventions": {
-      "z": {"site": "resid", "pos": {"index": "0:7"}}}},
-    "base": {"kind": "forward", "input": "pairs.input", "interventions": {
-      "z": {"site": "resid", "pos": {"index": "0:7"}},
-      "dz": {"site": "resid", "pos": {"index": "0:7"}, "ops": [{"op": "grad", "of": "metric"}]},
-      "metric": {"site": "head", "pos": -1, "ops": [{"op": "logit_diff", "a": "pairs.cf_answer", "b": "pairs.base_answer"}]}}},
-    "difference": {"kind": "op", "op": "sub", "of": "counterfactual.z", "with": "base.z"},
-    "term": {"kind": "op", "op": "scale", "of": "difference", "factor": "base.dz"},
-    "per_row": {"kind": "op", "op": "sum", "of": "term", "over": ["hidden_size"]},
-    "map": {"kind": "op", "op": "mean", "of": "per_row", "over": ["rows"]}
-  },
-  "saves": ["map"]
-}
-```
-
-`map` is `[layers, pos]`; `nnspec table out/attribution_map map` prints a row per layer and position. Its `pos`
-counts within the read's `0:7` window, here the position itself; in a `-3:` window, 0 is the third token from
-the end. Beside the patching map's effect (its `ld_mean` less `clean_mean`) at the day's token and the last token:
+`map` is `[layers, pos]`, and `nnspec table out/attribution_map map` prints a row per layer and position. Its
+`pos` counts within the read's window: in `0:7` the position itself, in a `-3:` window 0 is the third token
+from the end. Beside the effects of patching's [map](patching.md#a-layer-by-position-map) (its `ld_mean` less
+`clean_mean`) at the day's token and at the last token:
 
 | layer | day, patching | day, attribution | last token, patching | last token, attribution |
 |---|---|---|---|---|
-| 0 | +3.386 | +2.070 | −0.001 | −0.001 |
-| 4 | +3.417 | +2.722 | −0.023 | −0.025 |
+| 0 | +3.386 | +2.070 | -0.001 | -0.001 |
+| 4 | +3.417 | +2.722 | -0.023 | -0.025 |
 | 6 | +2.811 | +2.259 | +0.536 | +0.447 |
 | 8 | +1.646 | +1.409 | +1.680 | +1.492 |
 | 9 | +0.499 | +0.320 | +2.762 | +2.724 |
 | 11 | 0.000 | 0.000 | +3.385 | +3.368 |
 
-- **Attribution finds the same band**: the day's token through layer 6, the last token from layer 8.
-- **It falls short where one patch restores the whole answer**: at the day's token in layer 0 it gives 61% of
-  the patched effect. The ranking survives; the size does not.
-- **The positions the two prompts share give exactly 0.0** at every layer, since their difference is zero.
-  So does every position but the last at layer 11, whose gradient is zero.
+Attribution finds the same band: the day's token through layer 6, the last token from layer 8. It falls short
+where one patch restores the whole answer: at the day's token in layer 0 it gives 61% of the patched effect.
+The positions the two prompts share give exactly 0.0 at every layer, since their difference is zero, and so
+does every position but the last at layer 11, whose gradient is zero.
 
 ## Confirm the top points
 
 A list of scattered (layer, position) points cannot be one sweep axis: one label over different values is
 refused. Patch each point as one entry, at a one-layer site and a counted `pos`, in a step of its own for its
-own effect, or with the others in one forward for the set's. This fragment is the `sites`, `interventions` and
-`steps` of `documents/top_points.json`, whose `model` and `data` are those of `documents/interchange.json`. It
-patches two top points of the map above, the day at layer 2 and the last token at layer 10:
+own effect, or with the others in one forward for the set's. `top_points.json`, on `interchange.json`'s `model`
+and `data`, patches two top points of the map above, the day at layer 2 and the last token at layer 10. Both
+prompts read `layer_output` at `layers: ":"` at each position (`at3`, `at6`), every forward pulls in a `scored`
+bundle holding the `logit_diff` as `ld`, and each point is a step like this one:
 
 ```json
-{
-  "sites": {"every": {"component": "layer_output", "layers": ":"}, "head": {"component": "lm_head_output"}},
-  "interventions": {"scored": {"ld": {"site": "head", "pos": -1,
-                                      "ops": [{"op": "logit_diff", "a": "pairs.cf_answer", "b": "pairs.base_answer"}]}}},
-  "steps": {
-    "clean": {"kind": "forward", "input": "pairs.input", "interventions": ["scored", {
-      "at3": {"site": "every", "pos": 3}, "at6": {"site": "every", "pos": 6}}]},
-    "counterfactual": {"kind": "forward", "input": "pairs.counterfactual", "interventions": {
-      "at3": {"site": "every", "pos": 3}, "at6": {"site": "every", "pos": 6}}},
-    "null": {"kind": "forward", "input": "pairs.input", "interventions": [{
-      "p2_3": {"site": {"component": "layer_output", "layers": 2}, "pos": 3, "ops": [{"op": "swap", "with": "clean.at3"}]},
-      "p10_6": {"site": {"component": "layer_output", "layers": 10}, "pos": 6, "ops": [{"op": "swap", "with": "clean.at6"}]}},
-      "scored"]},
-    "l2_p3": {"kind": "forward", "input": "pairs.input", "interventions": [{
-      "patch": {"site": {"component": "layer_output", "layers": 2}, "pos": 3,
-                "ops": [{"op": "swap", "with": "counterfactual.at3"}]}}, "scored"]},
-    "l10_p6": {"kind": "forward", "input": "pairs.input", "interventions": [{
-      "patch": {"site": {"component": "layer_output", "layers": 10}, "pos": 6,
-                "ops": [{"op": "swap", "with": "counterfactual.at6"}]}}, "scored"]},
-    "clean_mean": {"kind": "op", "op": "mean", "of": "clean.ld"},
-    "null_mean": {"kind": "op", "op": "mean", "of": "null.ld"},
-    "l2_p3_mean": {"kind": "op", "op": "mean", "of": "l2_p3.ld"},
-    "l10_p6_mean": {"kind": "op", "op": "mean", "of": "l10_p6.ld"}
-  }
-}
+{"l2_p3": {"kind": "forward", "input": "pairs.input", "interventions": [{
+  "patch": {"site": {"component": "layer_output", "layers": 2}, "pos": 3,
+            "ops": [{"op": "swap", "with": "counterfactual.at3"}]}}, "scored"]}}
 ```
+
+`null` holds both points as two entries of one forward, swapping `clean.at3` and `clean.at6` back.
 
 ```text
 $ nnspec table out/top_points clean_mean null_mean l2_p3_mean l10_p6_mean
@@ -286,23 +213,21 @@ clean_mean           null_mean            l2_p3_mean          l10_p6_mean
 -1.6586096286773682  -1.6586096286773682  1.7238038778305054  1.6707872152328491
 ```
 
-- **Each step gives its cell of `documents/layer_pos_map.json` to the bit**: an effect of +3.382 at layer 2,
-  position 3, where attribution gave +2.783, and +3.329 at layer 10, position 6, against +3.273.
+- **Each step gives its cell of the patching map to the bit**: an effect of +3.382 at layer 2, position 3,
+  where attribution gave +2.783, and +3.329 at layer 10, position 6, against +3.273.
 - **A read at `layers: ":"` is an operand for a write at any one layer**, which takes the slice labelled with
   its layer: one counterfactual read per position serves every point at that position.
-- **The null writes both points in one forward**, the form that patches a set together, and equals the clean run.
+- **The null writes both points in one forward**, the form that patches a set together, and equals the clean
+  run.
 - **Chosen heads at several layers are one site per head**, each in a step of its own:
-  `{"component": "attention_premix", "layers": 9, "select": {"num_heads": [9]}}` for 9.9. Patched so, 10.7,
-  8.10 and 9.9 give their cells of `documents/head_patching.json` to the bit.
-- **A grid that covers the points also works**: sweep the layers and the positions they use, and read the
-  cells you want; the extra cells cost a forward each.
+  `{"component": "attention_premix", "layers": 9, "select": {"num_heads": [9]}}` for 9.9.
 
 ## One prompt, no counterfactual
 
-Zeroing a neuron moves its activation `a` by `−a`, so to first order the metric changes by `−a·g`, with `g` its
+Zeroing a neuron moves its activation `a` by `-a`, so to first order the metric changes by `-a·g`, with `g` its
 gradient there. Rank `a·g`, the predicted drop: the largest are the neurons whose removal lowers the metric
-most. It is attribution with zero as the counterfactual, from one prompt and one backward; `top_k` over
-`["layers", "intermediate_size"]` ranks every neuron of every layer together.
+most. It is attribution with zero as the counterfactual, from one prompt and one backward. Saved as
+`documents/rank_neurons.json`:
 
 ```json
 {
@@ -329,54 +254,49 @@ most. It is attribution with zero as the counterfactual, from one prompt and one
 ```
 
 ```text
-$ nnspec run documents/rank_neurons.json
 $ nnspec table --csv out/rank_neurons top.ids top.values
 example_id,row,pos,pos_token,input,top.ids,top.values
-eiffel,0,9,Ġof,The Eiffel Tower is in the city of,"{""intermediate_size"":[483,1931,1434,1437,1793],""layers"":[6,7,8,5,10]}","[0.01716592349112034,0.016079207882285118,0.010278166271746159,0.00914700049906969,0.008967471309006214]"
+eiffel,0,9,Ġof,The Eiffel Tower is in the city of,"{""intermediate_size"":[483,1931,1434,1437,1793],""layers"":[6,7,8,5,10]}","[0.017161864787340164,0.0160771906375885,0.010276637971401215,0.009146235883235931,0.008964639157056808]"
 ```
 
-- **`g0_max` is 0.0**, and `base.p`, the probability of ` Paris`, is 0.06997019797563553.
-- **`top.ids` holds one list per axis**, in rank order: neuron 483 of layer 6 first. `--csv` prints the cell whole.
-- **Rank `a·g`, never its negation**: `−a·g` ranks the neurons whose zeroing raises the metric. For the bottom
+- **`top_k` over a list of axes ranks their entries together**, and `top.ids` holds one list per axis, in rank
+  order: neuron 483 of layer 6 first. `--csv` prints the cell whole.
+- **`g0_max` is 0.0**, and `base.p`, the probability of ` Paris`, is 0.06996913999319077.
+- **Rank `a·g`, never its negation**: `-a·g` ranks the neurons whose zeroing raises the metric. For the bottom
   k, `neg` then `top_k`.
 
 Confirm by zeroing the top five together. A `select` applies at every layer its site picks, so neurons in
-several layers are one site per layer. Group the (layer, neuron) pairs of `top.ids` by layer, read from the
-`--csv` cell or from `Plan.load(out).results["top.ids"]` (one tensor per axis), and give each layer's neurons
-as its site's `select` list. This fragment is the `sites` and `steps` of `documents/zero_top.json`, whose
-`model` and `data` are those above; `scale` by 0 zeroes, and `keep` 1.0 writes each neuron back as it was:
+several layers are one site per layer: group the (layer, neuron) pairs of `top.ids` by layer and give each
+layer's neurons as its site's `select` list. In `zero_top.json`, on the `model` and `data` above, one forward
+holds an entry per layer and the read of `p`:
 
 ```json
 {
   "sites": {
     "l5": {"component": "mlp_activation", "layers": 5, "select": {"intermediate_size": [1437]}},
-    "l6": {"component": "mlp_activation", "layers": 6, "select": {"intermediate_size": [483]}},
-    "l7": {"component": "mlp_activation", "layers": 7, "select": {"intermediate_size": [1931]}},
-    "l8": {"component": "mlp_activation", "layers": 8, "select": {"intermediate_size": [1434]}},
-    "l10": {"component": "mlp_activation", "layers": 10, "select": {"intermediate_size": [1793]}},
     "head": {"component": "lm_head_output"}
   },
   "steps": {
     "zeroed": {"kind": "forward", "input": "prompts.input", "interventions": {
       "z5": {"site": "l5", "pos": -1, "ops": [{"op": "scale", "factor": {"sweep": [0.0, 1.0], "label": "keep"}}]},
-      "z6": {"site": "l6", "pos": -1, "ops": [{"op": "scale", "factor": {"sweep": [0.0, 1.0], "label": "keep"}}]},
-      "z7": {"site": "l7", "pos": -1, "ops": [{"op": "scale", "factor": {"sweep": [0.0, 1.0], "label": "keep"}}]},
-      "z8": {"site": "l8", "pos": -1, "ops": [{"op": "scale", "factor": {"sweep": [0.0, 1.0], "label": "keep"}}]},
-      "z10": {"site": "l10", "pos": -1, "ops": [{"op": "scale", "factor": {"sweep": [0.0, 1.0], "label": "keep"}}]},
       "p": {"site": "head", "pos": -1, "ops": [{"op": "token_prob", "token": "prompts.answer"}]}}}
-  }
+  },
+  "saves": ["zeroed.p"]
 }
 ```
+
+with `l6`, `l7`, `l8`, `l10` and `z6`, `z7`, `z8`, `z10` written the same way for neurons 483, 1931, 1434 and
+1793, before `p`. `scale` by 0 zeroes, and `keep` 1.0 writes each neuron back as it was, the null.
 
 ```text
 $ nnspec table out/zero_top zeroed.p
 at            ...  value
-{"keep":0.0}  ...  0.027501443400979042
-{"keep":1.0}  ...  0.06997019797563553
+{"keep":0.0}  ...  0.0275014229118824
+{"keep":1.0}  ...  0.06996913999319077
 ```
 
-- **The null equals the clean probability to the bit**, and zeroing the five takes it from 0.0700 to 0.0275.
-- **The first-order drops sum to 0.0617 against a real drop of 0.0425**: the estimate ranks, and overshoots.
-- **Neurons drawn at random, the same count per layer, are the control** that says the top set is special; it
-  is the [ablation guide](ablation.md)'s. When the sets span several layers, write one document per random draw: a
-  shared sweep label needs identical values, so per-layer sites of different sets cannot be one sweep.
+The null equals the clean probability to the bit, and zeroing the five takes it from 0.0700 to 0.0275. Their
+first-order drops sum to 0.0616 against a real drop of 0.0425: the estimate ranks, and overshoots. Neurons
+drawn at random, the same count per layer, are the control that says the top set is special
+([ablation](ablation.md)); one sweep label needs the same values wherever it is used, so random sets that span
+several layers are one document per draw.
