@@ -21,7 +21,6 @@ family's own operations where it does its own arithmetic (GPT-J, GPT-Neo,
 CodeGen, GPT-NeoX-Japanese, XGLM, BLOOM, MPT, Falcon), and presents one layout on
 every family.
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -149,7 +148,7 @@ the rotary, it is rotated for the position it lands at, so the move is one assig
 an edit that must happen before the rotation (a direction found on the unrotated queries or
 keys), and to recompute attention with keys from elsewhere (`rotate` the source keys at the
 destination positions, outside the trace, and run the block's attention on them with
-[`interface`](#calling-the-attention-function-again-interface)). The `nnterp` skill's "Before the rotary
+[`interface`](#calling-the-attention-function-again-interface)). [SKILL.md](../SKILL.md)'s "Before the rotary
 embedding" runs the transplant. Use them instead of `self_attn.q_proj.output` too: nnterp
 promises nothing about a projection's layout (Phi-3 and GPT-NeoX fuse the queries, keys and
 values into one projection, Phi-3 has no `q_proj`), and on Qwen3, OLMo-2/3 and Gemma a norm
@@ -260,7 +259,6 @@ On those families read the values, and rotate, on a `StandardizedTransformer`. T
 without a rotary embedding are the ones above, with the same reasons. The transplant on the
 engine (needs vLLM and a GPU):
 
-<!-- test: skip -->
 ```python
 from nnterp import StandardizedVLLM
 
@@ -476,7 +474,7 @@ assert OWN_ARITHMETIC.startswith("the queries, keys and values are not the argum
 ```
 
 The head-selective recipe (chosen heads reading another run's keys and values over a span,
-on the prompt and on every `generate` step) is the `patterns` skill's
+on the prompt and on every `generate` step) is the [patterns guide](patterns.md)'s
 `references/patching-and-attention.md`, "Head-selective K/V patching".
 
 ## The weights per head
@@ -554,7 +552,6 @@ projection per expert), the default family, a vision tower, a model split tensor
 GPT-2's `c_attn` produces one tensor that `split` divides into q, k, v; MPT's
 `Wqkv` one that `chunk` divides. torch refuses to edit such a view in place:
 
-<!-- test: expect-error RuntimeError -->
 ```python
 with model.trace(prompt):
     attn.attention_queries[:, 0] = 0
@@ -605,7 +602,6 @@ alibi the queries and keys are the two returns of the rotary embedding, and the
 values are bound *before* it, so in one trace the values must be read before
 the queries or keys:
 
-<!-- test: skip -->
 ```python
 falcon = StandardizedTransformer("tiiuae/falcon-7b", device="cpu", dispatch=True, attn_implementation="eager")
 fattn = falcon.layers[0].self_attn
@@ -700,7 +696,6 @@ read at the masked scores just before the sink column joins them, the same
 shape as the pattern. A plain `softmax(scores)` does not reproduce the pattern;
 appending the sink does:
 
-<!-- test: skip -->
 ```python
 oss = StandardizedTransformer("openai/gpt-oss-20b", device="cuda", dispatch=True, attn_implementation="eager")
 oattn = oss.layers[0].self_attn
@@ -730,7 +725,6 @@ projection produces keys and values for every head, so `attention_keys.shape[1]
 `SharedRopeKeys`, `qk_rope_head_dim` wide
 ([above](#where-a-familys-values-before-the-rotary-differ)).
 
-<!-- test: skip -->
 ```python
 deepseek = StandardizedTransformer("deepseek-ai/DeepSeek-V3", attn_implementation="eager")
 assert (deepseek.head_dim, deepseek.qk_head_dim) == (128, 192)
@@ -817,6 +811,6 @@ See [generation-and-helpers.md](generation-and-helpers.md).
 Under eager attention the raw `self_attn.output[1]` is the same pattern, a
 label-free second reading to sanity-check against; it is read-only (the weights
 are returned, not consumed). Edit through `attention_probabilities`. The
-`attention-analysis` skill has the per-head metrics.
+`nnsight` skill's attention-analysis guide has the per-head metrics.
 
 The nnterp repo page behind this file: `docs/usage/attention-interior.md`.

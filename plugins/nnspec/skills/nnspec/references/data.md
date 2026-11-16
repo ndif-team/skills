@@ -184,4 +184,4 @@ no chat template; the fragment below is a `data` block for a checkpoint that has
 - **Nothing in a document turns a text column into a chat.** Write the messages inline from a script, and record the source in `description`.
 
 Positions inside a turn are [positions](positions.md#chat-turns); generating from chats is the
-`nnspec-steering-and-generation` skill's.
+[steering-and-generation guide](steering-and-generation.md)'s.

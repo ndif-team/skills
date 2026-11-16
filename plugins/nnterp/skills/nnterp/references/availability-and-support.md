@@ -14,7 +14,6 @@ A script that reads or edits several values has a second question: which order t
 them in. `model.order()` and `model.rank()` answer it for the values `support()` lists as
 available ([below](#forward-order-order-and-rank)).
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -71,7 +70,6 @@ A hybrid (`Qwen/Qwen3.5-9B` with `attn_implementation="eager"`) reads as a dict
 per value, because each block has `self_attn` or `linear_attn` and the per-token
 state needs routing (verified on the tiny Qwen3.5 checkpoint):
 
-<!-- test: skip -->
 ```python
 hybrid = StandardizedTransformer("Qwen/Qwen3.5-9B", attn_implementation="eager")
 support = hybrid.support()
@@ -89,7 +87,6 @@ lines; read `support(layer=i)` there.
 Reading or writing one raises `nnterp.Unavailable` (a `RuntimeError`) with the
 same reason, at that line, before the forward runs:
 
-<!-- test: expect-error Unavailable -->
 ```python
 with plain.trace(prompt):
     pattern = plain.layers[0].self_attn.attention_probabilities.save()
@@ -127,7 +124,6 @@ the attention call's own source (`attention_probabilities`, `attention_scores`),
 `SourceNotAvailable` (`recursive .source is only available inside a trace`).
 Never `False`:
 
-<!-- test: expect-error Unavailable -->
 ```python
 hasattr(plain.layers[0].self_attn, "attention_probabilities")
 ```
@@ -255,7 +251,7 @@ path this family's toolkit does not expect.
 `SourceNotAvailable` means a forward the family has not been checked against
 (another transformers release renaming an operation, a branch the config does
 not announce, a remote server on another transformers). `print(envoy.source)`
-lists the real operation names; the `extending` skill covers relocating a
+lists the real operation names; the [extending guide](extending.md) covers relocating a
 value.
 
 ## Guarding a script
@@ -324,7 +320,6 @@ ranked. On `StandardizedVLLM` the ranks are measured on a weightless transformer
 of the checkpoint, for the values the engine serves; a value the engine lacks raises
 `Unavailable` with the engine's reason.
 
-<!-- test: expect-error Unavailable -->
 ```python
 plain.rank("self_attn.attention_probabilities", 0)      # sdpa: the reason is support()'s
 ```

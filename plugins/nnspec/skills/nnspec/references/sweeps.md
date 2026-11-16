@@ -6,7 +6,7 @@ labels make a grid.
 
 ## Sweep one value
 
-The nnspec skill's worked document, `ioi_patch.json`, swept over every layer is one changed site:
+[SKILL.md](../SKILL.md)'s worked document, `ioi_patch.json`, swept over every layer is one changed site:
 
 ```json
 {"resid": {"component": "layer_output", "layers": {"sweep": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]}}}
@@ -14,13 +14,13 @@ The nnspec skill's worked document, `ioi_patch.json`, swept over every layer is 
 
 with `{"kind": "op", "op": "mean", "of": "null_ld"}` and the same over `patched_ld` as `mean_null` and
 `mean_patched`. The run prints `12 points, each []` for each mean, and `nnspec table out/ioi_layer_sweep mean_null
-mean_patched` one row per point, keyed in `at` (the full table is in the nnspec skill).
+mean_patched` one row per point, keyed in `at` (the full table is in [SKILL.md](../SKILL.md)).
 
 - **A step that references a swept value inherits its points.** The read `counterfactual.v_cf`, the writes and both metrics all have twelve points.
 - **One swept site used by several entries is one axis**, so the read at layer L pairs with the write at layer L.
 - **A step that uses nothing swept runs once and serves every point.**
 - **A swept write against an unswept read writes the read's one value at every point.** A write `pos` swept alone moves where the counterfactual's value lands, not where it was read.
-- **To patch each position from the same position, sweep the read's `pos` with the write's.** Both default to the label `pos`, so they pair; a layer-by-position map is the `nnspec-patching` skill's.
+- **To patch each position from the same position, sweep the read's `pos` with the write's.** Both default to the label `pos`, so they pair; a layer-by-position map is the [patching guide](patching.md)'s.
 
 ## What may sweep
 
@@ -154,7 +154,6 @@ A swept save holds one value per point, keyed by its coordinate, its value on ea
 | `plan.results[name]` | a plain dict: the value for one axis, a tuple in axis order for several | `8`, `(6, 8)` |
 | output files, `nnspec show`, `plan.run.costs`, `plan.run.tokens` | `label=value` joined by commas | `src=6,dst=8` |
 
-<!-- test: skip -->
 ```python
 from nnspec import Plan
 

@@ -189,7 +189,6 @@ Every read and write records its positions on every row, saved or not. Look befo
 - **`nnspec table OUT NAME`** prints the `pos` and `pos_token` columns for a saved value with rows, and `call` in a generation.
 - **In Python**, the positions and the tokens they index:
 
-<!-- test: skip -->
 ```python
 from nnspec import Plan
 
@@ -247,4 +246,4 @@ kremlin     2                          The Kremlin is in the city of            
 - **Or check the record after the run**: a row the entry never reached holds `"alignment_missing"` in place of its list in `plan.steps[<step>].interventions[<entry>].positions`.
 - **Teacher forcing moves the question into the prefill**, where every miss is a refusal ([data](data.md#inputs)).
 
-What to do when a row is missing, and why, is the `nnspec-debugging` skill's.
+What to do when a row is missing, and why, is the [debugging guide](debugging.md)'s.

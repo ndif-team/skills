@@ -1,6 +1,6 @@
 ---
 name: nnterp
-description: Write interpretability code once on nnterp's StandardizedTransformer and run it on its 98 transformer families (GPT-2, Llama, Qwen, Gemma, OLMo, Granite, DeepSeek, DeltaNet and Mamba hybrids, 39 MoE families) and on vision-language models loaded with task="image-text-to-text" (model.vision, the tower blocks vision.layers[i], model.projector, vision.image_token_mask, vision.image_features): one vocabulary (model.layers[i].self_attn / .linear_attn / .mlp, model.norm, model.lm_head) and standard values (layer_output, attention_output, mlp_output, layer_mid, mlp_neurons, attention_probabilities, logits), plus support(), skip_layers, steer, project_on_vocab. Load it for code that reads or edits the residual stream, a sublayer's contribution, attention, expert routing, recurrent state or an image's path into the text model on more than one architecture, or that would branch on per-family module paths; and when a result on Gemma-4, Granite, Doge, ZAYA or DeepSeek-V4 looks wrong (their blocks are not a plain sum).
+description: "Write interpretability code once against nnterp's StandardizedTransformer and run it on 98 transformer families and on vision-language models: one module vocabulary (model.layers[i].self_attn, .mlp, model.norm, model.lm_head) and standard values (layer_output, attention_output, mlp_output, attention_probabilities, mlp_neurons, logits), plus support(), steer and project_on_vocab. Use when an experiment needs custom Python that an nnspec document cannot express, must run on more than one architecture, or reads the residual stream, a sublayer's contribution, attention, expert routing, recurrent state or an image's path without per-family module paths. Bundles the recipes (logit lens, direct logit attribution, ablation, patching, steering, probing, cross-family sweeps) and a guide to adding or overriding a family. Prefer the nnspec skill when the experiment fits a JSON document; use the nnsight skill when nnterp does not support the family or the work needs access below the standard values."
 ---
 
 # nnterp
@@ -14,9 +14,27 @@ mean the same thing everywhere. Everything nnsight does (`trace`, `generate`,
 unchanged; this skill covers only what nnterp adds. Load the `nnsight` skill for
 the underlying API.
 
+## Which library
+
+nnterp sits between nnspec and nnsight. When the user names a library, use it. Otherwise take the highest row that fits,
+and take a row only when its skill is available in this session:
+
+| Use | When |
+|---|---|
+| `nnspec` skill | A standard experiment on a transformer language model (lens, patching, ablation, attention, steering, probes, SAEs, DAS) that fits a JSON document. No intervention code to write. |
+| nnterp (this skill) | The experiment needs Python that a document cannot express, on a family nnterp knows. One module vocabulary on every family. |
+| `nnsight` skill | nnterp does not know the family, or the work needs access below nnterp's standard values: arbitrary modules, `.source`, your own or non-transformer models, diffusion, vLLM, tensor parallelism. Also existing nnsight code, and any error an nnsight trace raises. |
+
+Two guides go with this file. Read the one that matches before writing code:
+
+- [patterns](references/patterns.md): the techniques (logit lens, direct logit
+  attribution, ablation, patching, steering, probing, cross-family sweeps) written
+  once against the standard values.
+- [extending](references/extending.md): adding a family nnterp does not know,
+  overriding a value, or defining a value of your own.
+
 ## Orientation
 
-<!-- test: setup -->
 ```python
 import warnings
 import torch
@@ -80,7 +98,6 @@ raises `nnterp.Unavailable` for an unavailable value, and outside a trace an
 available one raises `ValueError` (or `SourceNotAvailable` for one inside the
 attention call). Ask `model.support()` outside the trace.
 
-<!-- test: expect-error Unavailable -->
 ```python
 hasattr(plain.layers[0].self_attn, "attention_probabilities")     # Unavailable, not False
 ```
@@ -127,7 +144,6 @@ values in forward order); block 3 before block 5; `final_norm_output`,
 `OutOfOrderError`, which names an internal location (`...attention_interface_1.fn.i0`),
 not the value:
 
-<!-- test: expect-error OutOfOrderError -->
 ```python
 with model.trace(prompt):
     late_attn = model.layers[3].self_attn.attention_output.save()
@@ -205,7 +221,6 @@ views torch will not edit in place**; so are Mamba-1's, and before the rotary DB
 GPT-NeoX's queries and keys, JetMoE's keys and latent attention's shared rope key. torch
 refuses an in-place edit with grad on; assign instead (or edit under `torch.no_grad()`):
 
-<!-- test: expect-error RuntimeError -->
 ```python
 with model.trace(prompt):
     model.layers[0].self_attn.attention_queries[:, 0] = 0      # RuntimeError: ... is a view ...
@@ -428,7 +443,6 @@ and `layers[i].mlp.intermediate_size` (one expert's on a mixture).
 
 ## The same script on another family
 
-<!-- test: setup -->
 ```python
 llama = StandardizedTransformer("HuggingFaceTB/SmolLM2-135M-Instruct", device="cpu", dispatch=True, attn_implementation="eager")
 lparis = llama.tokenizer(" Paris", add_special_tokens=False).input_ids[0]
@@ -458,7 +472,6 @@ compare with `atol`, and take `logits[:, -1].float().softmax(-1)` for metrics.
 
 ## Vision-language models
 
-<!-- test: setup -->
 ```python
 from PIL import Image
 
@@ -680,7 +693,7 @@ that step's call: on a decode step the queries have one row, the keys and values
 whole cache, and the mask is the step's. On a model split tensor-parallel it takes the
 gathered queries, keys and values and runs every head on every rank. In training mode with
 a dropout the call draws its own mask. Chosen heads reading another run's keys and values
-over a span, on the prompt and on every `generate` step, is the `patterns` skill's
+over a span, on the prompt and on every `generate` step, is the [patterns guide](references/patterns.md)'s
 head-selective K/V patching.
 
 `support()` reports `self_attn.interface` unavailable where the values it works with are
@@ -817,7 +830,7 @@ What a recipe must survive is grouped by quirk in
 [references/api-reference.md](references/api-reference.md); the full per-family table is
 nnterp's `docs/reference/families.md`, and the encyclopedia
 (https://ndif-team.github.io/nnterp/encyclopedia/) has a page per family with its block
-drawn. The `docs/...` paths these skills cite are in https://github.com/ndif-team/nnterp;
+drawn. The `docs/...` paths this skill cites are in https://github.com/ndif-team/nnterp;
 the documentation site serves every page as Markdown, listed at
 https://ndif-team.github.io/nnterp/llms.txt.
 
@@ -831,7 +844,7 @@ knows, or a stream of the wrong shape). Before a load, `nnterp.families.resolve(
 (the checkpoint's `AutoConfig`) is the family the load would use, `nnterp.families.default`
 where none covers it; `nnterp.families.covers(model_type)` answers for one type only, so it
 is `False` on a vision-language wrapper's config (Qwen3.5's `qwen3_5`) whose text model
-has a family. The `extending` skill adds a family, registers one, or passes one to a single load with
+has a family. The [extending guide](references/extending.md) adds a family, registers one, or passes one to a single load with
 `family=`.
 
 ## The vLLM engine and several GPUs
@@ -850,7 +863,6 @@ the values the engine serves; `model.generation_config` is the checkpoint's. Bot
 `nnterp.Standardized`, so a helper written against the standard names takes either.
 What differs, from the repo's `docs/usage/vllm.md`:
 
-<!-- test: skip -->
 ```python
 from nnterp import StandardizedVLLM
 
@@ -871,14 +883,14 @@ inside a trace included (`RuntimeError: Unavailable: ...`, not `nnterp.Unavailab
 with `support()` before the trace. Collect into a container saved inside the trace
 (`lens = nnsight.save({})`, then `lens[i] = ...`), which works on both engines; on the engine
 a container made outside the trace and filled with `.save()`d entries comes back empty,
-without an error. vLLM itself is the `nnsight` plugin's `vllm` skill.
+without an error. vLLM itself is the `nnsight` skill's vllm guide.
 
 A model too big for one GPU loads sharded with
 `distributed_config=DistributedConfig(tp_size=N)` under `torchrun`: every value reads whole
 on every rank (the attention interior and `mlp_activation` gathered where a rank holds a
 piece, edits split back), except a split mixture's `expert_outputs`, a per-rank partial sum
 (read `routed_output`). Read values unconditionally, never under a branch on the rank
-(`docs/usage/loading.md`; the `nnsight` plugin's `tensor-parallel` skill).
+(`docs/usage/loading.md`; the `nnsight` skill's tensor-parallel guide).
 
 ## References
 
@@ -896,10 +908,10 @@ piece, edits split back), except a split mixture's `expert_outputs`, a per-rank 
 The nnterp repo's pages go deeper: `docs/usage/*.md` (one page per feature),
 `docs/reference/families.md`, `docs/patterns/*.md`.
 
-## Related skills
+## Guides
 
 - `nnsight`: the underlying API (`.save()`, invokes, `tracer.iter`, `.source`, `rename`)
-- `patterns`: logit lens, attribution, ablation, patching, steering, probing, sweeps written once against these values
-- `extending`: a checkpoint nnterp does not know, overriding a value, a value of your own
+- [patterns](references/patterns.md): logit lens, attribution, ablation, patching, steering, probing, sweeps written once against these values
+- [extending](references/extending.md): a checkpoint nnterp does not know, overriding a value, a value of your own
 - `debugging`: an error, a hang, an empty result
 - `remote`: running on NDIF; nnterp must be installed server-side

@@ -1,5 +1,2 @@
 .claude
-tests/.report.json
 __pycache__/
-.pytest_cache/
-evals/results/*.jsonl

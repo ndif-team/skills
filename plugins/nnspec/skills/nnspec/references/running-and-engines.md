@@ -55,11 +55,10 @@ nnspec: steps.patched_ld.of: 'patched.logit' names no value produced before this
 - **It takes the document alone**: `nnspec run`'s flags and `-o` options are checked by `nnspec run`.
 - **From Python** it is `Plan(path).compile()`, which raises `nnspec.plan.PlanError` with the same message.
 
-Reading a refusal and fixing it is the `nnspec-debugging` skill's.
+Reading a refusal and fixing it is the [debugging guide](debugging.md)'s.
 
 ## From Python
 
-<!-- test: skip -->
 ```python
 import nnspec
 from nnspec import Plan
@@ -99,7 +98,7 @@ change one and a row's last bits can move. The run records each setting (`run.ba
 `run.readout`, `run.devices`, `run.threads`), and `nnspec show` prints all but the threads. `ioi_patch.json` writes
 the same value files, `cmp` byte for byte, on nnterp, on hooks, on ndif under `-o remote=local` and under
 `--readout at-reads`; the manifest always differs, since it records the engine and the time. What moves bits, how
-far, and how to compare two runs are the `nnspec-debugging` skill's ([reproducing a number](../../nnspec-debugging/SKILL.md#reproducing-a-number)).
+far, and how to compare two runs are the [debugging guide](debugging.md)'s ([reproducing a number](debugging.md#reproducing-a-number)).
 
 ## Where the model runs
 
@@ -162,7 +161,7 @@ the model runs is `device`, given as --device)`.
 
 ### vllm: vLLM's kernels
 
-vLLM is not run in this skill; these lines are the docs' and `nnspec describe engines`'s.
+vLLM is not run in this guide; these lines are the docs' and `nnspec describe engines`'s.
 
 - **It needs a GPU and vLLM installed** at the version nnsight instruments; `--device` is `cuda:0` and nothing else.
 - **`max_new_tokens` is required on a generate step**, and other options map onto vLLM's sampling; one with no vLLM name fails before any step runs.

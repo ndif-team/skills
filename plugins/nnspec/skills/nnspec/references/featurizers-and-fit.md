@@ -3,8 +3,8 @@
 A featurizer is a space or a map declared once under the root key `featurizers`, by name, and reached from an
 entry's ops with `encode`, `decode` and `apply`. It is drawn, trained by a `fit` step inside the run, or loaded
 from a bundle file. The recipes (DAS, DBM, head masks, SAEs, probes, LoRA, cached harvests) are the
-`nnspec-trained-featurizers` skill's, the tuned lens the `nnspec-lenses-and-attention` skill's, and the optimal
-constant the `nnspec-ablation` skill's. This page is the fields and the mechanics.
+[trained-featurizers guide](trained-featurizers.md)'s, the tuned lens the [lenses-and-attention guide](lenses-and-attention.md)'s, and the optimal
+constant the [ablation guide](ablation.md)'s. This page is the fields and the mechanics.
 
 ## Kinds
 
@@ -41,7 +41,7 @@ prints each kind's fields and the math of its ops.
 
 An `encode`'s, `decode`'s or `apply`'s `featurizer` may be a sweep over featurizer names, declared or a fit's
 trained ones: `{"op": "encode", "featurizer": {"sweep": ["sae_a", "sae_b"], "label": "sae"}}`. Each point is
-that featurizer's use, as if the document named it alone. The `nnspec-trained-featurizers` skill compares a
+that featurizer's use, as if the document named it alone. The [trained-featurizers guide](trained-featurizers.md) compares a
 trained rotation with a PCA and a draw this way, and two dictionaries.
 
 - **A `decode` carries its `encode`'s sweep**, the same label and names. A `decode` of one name is refused at the point: `… at space="pc": decode of 'rot', and the open encode is of 'pc' (ops[0])`.
@@ -63,7 +63,7 @@ fields the file cannot carry, `activation`, `centered` and the `site` it was tra
 ```
 
 A wrong `centered`, `activation` or layer runs unrefused; what each field means, what is refused and the mean-L0
-check are the `nnspec-trained-featurizers` skill's ([published dictionaries](../../nnspec-trained-featurizers/references/sae.md#splice-in-a-published-dictionary)).
+check are the [trained-featurizers guide](trained-featurizers.md)'s ([published dictionaries](trained-featurizers-sae.md#splice-in-a-published-dictionary)).
 
 ## The fit step
 
@@ -193,7 +193,7 @@ What the run does:
 
 A featurizer's tensors are its bundle's, by name, each a value laid out on axis names: a probe's `W`
 `[hidden_size, classes]` and `b` `[classes]`, an sae's `W_dec` `[features, hidden_size]`, a subspace's `basis`
-`[hidden_size, features]`. The `nnspec-trained-featurizers` skill's [bundle table](../../nnspec-trained-featurizers/references/harvest-and-bundles.md#what-a-run-writes)
+`[hidden_size, features]`. The [trained-featurizers guide](trained-featurizers.md)'s [bundle table](trained-featurizers-harvest-and-bundles.md#what-a-run-writes)
 lists every kind's.
 
 - **`hidden_size` is the last axis of the first site a step before the name uses the featurizer at.** A name before any such step is refused: `'probe.W' is a tensor of 'probe', laid out on the last axis of the site it is used at, and no step before this one encodes or applies 'probe' at a site; …`.
@@ -238,7 +238,6 @@ probe_train on nnterp (batch size 8, device cpu, tp 1) -> artifacts/probe
 The loading document declares the featurizer with `file_path` and uses it by its declared name. It needs
 `artifacts/probe/fit.probe.safetensors` beside `documents/`:
 
-<!-- test: skip -->
 ```json
 {
   "description": "Load the probe probe_train.json trained and saved under artifacts/probe, and score the held-out rows through it; the classes column, the model and the site are checked against the bundle's header before anything runs.",
@@ -284,4 +283,4 @@ Its `held_acc` is 1.0, the trained run's. The header, read with `safetensors.saf
 - **Give each training run its own `--out`**: a second run into one directory replaces its manifest and leaves the first run unreadable.
 - **`nnspec show` and `nnspec table` read a loaded bundle again** from its `file_path`, so run them from the corpus root with the bundle in place.
 - **A `pca` op step's value is a bundle**, `basis` `[width, k]` and `mean`, which a `{"kind": "pca", "k": 4, "file_path": ...}` featurizer loads; a `pca` needs more vectors than its `k`.
-- **A value that is not a bundle loads with a `load` step** (`{"kind": "load", "from": "out/x", "value": "harvest.h"}`), which the `nnspec-trained-featurizers` skill uses for cached harvests.
+- **A value that is not a bundle loads with a `load` step** (`{"kind": "load", "from": "out/x", "value": "harvest.h"}`), which the [trained-featurizers guide](trained-featurizers.md) uses for cached harvests.

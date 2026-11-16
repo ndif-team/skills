@@ -9,7 +9,6 @@ module (`Envoy`), read or written **inside a trace body**.
 | `module.input` | its first positional arg (or first kwarg if none) | yes |
 | `module.inputs` | `(args, kwargs)` — everything it was called with | yes |
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -196,7 +195,6 @@ attached SAE or adapter) — see
 `.output` raises outside interleaving — open a trace for values, or `model.scan(...)`
 for shapes:
 
-<!-- test: expect-error ValueError -->
 ```python
 hidden = model.transformer.h[0].output     # no trace running
 ```

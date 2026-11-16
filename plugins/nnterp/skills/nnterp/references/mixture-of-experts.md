@@ -45,7 +45,6 @@ Dense blocks sit beside mixture blocks on DeepSeek-V3, GLM-4-MoE, Llama 4, Jamba
 Gemma-4 and others; there `support()` reports `"no <value> value on this block's
 mlp"`, and reading `num_experts` on a dense block raises a bare `AttributeError`.
 
-<!-- test: skip -->
 ```python
 import torch
 from nnterp import StandardizedTransformer
@@ -66,7 +65,6 @@ print(moe.num_experts, moe.top_k, moe.SCORING)
 A batch of prompts is left-padded, and pad tokens are routed like any other
 (25-31% of the slots in a typical batch): count only real tokens.
 
-<!-- test: skip -->
 ```python
 prompts = ["The Eiffel Tower is in the city of", "def f(x): return"]
 with model.trace(prompts):
@@ -89,7 +87,6 @@ Zero the weight of every slot that chose expert `e`: those slots add nothing and
 the token is *not* renormalized onto its other experts. Compare log-probabilities
 in float32.
 
-<!-- test: skip -->
 ```python
 with model.trace(prompt):
     clean = model.logits[0, -1].float().log_softmax(-1)[target].save()

@@ -9,7 +9,6 @@ Three run methods, three return values. Picking the wrong one is the usual cause
 | `model.generate(x, max_new_tokens=N)` | the model's `generate` | **token ids** `[batch, seq]` | the checkpoint's `generation_config` — instruct models sample |
 | `model.pipe(x, ...)` | the whole task pipeline | the pipeline's **records** (decoded text, labels) | the checkpoint's `task_specific_params` — often sampled |
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -188,7 +187,6 @@ assert len(seen) == 3 and ids.shape[0] == 1
 An open loop ends when a request in its body outruns the model, so a body that
 reads no module spins forever, with no warning and no timeout:
 
-<!-- test: skip -->
 ```python
 with model.generate(prompt, max_new_tokens=2) as tracer:
     n = nnsight.save([0])
@@ -228,7 +226,6 @@ assert any("was never reached" in str(w.message) for w in caught)
 Once the module's `.source` has been touched (here, by the loop above), the same
 body raises at step 0:
 
-<!-- test: expect-error OutOfOrderError -->
 ```python
 with model.generate(prompt, max_new_tokens=4, min_new_tokens=4) as tracer:
     for step in tracer.iter[:4]:

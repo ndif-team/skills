@@ -1,8 +1,16 @@
 {
   "name": "ndif",
-  "version": "1.0.0",
-  "description": "Self-hosting NDIF, the server behind nnsight's remote=True - standing one up with docker run, compose, or the ndif CLI; deploying and sizing models; troubleshooting; and changing the server itself",
+  "description": "Run your own NDIF server, the backend behind nnsight's remote=True: stand it up, deploy and size models, fix it, and change its code",
   "author": {
-    "name": "NDIF Team"
-  }
+    "name": "NDIF Team",
+    "email": "info@ndif.us"
+  },
+  "repository": "https://github.com/ndif-team/skills",
+  "license": "MIT",
+  "keywords": [
+    "ndif",
+    "nnsight",
+    "self-hosting",
+    "inference-server"
+  ]
 }

@@ -3,7 +3,6 @@
 One `model.trace()` is one forward pass. Putting several inputs through it is the
 biggest speedup available — and remotely, the difference between one request and N.
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -106,7 +105,6 @@ It sees the batch's **module values**. What a sibling invoke wrote into a saved
 container follows the parking rule ([below](#sharing-values-across-invokes)), so
 reading it before the empty invoke has touched a module raises `KeyError`:
 
-<!-- test: expect-error KeyError -->
 ```python
 with model.trace() as tracer:
     vals = nnsight.save({})
@@ -223,8 +221,7 @@ assert (masked_mean[0] - alone[0]).norm() / alone[0].norm() < 1e-3   # unmasked:
 
 A tokenizer that adds a BOS (Llama, Gemma) counts it in `m.sum(1)`. And the first
 real token is itself an outlier on GPT-2 — norm ~3030 against ~93 — so a max over
-tokens needs it excluded as well as the pads (the `sae-and-dictionary-learning`
-skill shows the mask).
+tokens needs it excluded as well as the pads (the [sae-and-dictionary-learning guide](sae-and-dictionary-learning.md) shows the mask).
 
 ## Sharing values across invokes
 
@@ -255,7 +252,6 @@ long as the model reaches its location first.
 **Trace-body code outside the invokes runs before any of them.** It never parks,
 so it cannot see a name an invoke binds:
 
-<!-- test: expect-error NameError -->
 ```python
 with model.trace() as tracer:
     with tracer.invoke("The Eiffel Tower is in"):

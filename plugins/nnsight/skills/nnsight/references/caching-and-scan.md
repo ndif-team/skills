@@ -4,7 +4,6 @@ Two tools that remove most boilerplate from an interpretability script:
 `tracer.cache()` grabs many modules at once, `model.scan()` tells you shapes
 without running the model.
 
-<!-- test: setup -->
 ```python
 import torch
 import nnsight
@@ -86,7 +85,6 @@ steps — no per-step `.save()` calls.
 The ordering rule is enforced, so a cache never quietly captures fewer modules
 than you asked for:
 
-<!-- test: expect-error ValueError -->
 ```python
 with model.trace(prompt) as tracer:
     hidden = model.transformer.h[0].output
@@ -177,7 +175,6 @@ access is still in forward order, and `tracer.invoke` / `tracer.cache` still wor
 
 **You cannot branch on fake data.** Shapes are fine; values are not:
 
-<!-- test: expect-error GuardOnDataDependentSymNode -->
 ```python
 with meta.scan(prompt):
     if meta.transformer.h[0].output.mean() > 0:       # data-dependent — raises

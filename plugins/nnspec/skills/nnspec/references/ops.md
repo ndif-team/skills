@@ -135,7 +135,7 @@ space, sets, `strip`, `lower`, literals) is [data](data.md#answer-columns).
 
 ## Transform
 
-- **`readout` projects a stream value through the final norm and the head**: the logit lens. It takes a component `nnspec describe components` marks `stream` (`layer_output`, `layer_mid`, …), whole along `hidden_size`. The lens recipes are the `nnspec-lenses-and-attention` skill's.
+- **`readout` projects a stream value through the final norm and the head**: the logit lens. It takes a component `nnspec describe components` marks `stream` (`layer_output`, `layer_mid`, …), whole along `hidden_size`. The lens recipes are the [lenses-and-attention guide](lenses-and-attention.md)'s.
 - **`argmax` gives the top index along `over`**, by default the token id; `eq` of two runs' `argmax` is whether they pick one token. An index along a selected axis counts within the select list.
 - **`top_k` gives the `k` best `ids` with their float32 `probs`** over a vocabulary, or their `values` over another axis (`key`, `features`).
 - **A `top_k` step has members**: `top.ids`, `top.probs` (or `top.values`) and, over logits, `top.tokens`, decoded. `first_pick` above, `eq` of `top.ids` with `best`, is `[1.0, 0.0, 0.0]` on every row.
@@ -146,7 +146,7 @@ space, sets, `strip`, `lower`, literals) is [data](data.md#answer-columns).
 - **`encode` gives a featurizer's coordinates** ([featurizers and fit](featurizers-and-fit.md)); **`grad` is an entry's first op** ([sites and interventions](sites-and-interventions.md#a-gradient-at-a-site)).
 - **`permute` reorders a value's rows**, row i holding row π(i)'s, π drawn from `seed` alone; with `"derangement": true` no row stays. It is an op step only.
 - **`select` narrows a value along an axis a read cannot narrow**, with a read's `{<axis>: <selector>}`: a class of a probe's `W`, a latent's row of an sae's `W_dec` (`{"kind": "op", "op": "select", "of": "fit.probe.W", "select": {"classes": 1}}`). It is an op step only.
-- **An int keeps its axis at size 1**, labelled with the index it kept, so it pairs only with that index; a `sum` over the axis drops it, exactly. A two-class probe's direction is two selects, each summed, then a `sub` (the `nnspec-trained-featurizers` skill's [probes reference](../../nnspec-trained-featurizers/references/probes-and-lora.md#use-a-probe-causally)).
+- **An int keeps its axis at size 1**, labelled with the index it kept, so it pairs only with that index; a `sum` over the axis drops it, exactly. A two-class probe's direction is two selects, each summed, then a `sub` (the [trained-featurizers guide](trained-featurizers.md)'s [probes reference](trained-featurizers-probes-and-lora.md#use-a-probe-causally)).
 - **`rows`, `pos` and `key` are not a select's to narrow**: `select 'rows': a select step narrows a value's other axes, and its rows are a dataset's (take, skip) to narrow`.
 
 `documents/head_rank.json` ranks all 144 heads of GPT-2 by the size of their result at the last token:
@@ -194,7 +194,7 @@ they compute the same value without a model.
 | restore the norm the site had before this step's writes (`original`'s) | `{"op": "renormalize"}`, after the write it corrects; `"norm": "sum"` on a pattern |
 | through a featurizer | `decode`, `apply` ([featurizers and fit](featurizers-and-fit.md)) |
 
-The recipes that use them are the `nnspec-ablation`, `nnspec-patching` and `nnspec-steering-and-generation` skills'.
+The recipes that use them are the [ablation](ablation.md), [patching](patching.md) and [steering-and-generation](steering-and-generation.md) guides'.
 
 ## Arithmetic and comparisons
 
@@ -231,4 +231,4 @@ over the values present, NaN only where none is. Where missing rows come from is
 ## Dtypes
 
 Metrics, reductions and arithmetic compute in float32 and cannot remove the model's own rounding; the rule and
-when to recompute in float32 are the `nnspec-debugging` skill's ([the float32 rule](../../nnspec-debugging/SKILL.md#the-float32-rule)).
+when to recompute in float32 are the [debugging guide](debugging.md)'s ([the float32 rule](debugging.md#the-float32-rule)).
