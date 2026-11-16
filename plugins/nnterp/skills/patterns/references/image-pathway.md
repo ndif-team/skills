@@ -77,7 +77,7 @@ ordinary tensor by the time the second runs.
 ## Ablate inside the tower
 
 A tower block's contribution is zeroed like a text block's. Which block reaches the text
-model depends on what the wrapper feeds the projector: Llava takes block -2's stream
+model depends on what the wrapper feeds the projector: Llava 1.5 takes block -2's stream
 without its CLS token (`vision_feature_layer=-2`), so the last block and `tower_output`
 are computed and discarded, while Gemma 3 pools `tower_output` itself.
 
@@ -259,7 +259,7 @@ assert not torch.equal(plain_ids, blind_ids)
   re-adds the image after text blocks 0 to 2 (`layers[k].deepstack_output`), so zero those
   too. On `Qwen/Qwen3-VL-4B-Instruct`, zeroing `image_features` alone still answers "Red";
   zeroing `deepstack_output` on blocks 0-2 too answers "White".
-- A tower edit that changes nothing is usually at a block the wrapper does not read (Llava's
+- A tower edit that changes nothing is usually at a block the wrapper does not read (Llava 1.5's
   last block, `tower_output`); check `model.projector.input`.
 - Patching the whole of `image_features` needs the same image-token count in both runs: a
   fixed-resolution tower (CLIP, SigLIP), or same-size images on a variable-resolution one.

@@ -28,8 +28,7 @@ attn = model.layers[0].self_attn
 
 `print(envoy.source)` needs no trace. It instruments the module's forward (once, and the
 module stays instrumented) and renders it with every call and binding labelled at its
-line; the labels on the left are the operation names. Trimmed from `openai-community/gpt2`
-on transformers 5.17:
+line; the labels on the left are the operation names. Trimmed from `openai-community/gpt2`:
 
 ```python
 print(attn.source)
@@ -356,8 +355,7 @@ with llama.trace(prompt):
 
 An op name is `{callable}_{occurrence}`, so three things move one: the call is renamed,
 a binding of the same name is added or removed before it, or the arithmetic moves onto
-or off transformers' shared interface (DBRX is on the interface in 5.17 and its family
-is the base class; an earlier layout had its own arithmetic). `RENAME` keys and `ENVOYS`
+or off transformers' shared interface. `RENAME` keys and `ENVOYS`
 classes are module names and types, which move rarely; a renamed module is a silently
 skipped alias, caught by `test_standard_names_alias_native_envoys`.
 

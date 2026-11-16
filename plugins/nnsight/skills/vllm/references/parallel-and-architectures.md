@@ -46,9 +46,8 @@ sharded (the block above sees an 896-wide `o_proj` input against a 448-wide weig
   `._module.weight.shape` inside the block.
 - A fused projection (`qkv_proj`, `gate_up_proj`) reads in the one-GPU layout,
   `[q | k | v]` and `[gate | up]`, so `[:q_size]` and `chunk(2, -1)` mean what they
-  do at `tensor_parallel_size=1` (nnsight 0.8.1 gathers them in rank order,
-  `[q₀ k₀ v₀ | q₁ k₁ v₁]`). A vLLM subclass that packs more, such as MiniMax-M3's
-  `qkv_proj`, still reads in rank order.
+  do at `tensor_parallel_size=1`. A vLLM subclass that packs more, such as
+  MiniMax-M3's `qkv_proj`, reads in rank order (`[q₀ k₀ v₀ | q₁ k₁ v₁]`).
 - **The logit lens** goes through the model's logits path, which gathers the vocab
   shards: `model.logits_processor(model.lm_head, model.model.norm(h))`.
   `model.lm_head(h)` raises `LMHead's weights should be used in the sampler`.
@@ -113,7 +112,7 @@ assert attention == [3, 7, 11, 15, 19, 23]
 ```
 
 The recurrent state lives in vLLM's state cache, not in any module output, so it
-is not a location; the layer outputs are. A tapped engine on these models pins
-decode-only graphs and matches eager exactly — [graph taps](graph-taps.md).
+is not a location; the layer outputs are. A tapped engine on these models
+matches eager exactly — [graph taps](graph-taps.md).
 Vision-language checkpoints load and trace on text prompts; image inputs are
 not accepted.

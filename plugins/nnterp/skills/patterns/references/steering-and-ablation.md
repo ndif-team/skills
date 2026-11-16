@@ -223,6 +223,12 @@ with model.trace(prompt):
 print(f"skipped P(Paris) {skipped[0, paris]:.3f}")
 ```
 
+On two families a skip does not remove only the blocks' terms: Gemma-4 also drops the
+block's `layer_scalar`, which scales the incoming stream too
+(`layers[i].skip_with(layers[i].layer_input * layers[i]._module.layer_scalar)` removes the
+terms alone), and on Qwen3-VL with an image the skipped blocks' `deepstack_output` is still
+added (zero it to skip that too).
+
 A skip must cover every row of a forward. Inside one invoke of a batched trace it
 raises, so it goes in a trace of its own (or in every invoke):
 
@@ -288,9 +294,7 @@ assert not torch.allclose(clean_probs, knocked)
 
 ### Every head of a block in one forward
 
-One invoke per head, each zeroing its own head's output. On BLOOM and XGLM the attention
-interior is served off `[batch * num_heads, ...]` tensors, so an edit in one invoke reaches
-every invoke's rows and this sweep gives wrong numbers there: run one trace per head.
+One invoke per head, each zeroing its own head's output.
 
 ```python
 rows = []
@@ -355,8 +359,9 @@ slightly negative.
 - A checkpoint may lack the component: OPT has no `mlp`, a hybrid's linear blocks
   have no `self_attn`. `model.support()` says so per block; reading raises
   `nnterp.Unavailable`.
-- Head-level ablation needs eager; `attention_output`, `mlp_output` and
-  `layer_output` do not.
+- Head-level ablation through `attention_head_outputs` or the pattern needs eager; through
+  `attention_premix` it does not, nor do `attention_output`, `mlp_output` and
+  `layer_output`.
 - Gemma-4: the KV-sharing blocks attend with an earlier block's keys and values.
   Zeroing `attention_keys` / `attention_values`, in place or by assignment, ablates them
   on that block alone; to ablate what every borrower attends with, edit the source

@@ -1,8 +1,9 @@
 # Logit lens and direct logit attribution
 
 Both read the residual stream through the unembedding. The lens applies the model's
-whole head (`norm`, `lm_head`, softcap) to a stream or a contribution and asks "what
-would this predict alone"; direct logit attribution applies `lm_head` alone to each
+own path from the stream to its logits (`norm`, `lm_head`, and any softcap, scale or
+projection) to a stream or a contribution and asks "what would this predict alone";
+direct logit attribution applies `lm_head` alone to each
 contribution so the numbers sum. nnterp's `project_on_vocab` is the first,
 `model.lm_head(x)` inside a trace is the second, and `layers[i].input +
 attention_output + mlp_output == layer_output` is what makes the second decompose on
@@ -37,11 +38,14 @@ assert decoded[:6] == [" the"] * 6 and decoded[10:] == [" Paris", " Paris"]
 assert torch.equal(lens[model.num_layers - 1], logits[:, -1])
 ```
 
-`project_on_vocab` *calls* `model.norm` and `model.lm_head` on your tensor; reading
-`model.lm_head_output` (`lm_head.output`) is the model's own projection of
-`final_norm_output`, the normed final stream, a different thing. The last-block equality holds on every family because
-`project_on_vocab` is the family's whole head: the softcap (Gemma-2/4), `logit_scale`
-(Cohere), `/ logits_scaling` (Granite), DeepSeek-V4's `hc_head` before the norm.
+`project_on_vocab` *calls* the model's own modules on your tensor (`model.norm`,
+`model.lm_head`, and any the model applies between them); reading `model.lm_head_output`
+(`lm_head.output`) is the model's own projection of the final stream, a different thing.
+The last-block equality holds on every family because `project_on_vocab` follows the
+model's path: the softcap (Gemma-2/4), `logit_scale` (Cohere's and Cohere-2's causal-LM
+classes; the Aya Vision and Command A Vision wrappers do not scale, and the lens follows
+them), `/ logits_scaling` (Granite), DeepSeek-V4's `hc_head` before the norm, ZAYA's cast
+of its float32 stream to the norm's dtype.
 
 ### Target-probability curve
 
@@ -288,4 +292,4 @@ before it and does not.
   `OutOfOrderError`. `token_embeddings` before `layers[0].input`.
 - **Three different heads.** `model.lm_head(x)` is a stood-down call on your tensor;
   `model.lm_head_output` is the model's projection of the normed stream;
-  `model.logits` adds the softcap.
+  `model.logits` adds the softcap or scale.

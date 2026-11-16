@@ -30,7 +30,8 @@ prompt = "The Eiffel Tower is in the city of"
 
 The two contributions are *defined* by one identity, which holds on a sequential
 block (GPT-2, Llama), a parallel block (GPT-NeoX, Phi, GPT-J, Falcon, Cohere) and
-a post-norm block alike:
+a block that norms a sublayer's output before the add alike (not on OPT-350m, whose
+norms follow the adds):
 
 ```
 layers[i].input + attention_output + mlp_output == layers[i].layer_output
@@ -96,18 +97,25 @@ with model.trace(prompt):
 assert not torch.allclose(zeroed, clean_logits)
 ```
 
+A write to `layer_mid` replaces the stream between the sublayers for the MLP's norm and the
+add after the MLP: the block holds the tensor twice, so `layers[i].layer_mid = new` is copied
+into it, the same write as `layer_mid[:] = new`. It changes a read saved earlier in the trace,
+and a learned replacement (a scale, a rotation, a trainable SAE) must start from
+`layers[i].layer_mid.clone()` for its backward pass; a sum (`layer_mid + v`) needs no clone.
+
 The values are keyed on the norm aliases, so they describe the pre-norm block. A block
 built otherwise has its family point a value at its own module, or mark it unavailable
 with the reason (`support()` says which):
 
 | block | families | what changes |
 |---|---|---|
-| sandwich | `gemma2`, `gemma3_text`, `gemma4_text`, `gemma4_unified_text`, `afmoe` | `layer_mid` and `mlp_norm_output` read the MLP's own pre-norm (`pre_feedforward_layernorm`), since `post_attention_layernorm` follows the attention |
+| sandwich | `gemma2`, `gemma3_text`, `gemma4_text`, `gemma4_unified_text`, `afmoe` | `layer_mid` and `mlp_norm_output` read the MLP's own pre-norm (`pre_feedforward_layernorm`; `pre_mlp_layernorm` on AFMoE), since `post_attention_layernorm` follows the attention; on a Gemma-4 mixture block (26B-A4B) the router and the experts norm `layer_mid` themselves, so `mlp_norm_output` and `mlp_input` are the dense MLP's input alone: edit `layer_mid` to change what the whole feed-forward reads; `glm4` and `hyperclovax` are sandwiches whose `post_attention_layernorm` is the pre-MLP norm, so the base keys hold |
+| two experts on the block | `granitemoeshared`, `granitemoe_swa`, `granitemoehybrid` | the block calls the routed experts and a shared expert, siblings, with the norm's output, so `mlp_input` is that output (the same tensor as `mlp_norm_output`) and a write reaches both |
 | post-norm only | `olmo2`, `olmo3`, `exaone4`, `flex_olmo`; OLMo-Hybrid's attention blocks | `layer_mid` is `mlp.input`; the two norm outputs are unavailable (`POST_NORM_ATTENTION`, `POST_NORM_MLP`: the sublayer reads the stream itself) |
-| parallel | `gptj`, `codegen`, `cohere`, `cohere2`, `phi`, `falcon`; `gpt_neox` and `stablelm` with `use_parallel_residual` | `layer_mid` unavailable (`PARALLEL`); `mlp_norm_output` is the one norm's output (Falcon's 40B layout: `ln_mlp`) |
+| parallel | `gptj`, `codegen`, `cohere`, `cohere2`, `phi`, `falcon`; `gpt_neox` and `stablelm` with `use_parallel_residual` | `layer_mid` unavailable (`PARALLEL`). Where one norm feeds both sublayers (all but `gpt_neox` and Falcon's 40B layout), `mlp_norm_output` is that norm's output, the tensor `attention_norm_output` is: read before the attention, and a write to either reaches both sublayers; `mlp_input` edits what the MLP alone reads. `gpt_neox` has two norms of the block input, and `mlp_norm_output` is `post_attention_layernorm`'s output (Falcon's 40B layout: `ln_mlp`) |
 | OPT, XGLM | | the pre-MLP norm is the block's `final_layer_norm`; OPT holds the stream flattened there, so `layer_mid` and `mlp_norm_output` are `FlatResidual` (`[tokens, hidden_size]`); `mlp_input` unavailable (no `mlp` module) |
-| gated merges | `doge`, `zaya` | the values are the real boundaries, but a gate scales what the block adds, so `layer_mid != layer_input + attention_output` |
-| hyper-connections | `deepseek_v4` | all four unavailable: each sublayer reads a mix of the streams |
+| gated merges | `doge`, `zaya` | the values are the real boundaries, but Doge's gates scale the stream the block carries and ZAYA's merges rescale the stream as well as what is added, so `layer_mid != layer_input + attention_output`; ZAYA's `layer_mid` is the attention merge's output (`post_attention_residual_scale.output`), the float32 stream, since its MLP's norm reads a copy cast to the norm's dtype |
+| hyper-connections | `deepseek_v4` | `attention_norm_output`, `mlp_norm_output` and `mlp_input` are what each sublayer is called with, its norm's output on a mix of the streams (`Residual`); `layer_mid` is unavailable |
 | one sublayer | `mamba`, `mamba2`, `falcon_mamba`, `nemotron_h` | the boundaries the block has no modules for are unavailable, with the reason |
 
 The three reasons are strings exported from `nnterp.components` (`PARALLEL`,
@@ -158,7 +166,8 @@ A routed mixture of experts has no single activation or down projection: on a `M
 block both are unavailable with `routed experts; read per-expert via the Moe component`
 ([mixture-of-experts.md](mixture-of-experts.md)); dense blocks beside the mixtures serve
 them. A family that aliases none of the three names reports `no o_proj module on this
-attention` (DeepSeek-V4's low-rank projection, JetMoE's per-expert one). Zeroing neuron
+attention` (JetMoE's per-expert projection); DeepSeek-V4's `attention_premix` is the input of
+the first of its two output matrices, `o_a_proj`, split by head. Zeroing neuron
 `n` everywhere is `mlp_neurons[..., n] = 0`, on every family with a dense MLP.
 
 ## Tensor blocks and tuple blocks
@@ -193,6 +202,9 @@ The same holds for `attention_output` on an attention module returning
 `(attn_output, attn_weights)`: the value is the first tensor, an assignment
 rewraps it. Skip a tuple block with `skip_layers` or `Layer.skip_with`, not
 nnsight's `.skip(tensor)`, which hands a bare tensor where a tuple is expected.
+Where the second element is state the next block reads (ZAYA's router state, GLM-5's
+key selection), a skipped block hands on the state it received, as it hands on the
+stream.
 
 ## Reading, editing in place, assigning
 
@@ -245,7 +257,9 @@ adds; the identity is what you rely on, not `self_attn.output[0]`.
 - **Granite line** (`granite`, `granitemoe`, `granitemoeshared`, `granitemoehybrid`,
   `granite_swa`, `granitemoe_swa`) and **HyperCLOVA X**: the block adds
   `h * residual_multiplier` (0.22 on granite-4.1-3b), so the contributions are the
-  scaled terms and the plain identity holds. They are computed copies: an
+  scaled terms and the plain identity holds, except on GraniteMoE-SWA with a shared
+  expert (granite-swash-3b-a600m), where `mlp_output` leaves out the block's
+  `shared_mlp` term. They are computed copies: an
   assignment is divided back, an in-place edit is carried back by a transform, a
   read with no edit leaves the forward bit-identical. In bf16 dividing the whole
   copy back shifts *every* position by up to half an edit's own effect (1e-7 in
@@ -283,7 +297,7 @@ assert torch.allclose(raw_attn[0], x + attn)                     # the module re
 
 On these families a term added in block `i` does not reach the last stream as
 itself, and naive direct logit attribution ranks the wrong terms (on gemma-4-E2B
-it named block 0's attention the top term, off by ~7,700%; on Doge-320M ~18x).
+it named block 0's attention the top term, off by ~7,700%).
 nnterp serves the contributions unscaled and computes no weights for you; the
 recipes below do. Both are skipped here (no such checkpoint in the executed set)
 and were verified on the pinned tiny checkpoints with the scales moved away from
@@ -343,8 +357,9 @@ weight |= {("mlp", i): after[i + 1] for i in range(model.num_layers)}
 # final == after[0] * base + sum(weight[key] * terms[key])   (terms read as in the Gemma-4 recipe)
 ```
 
-No released Doge checkpoint loads in transformers 5.17 (size mismatches); the
-tiny one does. **ZAYA** merges each sublayer's output `o` into the stream `r` as
+SmallDoge's Doge-20M, -40M and -260M load and run (Doge-160M and -320M do not:
+size mismatches), and Doge-40M-MoE from transformers 5.18. **ZAYA** merges each
+sublayer's output `o` into the stream `r` as
 `(o + hidden_states_bias) * hidden_states_scale + (r + residual_bias) * residual_scale`
 (each merge's parameters on `layers[i].post_attention_residual_scale._module` /
 `post_mlp_residual_scale._module`); `attention_output` / `mlp_output` are the first
@@ -354,6 +369,8 @@ the Doge loop does.
 **DeepSeek-V4**: parallel streams. The residual between blocks is `hc_mult` (4)
 copies of the stream: `layer_output` and `layers[i].input` are `[batch, seq,
 streams, hidden]` (layout `Streams`), the block's own tensor, so writes land.
+`attention_norm_output`, `mlp_norm_output` and `mlp_input` are what each sublayer is
+called with, `[batch, seq, hidden]`.
 Each sublayer reads a weighted collapse and returns `[batch, seq, hidden]`;
 `attention_output` / `mlp_output` are those outputs, unscaled. Four values on the
 block carry the hyper-connection weights, float32 and writable:
@@ -404,7 +421,8 @@ assert torch.allclose(probs, logits[:, -1].softmax(-1))
 ```
 
 **`logits`** is the `.logits` of the model's output: softcapped on Gemma-2/4 and
-VaultGemma, times `logit_scale` on Cohere, `/ logits_scaling` on the Granite line,
+VaultGemma, times `logit_scale` on Cohere's and Cohere-2's causal-LM classes (the Aya
+Vision and Command A Vision wrappers do not scale), `/ logits_scaling` on the Granite line,
 times `logits_scaling` on HyperCLOVA X, times `lm_head_multiplier` on Falcon-H1,
 float32 on Mamba-2 and Nemotron-H. `lm_head_output` is the raw projection
 (`lm_head.output`), so on those families the difference between the two is the
@@ -420,10 +438,10 @@ with model.trace(prompt) as tracer:
 assert result.abs().max() == 0
 ```
 
-**`token_embeddings`** is whatever the embedding module returns: before GPT-2's
-positional `wpe`, before BLOOM's `word_embeddings_layernorm`, before Granite's
-`embedding_multiplier` (12 on granite-3), but *with* Gemma's `sqrt(hidden)` scale,
-which sits inside Gemma's embedding module. `layers[0].input` is what enters
+**`token_embeddings`** is whatever the embedding module returns: before anything the
+model adds after it (positions, a norm, a multiplier, image features), but *with* Gemma's
+`sqrt(hidden)` scale, which sits inside Gemma's embedding module. On OPT-350m it is 512
+wide (`project_in` lifts it to the 1024-wide stream). `layers[0].input` is what enters
 block 0 on every family; use it as the base of a decomposition. Assign
 `token_embeddings` to replace what the embedding hands on.
 

@@ -5,7 +5,7 @@ from GPU-less clients. Every block in this file needs a running server, so none
 is executed by the suite.
 
 ```bash
-nnsight-serve Qwen/Qwen3-8B --port 8000 --enable-prefix-caching False \
+nnsight-serve Qwen/Qwen3-8B --port 8000 \
     [--api-key SECRET] [--gpu-memory-utilization 0.5] [--max-model-len 4096]
 ```
 
@@ -21,7 +21,6 @@ nnsight-serve Qwen/Qwen3-8B --port 8000 --enable-prefix-caching False \
   `--taps model.layers.*.output` reaches the engine as a string, which it iterates
   per character and refuses with `ValueError: Tap 'm' names no module`. A tapped
   engine has to be built in Python.
-- Start with prefix caching off if any client will `edit(serve=url)`.
 - Poll `GET /health` for `{"status": "ok"}`; the engine takes a minute or two.
 - The routes are `/health`, `POST /v1/nnsight/generate`,
   `POST /v1/nnsight/register/{id}` and `.../clear`. It is **not** an
@@ -53,14 +52,6 @@ The server returns saved values only; save `tracer.result` to get the
 `RequestOutput` back. `serve=` is accepted by `trace` and `edit`; a with-less
 `model.generate(..., serve=url)` is not routed and would try to dispatch a local
 engine. Build and runtime errors come back with their real type and traceback.
-
-**`n > 1` does not survive the round trip.** Locally, a name saved under
-`n=3` comes back as a list of three — one entry per sampled sequence. Over
-`serve=` the same trace returns **sequence 0's value alone**, with no error and no
-list, while `tracer.result.outputs` still shows all three sequences: the serve
-route returns the request's saves and never reads its per-sequence ones. Nothing
-about the value looks wrong, so check `len()` against `n` if you sample more than
-one sequence, or run `n > 1` on a local engine.
 
 ## An installed block, seen by every request
 

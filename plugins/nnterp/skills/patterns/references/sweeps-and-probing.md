@@ -121,7 +121,8 @@ The guards:
 - **Recurrent-only families.** Mamba and Mamba-2 have no `self_attn` and no `mlp`
   anywhere (`pattern_blocks` is empty, `has_mlp` is `False`), and with `mamba_ssm`
   installed need `nnterp.route_kernels(model.family, "torch")` before the first trace
-  even for `layer_output` on CPU.
+  even for `layer_output` on CPU; Mamba needs it on every machine for its head outputs
+  and state.
 - **Non-additive blocks.** Zeroing a contribution is still a valid ablation on
   Gemma-4, Doge, ZAYA and DeepSeek-V4; attributing by the plain sum is not (the
   `nnterp` skill's `references/values.md`).
