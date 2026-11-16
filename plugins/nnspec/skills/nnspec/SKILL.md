@@ -37,7 +37,7 @@ nnspec describe records      # prints the format's records: the install works
 
 - **nnterp comes from a checkout** of `ndif-team/nnterp` (its `v2.0.0` branch), at the path `[tool.uv.sources]` in nnspec's `pyproject.toml` names: point that path at yours before `uv sync`.
 - **Into an environment that already has the dependencies** `pyproject.toml` lists, that nnterp among them: `uv pip install --no-deps -e .` from the checkout.
-- **Outside the venv** a command is `uv run --no-sync nnspec …`; a plain `uv run` re-syncs the environment first.
+- **Without the venv activated** the command is `<env>/bin/nnspec`, beside that environment's `python` (there is no `python -m nnspec`), or `uv run --no-sync nnspec …` from the checkout; a plain `uv run` re-syncs the environment first.
 - **The first run downloads the checkpoint**; after it, `HF_HUB_OFFLINE=1` runs from the cache.
 
 ## Write, check, run, read
@@ -99,7 +99,7 @@ has a counterfactual whose second subject is the other name, so its answer is th
 }
 ```
 
-- `model` pins the weights by commit; where they run is `--device` at run time, never the document's.
+- `model` is one checkpoint, pinned: `revision` is required, the commit hash. For a cached checkpoint it is the directory name under `~/.cache/huggingface/hub/models--<org>--<name>/snapshots/`. Two checkpoints are two documents. Where the model runs is `--device` at run time, never the document's.
 - `data.pairs` is inline rows, read as `pairs.<column>`. The counterfactual is a column of the base rows' dataset, never a dataset of its own, and each answer carries the space the prompt implies.
 - `sites` names a place once, so a read and a write land on the same one.
 - An entry with no `ops` reads: `clean` and `counterfactual` read at `pos: -1`, each row's own last token.
@@ -128,7 +128,8 @@ landed: GPT-2 adds no BOS, so position 0 is `When`.
 
 **Ablation** changes what `patched` writes: `{"op": "swap", "with": 0.0}` for zero, or `{"op": "swap", "with":
 "mean"}` with the step `"mean": {"kind": "op", "op": "mean", "of": "clean.v_self"}` written after `clean`. A
-`mean` removes the rows and positions, and the vector left broadcasts over both. The self-swap stays the null.
+`mean` with no `over` removes the rows and positions, pooling every token read once, and the vector left
+broadcasts over both. The self-swap stays the null.
 Averaged over the rows, the logit difference is -2.80 clean, +0.26 under zero and -2.05 under the mean: a zero
 vector is a point no forward reaches, so report mean (or resample) ablation and keep zero as the extreme.
 
@@ -147,11 +148,13 @@ at             mean_null           mean_patched
 {"layers":9}   -2.801694869995117  3.8118953704833984
 ```
 
-A second sweep with its own `label` crosses the first into a grid ([sweeps](references/sweeps.md)).
+Reads share one forward across points, and each point that writes runs its own: a document does not batch
+different interventions into one forward, which is the nnsight skill's ground. A second sweep with its own
+`label` crosses the first into a grid ([sweeps](references/sweeps.md)).
 
 **The logit lens** reads what each layer predicts. `readout` projects a residual-stream value through the
-model's own final norm and head, and `"layers": ":"` reads every layer in one forward. These keys replace
-`ioi_patch.json`'s `sites`, `steps` and `saves`:
+model's own final norm, head and whatever follows the head (Gemma-2's logit softcap), and any metric scores the
+result as it scores logits. `"layers": ":"` reads every block in one forward. `documents/ioi_lens.json` is `ioi_patch.json` with these `sites`, `steps` and `saves`:
 
 ```json
 {
@@ -179,9 +182,10 @@ layer  p_answer                to_final
 11     0.42094409465789795     0.0
 ```
 
-The null is the wiring check: `to_final`, the largest KL from the model's own logits, must be 0.0 at the last
-layer, or the lens is not the model's computation. A reduction keeps the `layers` axis, so each value is one
-number per layer; the answer forms at layer 9. `top.tokens` is each layer's three likeliest tokens, decoded.
+The null is the wiring check: `to_final`, the largest KL from `logits`, the model's own output, must be 0 at
+the last layer (0.0 here, float32 rounding on other families), or the lens is not the model's computation. A
+reduction keeps the `layers` axis, so each value is one number per layer; the answer forms at layer 9.
+`top.tokens` is each layer's three likeliest tokens, decoded.
 
 **Steering** adds a direction at a dose. The direction is a mean difference of two prompt sets, and the dose a
 fraction of the activations' own norm, so dose 0 is the null. These are the `steps` of `steer.json`, whose
@@ -238,6 +242,7 @@ Each mistake below runs without a refusal and gives wrong numbers.
 - **A result without its null proves nothing.** Writing back what was read must equal the clean run to the bit; a gap means the read and the write are not one selection. Dose 0 and a lens's last layer are nulls of the same kind. Compare two runs only at one batch size, padding and device ([debugging](references/debugging.md#reproducing-a-number)).
 - **A write at a slice or list of layers patches them all at once.** To patch one layer at a time, sweep `layers`.
 - **Two sweeps of one field without labels zip into the diagonal.** Give each its own `label` for a grid, and check the `axes` column of `nnspec show` ([sweeps](references/sweeps.md#labels-zip-or-cross)).
+- **A swept write `pos` with an unswept read `pos` puts one read value at every position.** Sweep both under one label.
 - **An unscoped `pos` between two inputs pairs index with index**, whatever tokens sit there. Where the prompts differ in length or wording, scope each side to its own word ([positions](references/positions.md#pairing-with-another-forward)).
 - **`occurrence` counts matches in the whole row, from the first.** On the IOI prompts `{"text": " to"}` is position 5, not 13: write `"occurrence": -1` for the last, and check each entry's positions in `nnspec show`.
 - **A generate step without `"do_sample": false` may sample**, from the checkpoint's generation config, unseeded. A write at `pos: -1` there lands in the prefill only ([generation](references/generation.md#writes-during-generation)).
@@ -249,7 +254,8 @@ Fits, gradients, generated text and bfloat16 have their own traps, in their guid
 
 The root keys are `description`, `model`, `data`, `sites`, `interventions`, `featurizers`, `steps` and `saves`;
 `model`, `data` and `steps` are required. `model` holds `key`, `revision` (a commit) and `dtype`, and any other
-key goes to the loader (`"attn_implementation": "eager"`). `nnspec describe records` prints every field.
+key goes to the loader (`"attn_implementation": "eager"`); `key` and `revision` are required, and a document
+has one model. `nnspec describe records` prints every field.
 
 **Steps** are `forward`, `generate`, `op` (one op over an earlier value), `fit` (train a featurizer inside the
 run) and `load` (a value an earlier run saved). They run in the order their keys are written, and a value is
@@ -288,7 +294,7 @@ is two heads in that order, and an index along the axis then counts within the l
 | the position that predicts it | the same scope with `"before": true` | 12 |
 | every decode call of a generation | `{"frame": "1:"}` | one per generated input |
 
-Leaving `pos` out reads every prompt token. `nnspec describe pos` has the grammar and
+Leaving `pos` out reads, or writes, every prompt token. `nnspec describe pos` has the grammar and
 [positions](references/positions.md) the rest.
 
 **Ops** run as an `op` step or inside an entry; one over rows (`mean`, `permute`, `pca`) belongs in a step,
@@ -296,10 +302,15 @@ since an entry sees one batch. `nnspec describe ops` gives each op's arguments, 
 which to use for what.
 
 - **Metrics**, one number per row and position: `match`, `logit_diff`, `token_prob`, `token_logit`, `cross_entropy`, `kl`, `js`, `cosine`, `contains`.
-- **Reductions**, over rows and positions unless `over` names the axes: `mean`, `sum`, `min`, `max`, `std`, `median`, `count`, `norm`, `dot`, `entropy`, `pca`.
+- **Reductions**, over rows and positions unless `over` lists the axes (`"over": ["pos"]`): `mean`, `sum`, `min`, `max`, `std`, `median`, `count`, `norm`, `dot`, `entropy`, `pca`.
 - **Transforms**: `readout`, `argmax`, `top_k`, `select`, `detokenize`, `permute`, `encode`, `grad`.
 - **Arithmetic and comparisons**, never written back: `abs`, `exp`, `log`, `sign`, `sqrt`, `square`, `neg`, `mul`, `div`, `pow`, `eq`, `ne`, `gt`, `ge`, `lt`, `le`.
 - **Edits**, written back inside an entry: `swap`, `add`, `sub`, `scale`, `noise`, `clamp`, `project_out`, `normalize`, `renormalize`, `decode`, `apply`.
+
+A metric scores one answer token per position. For an answer of several tokens, append it to the prompt
+(`"input": ["facts.prompt", "facts.answer"]`), read the head at `{"scope": {"column": "facts.answer",
+"occurrence": -1, "before": true}}`, and sum `cross_entropy`, each token's negative log-probability, over
+`["pos"]` ([teacher forcing](references/generation-teacher-forcing.md)).
 
 **`saves`** names values or their members (`clean_ld`, `patched.logits`, `top.tokens`). Save what you will read:
 `patched.logits` is `[4, 1, 50257]` floats where `patched_ld` is `[4, 1]`.
@@ -322,13 +333,19 @@ from nnspec import Plan
 plan = nnspec.run("documents/ioi_patch.json")        # compiles, runs, writes out/ioi_patch, returns the filled plan
 plan = Plan.load("out/ioi_patch")                    # or read a finished run back
 plan.results["patched_ld"][:, 0]                     # tensor([1.2577, 4.4744, 2.5320, 3.9496])
-plan.table("patched_ld", "flipped")[0]               # {'example_id': 'mary', 'row': 0, 'pos': 13, 'pos_token': 'Ġto', ..., 'patched_ld': 1.2577362060546875, 'flipped': 1.0}
+plan.table("patched_ld", "flipped")[0]               # {'row': 0, 'pos': 13, 'pos_token': 'Ġto', ..., 'patched_ld': 1.2577362060546875, 'flipped': 1.0}
 plan.steps["patched"].interventions["patch"].positions   # {'pairs': [[13], [13], [13], [13]]}
+
+swept = Plan.load("out/ioi_layer_sweep")
+swept.sweeps                                         # {'layers': Axis(values=[0, 1, ..., 11])}
+swept.results["mean_patched"][8]                     # tensor(3.0534): a swept save is a dict keyed by the swept value,
+                                                     # by a tuple in the order of .sweeps where it has several axes
+swept.table("mean_patched")[8]                       # {'at': {'layers': 8}, 'value': 3.053426742553711}
 ```
 
-A swept result is a dict keyed by coordinate, `plan.results["ablated_ld"][(9, "mean")]`. No op compares
-across sweep points, so rank and plot from `results` in Python. Each save is also a file,
-`out/<name>/<save>.safetensors`, or `.json` where it holds text ([output](references/output.md)).
+- **A value is laid out as `nnspec show` prints its `dims`**, rows in dataset order. Where rows hold different numbers of positions it is as wide as the widest row, NaN past each row's own.
+- **No op compares across sweep points or finds the first layer where something holds.** Save the per-point or per-layer values and compute such scores (the first layer whose top token is the answer, the fraction of an effect recovered, a ranking) in Python from `results`.
+- **Each save is also a file**, `out/<name>/<save>.safetensors`, or `.json` where it holds text, its swept entries keyed `layers=8` ([output](references/output.md)).
 
 ## Guides
 

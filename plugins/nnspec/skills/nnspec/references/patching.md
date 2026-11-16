@@ -4,8 +4,13 @@ Patching asks whether a value carries what decides the answer: read it on a coun
 the base prompt at the same place, and score the base run. [SKILL.md](../SKILL.md#a-complete-experiment) has
 the interchange at the last token, its null and a sweep over layers. This guide puts the patch on a word, maps
 it over layers and positions, pairs prompts of different lengths, and patches windows, noised runs and
-generations. Clean values into a corrupted base (denoising) ask what restores the answer, corrupted values
-into a clean base (noising) what breaks it: one document, with the two inputs exchanged.
+generations.
+
+In every document here `input` is the base, the prompt that is run, patched and scored, and `counterfactual`
+the prompt the patched value is read on. Denoising asks what restores the answer: `input` holds the corrupted
+prompt and `counterfactual` the clean one, and the metric's `a` is the clean prompt's answer. Noising asks what
+breaks it: `input` holds the clean prompt and `counterfactual` the corrupted one. It is one document, with the
+two columns and the two answers exchanged.
 
 One head, a head set, neurons, one path or a head's pattern:
 [heads, neurons and paths](patching-heads-neurons-and-paths.md). Every component ranked from one backward:
@@ -13,8 +18,6 @@ One head, a head set, neurons, one path or a head's pattern:
 
 ## What breaks
 
-- **A swept write `pos` against an unswept read writes the one read value at every point.** Sweep the read's
-  `pos` over the same values under the same `label` ([the map](#a-layer-by-position-map)).
 - **A swept `pos`'s coordinate is not the table's `pos` column.** `at` holds the swept value, and `pos` is
   where the tabled read landed. Label the sweep (`"label": "patch_pos"`) to keep the two apart.
 - **`match` alone hides a graded effect.** It stays 0 until the top token flips: at layer 7, the last position
@@ -354,9 +357,3 @@ wed-sat     2    If today is Wednesday, tomorrow is   Friday, and today is today
 - **`conf` reads the call that chose each token of the counterfactual's answer** (`before`): 0.15 to 0.34 on
   the five rows that say it, at call 0, and `alignment_missing` on the two that never do
   ([rows a scope never reached](positions.md#rows-a-scope-never-reached)).
-
-## Two experiments against one clean run
-
-Declare each experiment's entries as a bundle under the root `interventions` and pull each into a step of its
-own ([named bundles](sites-and-interventions.md#named-bundles)). Their metrics, named apart, are values of one
-dataset, so one `nnspec table` joins them row by row beside the clean run's.
