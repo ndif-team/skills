@@ -1,237 +1,149 @@
 # Control Flow: skip, stop, session, edit
 
-Four ways to change *what runs*, rather than what a value is.
+Four ways to change *what runs*, where an edit to `.output` changes a value.
 
 ```python
 import torch
 import nnsight
 from nnsight import TransformersModel
 
-model = TransformersModel("openai-community/gpt2", dispatch=True)
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
 prompt = "The Eiffel Tower is in the city of"
+
+with model.trace(prompt):
+    original = model.output.logits[0, -1].argmax().save()      # ' Paris'
 ```
 
-## module.skip(replacement) — don't run this module
+## module.skip(replacement)
 
-The module's forward never executes; `replacement` becomes its output.
+The module's forward never runs and `replacement` becomes its output. Feeding a
+residual block its own input makes it a pass-through:
 
 ```python
 with model.trace(prompt):
-    layer0 = model.transformer.h[0].output
-    model.transformer.h[1].skip(layer0)          # layer 1 never runs
-    logits = model.output.logits.save()
+    block = model.transformer.h[6]
+    block.skip(block.input)                       # block 6 contributes nothing
+    skipped = model.output.logits[0, -1].argmax().save()
 
-print(model.tokenizer.decode(logits[0, -1].argmax()))
+assert int(skipped) != int(original)
 ```
 
-Feeding a module its own input turns it into a pass-through — the identity
-ablation of a whole block. This works for a residual-stream block, whose input and
-output are both the `(batch, seq, hidden)` hidden state; it is wrong for a module
-that returns something shaped differently from what it takes:
+- For a sublayer that is *added* to the residual stream (an MLP, an attention),
+  the pass-through value is zeros shaped like its output:
+  `mlp.skip(torch.zeros_like(mlp.input))`.
+- The replacement must match the real output in structure, shape, dtype and
+  device (a tuple for a module that returns one). A mismatch surfaces as a bare
+  torch error inside a later module that names neither `skip` nor yours.
+- `skip` moves the run past the module, as reading its `.output` would. Read
+  anything earlier above the `skip` line, and do not read the skipped module's
+  submodules: both are `OutOfOrderError`.
+- In a batched trace, skip the module in every invoke or in none. A skip covers
+  one call: under `generate`, repeat it inside `tracer.iter` or store it in an
+  `edit`.
 
-```python
-with model.trace(prompt):
-    model.transformer.h[6].skip(model.transformer.h[6].input)   # block 6 is a no-op
-    passthrough = model.output.logits[0, -1].argmax().save()
+## tracer.stop()
 
-with model.trace(prompt):
-    baseline = model.output.logits[0, -1].argmax().save()
-
-assert model.tokenizer.decode(passthrough) == " London"     # baseline is " Paris"
-assert passthrough.item() != baseline.item()
-```
-
-Zeroing the output instead is a different ablation — the block contributes nothing
-rather than passing its input along:
-
-```python
-with model.trace(prompt):
-    model.transformer.h[5].mlp.skip(torch.zeros_like(model.transformer.h[5].mlp.input))
-    logits = model.output.logits.save()
-
-assert logits.shape[-1] == model.config.vocab_size
-```
-
-Uses: ablate a sublayer, splice in a cached activation, or route around layers you
-have already computed (skipping layers 0..L-1 with a cache saves real time on deep
-models).
-
-Rules:
-- The replacement must match the module's real output in **structure, shape, dtype
-  and device** — a tensor for a GPT-2 block, a tuple for a module that returns one.
-  A mismatch is caught by the model, not by nnsight, so it arrives as a bare torch
-  error from inside the next forward (`expected scalar type Double but found
-  Float`, `Expected all tensors to be on the same device`) that names neither
-  `skip` nor your module.
-- A skipped module's submodules never run, so reading their `.output` is out of
-  order.
-- **`skip` advances the run past the module**, exactly as reading its `.output`
-  would. Anything earlier has to be read *above* the `skip` line: swapping the two
-  statements in the first example gives `OutOfOrderError:
-  'model.transformer.h.0.output.i0' was requested but the model already ran past
-  it`, which reads as a bug in the read rather than in the ordering.
-- In a batched trace, a skip must be applied in **every** invoke or none.
-- A skip is one-shot per module call; across generation steps, re-skip per step
-  (`tracer.iter[...]`) or make it persistent with `edit`.
-
-## tracer.stop() — abandon the rest of the pass
-
-```python
-with model.trace(prompt) as tracer:
-    early = model.transformer.h[2].output.save()     # save BEFORE stopping
-    tracer.stop()
-
-print(early.shape)        # layers 3+ never ran
-```
-
-Everything after `stop()` in that block is unreachable, so save first. `stop()`
-ends the whole run — for one module use `skip`. In generation it stops the entire
-decode loop, not just the current step:
-
-```python
-with model.generate(prompt, max_new_tokens=20) as tracer:
-    picks = nnsight.save([])
-    for step in tracer.all():
-        picks.append(model.output.logits[0, -1].argmax(dim=-1))
-        if len(picks) == 3:
-            tracer.stop()
-
-assert len(picks) == 3          # the run ended at step 2, not step 19
-```
-
-Two things a stop takes with it:
-
-- **The run's result is gone.** A stopped run never returns one, so
-  `tracer.result.save()` after the `stop()` is unreachable, and from a separate
-  empty invoke it raises `OutOfOrderError: 'result.i0'`. Save activations, not
-  results.
-- **Saving `tracer.result` *before* the `stop()` defeats it.** The worker parks on
-  the result until the run finishes, so the whole forward runs and the stop fires
-  afterwards — with a full logits tensor in hand as evidence it "worked".
+Ends the forward pass. Save first; nothing after it in the block runs:
 
 ```python
 with model.trace(prompt) as tracer:
     early = model.transformer.h[2].output.save()
-    result = tracer.result.save()      # parks here until the run is over
-    tracer.stop()                      # too late to save anything
+    tracer.stop()                                  # layers 3 and up never run
 
-assert result.logits.shape[1] == len(model.tokenizer.encode(prompt))
+assert tuple(early.shape) == (1, 10, 768)
 ```
 
-Early stopping is the cheapest optimization in interpretability: if your metric
-only needs layer 5 of a 80-layer model, stop there.
+- The module the worker is parked on has already run: its value is served and an
+  edit to it lands.
+- **A stopped run has no result.** `tracer.result` after the stop is unreachable,
+  and saving it *before* the stop defeats the stop: the worker waits on the result
+  until the whole forward has run.
+- It stops the whole batch and, under `generate`, the whole decode loop, not one
+  invoke or one step.
 
-## model.session() — several traces, one scope
+## model.session()
 
-Inside a session, values flow from one trace to the next without `.save()`; only
-what you save escapes the session. (Only the outermost context filters on saves —
-the same holds for a `tensor.backward()` block inside a trace.)
+Inside a session, values flow from one trace to the next without a save, and
+ordinary Python runs between the traces. Only saved values leave the session:
 
 ```python
 with model.session():
     with model.trace("The Eiffel Tower is in"):
-        a = model.transformer.h[-1].output[0, -1]
+        donor = model.transformer.h[5].output[:, -1]            # not saved
     with model.trace("The Colosseum is in"):
-        b = model.transformer.h[-1].output[0, -1]
-        similarity = torch.nn.functional.cosine_similarity(a, b, dim=0).save()
+        model.transformer.h[5].output[:, -1] = donor
+        patched = model.output.logits[0, -1].argmax().save()
 
-print(round(similarity.item(), 3))
+print(model.tokenizer.decode(patched))
 ```
 
-Ordinary Python surrounds the traces:
+The same holds for any nested context: only the outermost one filters on saves,
+so a value read inside `with metric.backward():` needs its save only to leave
+the enclosing trace. Locally a session is a convenience. With `remote=True` it
+turns N requests into one: [remote](remote.md).
+
+## model.edit()
+
+An edit stores a block and replays it on every later run. The default returns an
+edited **copy** that shares the weights and leaves the original clean:
 
 ```python
-with model.session():
-    norms = nnsight.save([])
-    for layer in range(4):
-        with model.trace(prompt):
-            norms.append(model.transformer.h[layer].output.norm())
+with model.edit() as (tracer, steered):
+    steered.transformer.h[9].output[:, -1, :] = 0
 
-print([round(n.item(), 1) for n in norms])
-```
-
-Sessions matter most **remotely**, where a session is one job instead of N — see
-the [remote guide](remote.md).
-
-## model.edit() — interventions that persist
-
-An edit captures a block and replays it on every future run of that model.
-
-Non-in-place (default) stores the edit on a shallow copy, leaving the original
-clean — the two share weights, so this costs nothing:
-
-```python
-with model.edit() as (tracer, edited):
-    edited.transformer.h[5].output[:] = 0
-
-with edited.trace(prompt):
-    patched = edited.output.logits[0, -1].argmax().save()
+with steered.trace(prompt):
+    changed = steered.output.logits[0, -1].argmax().save()
 with model.trace(prompt):
-    original = model.output.logits[0, -1].argmax().save()
+    same = model.output.logits[0, -1].argmax().save()
 
-print(model.tokenizer.decode(patched), "|", model.tokenizer.decode(original))
+assert int(changed) != int(original) and int(same) == int(original)
 ```
 
-In-place edits change the model everyone holds:
-
-```python
-with model.edit(inplace=True):
-    model.transformer.h[5].output[:, -1, :] += 2.0
-
-with model.trace(prompt):
-    steered = model.output.logits[0, -1].argmax().save()
-
-print(model.tokenizer.decode(steered))
-
-model.clear_edits()          # remove them again
-```
-
-Edits stack in registration order and run **before** your invokes on each trace.
-A plain edit applies at the location's first occurrence; to re-apply it at every
-generation step, put it under `tracer.iter`:
+`model.edit(inplace=True)` stores it on the model itself, for everything that
+holds the model, until `model.clear_edits()`:
 
 ```python
 with model.edit(inplace=True) as tracer:
-    for _ in tracer.iter[:]:
-        model.transformer.h[5].output[:, -1, :] += 2.0
+    for _ in tracer.iter[:]:                       # every generation step, not just the first
+        model.transformer.h[9].output[:, -1, :] = 0
 
-with model.generate(prompt, max_new_tokens=3) as tracer:
+with model.generate(prompt, max_new_tokens=3, do_sample=False) as tracer:
     ids = tracer.result.save()
 
-print(model.tokenizer.decode(ids[0]))
 model.clear_edits()
+print(model.tokenizer.decode(ids[0]))
 ```
 
-Use edits for: always-on steering vectors, permanently ablated heads, attaching an
-SAE into the forward path (see
-[modules-and-architectures.md](modules-and-architectures.md)). Use a plain trace
-for one-off interventions — an edit you forget to clear will silently contaminate
-every later experiment.
-
-## Conditionals and loops
-
-Ordinary Python works inside a trace body; you are operating on real tensors in a
-worker greenlet. Two contexts restrict it: `model.scan()` (fake tensors — branch on
-shapes only, not values) and remote traces (the body is serialized, so helpers from
-your own files need `nnsight.register(...)`).
+- **A plain edit fires at each location's first occurrence**, which under
+  `generate` is the prompt pass alone. Put the body under `tracer.iter[:]` to
+  apply it at every step. Every later run then ends with the `UserWarning: ...
+  was never reached` of an open loop; that is expected here.
+- Edits stack in the order they were stored and run before the trace's own
+  invokes. An in-place edit you forget to clear changes every later experiment.
+- **An edit belongs to the envoy it was stored on.** `model.transformer.h[9].edit(
+  inplace=True)` does nothing when you trace `model`, and `model.clear_edits()`
+  does not remove it. Store edits on the model and name the layer inside.
+- **An edit applies through nnsight, not to the module.** `trace`, `generate`,
+  `pipe` and `model.trace(**ids, trace=False)` replay it. A direct call on the
+  wrapped module (`model(**ids)`, or anything holding `model._module`, such as a
+  HuggingFace `Trainer`) runs the unedited model:
 
 ```python
-with model.trace(prompt):
-    resid = model.transformer.h[6].output
-    if resid[:, -1].norm() > 100:            # real tensor, real branch
-        model.transformer.h[6].output[:, -1, :] *= 0.5
-    logits = model.output.logits.save()
+ids = model.tokenizer(prompt, return_tensors="pt").to(model.device)
 
-print(logits.shape)
+with model.edit(inplace=True):
+    model.transformer.h[9].output[:] = 0
+
+through_trace = int(model.trace(**ids, trace=False).logits[0, -1].argmax())
+direct_call = int(model(**ids).logits[0, -1].argmax())
+model.clear_edits()
+
+assert through_trace != direct_call and direct_call == int(original)
 ```
 
-One syntactic restriction: a trace body cannot **start** with `try:` — nnsight
-intercepts the body at its first line, and a `try` there is the one statement
-Python gives it no way back out of. Put any statement above it, or the `try`
-outside the `with`.
-
-## Related
-
-- [batching.md](batching.md) — the skip-covers-every-row rule
-- [caching-and-scan.md](caching-and-scan.md) — cache + skip for layer reuse
-- [execution-model.md](execution-model.md)
+  For a change every caller sees, edit the weights:
+  [model-editing-and-lora](model-editing-and-lora.md).
+- Edits travel with a remote request, so an edited model can be traced with
+  `remote=True`.
+- Attaching a module and reading its internals needs an edit plus `hook=True`:
+  [modules-and-architectures](modules-and-architectures.md#attaching-a-module).

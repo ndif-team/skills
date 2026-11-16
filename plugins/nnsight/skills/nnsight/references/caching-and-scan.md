@@ -1,201 +1,88 @@
-# Caching Activations, and Scanning for Shapes
+# Caching Many Modules, and Scanning for Shapes
 
-Two tools that remove most boilerplate from an interpretability script:
-`tracer.cache()` grabs many modules at once, `model.scan()` tells you shapes
-without running the model.
+`tracer.cache()` records many modules in one trace with no ordering to respect.
+`model.scan()` gives shapes without running the model or loading its weights.
 
 ```python
 import torch
 import nnsight
 from nnsight import TransformersModel
 
-model = TransformersModel("openai-community/gpt2", dispatch=True)
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
 prompt = "The Eiffel Tower is in the city of"
 ```
 
 ## tracer.cache()
 
-`tracer.cache()` records many modules without a save per module — the
-alternative to a loop of `.save()`s inside one trace:
+Open it first thing in the trace and name the modules. An unfiltered cache
+records every module in the model:
 
 ```python
 with model.trace(prompt) as tracer:
-    cache = tracer.cache()
+    cache = tracer.cache(modules=[block.mlp for block in model.transformer.h])
 
-print(cache["model.transformer.h.0"].output.shape)     # by path
-print(cache.transformer.h[0].output.shape)             # or by navigation
-print(len(cache.keys()))
+mlp3 = cache["model.transformer.h.3.mlp"].output        # by path
+assert mlp3 is cache.transformer.h[3].mlp.output         # or by navigation
+assert tuple(mlp3.shape) == (1, 10, 768) and not mlp3.requires_grad
+assert len(cache.keys()) == 12
 ```
 
-Restrict it to what you need — caching every module of a large model is a lot of
-memory:
+`modules=` takes envoys or path strings. The other arguments, with their
+defaults: `device=torch.device("cpu")` (`None` leaves tensors where they are),
+`dtype=None`, `detach=True`, `include_output=True`, `include_inputs=False`
+(set it to read `entry.input` / `entry.inputs`).
 
-```python
-with model.trace(prompt) as tracer:
-    cache = tracer.cache(modules=[model.transformer.h[0], model.transformer.h[5], "model.lm_head"])
-
-print(sorted(cache.keys()))
-```
-
-Storage options — captured tensors land on CPU, detached, by default:
-
-```python
-with model.trace(prompt) as tracer:
-    cache = tracer.cache(
-        modules=[model.transformer.h[-1]],
-        device=torch.device("cpu"),   # None keeps them where they are
-        dtype=torch.float32,          # optional cast
-        detach=True,
-        include_output=True,
-        include_inputs=True,          # .inputs is None unless you ask
-    )
-
-entry = cache["model.transformer.h.11"]
-print(entry.output.shape, entry.input.shape)
-```
-
-### What the cache returns depends on how many times a module ran
-
-One visit gives the value; several visits give a **list**:
-
-```python
-with model.generate(prompt, max_new_tokens=3) as tracer:
-    cache = tracer.cache(modules=[model.transformer.h[-1]])
-
-entry = cache["model.transformer.h.11"]
-print(len(entry), isinstance(entry.output, list))     # 3 True
-print(entry.output[0].shape, entry.output[1].shape)   # prefill, then one token
-```
-
-This makes the cache the easiest way to collect activations across generation
-steps — no per-step `.save()` calls.
-
-### Cache rules
-
-| Rule | Why it bites |
+| Rule | Consequence |
 |---|---|
-| Open the cache before you read or write any activation | Opening one afterwards raises `ValueError: tracer.cache() must be declared before reading or modifying a model value` |
-| It must be called inside a trace | It attaches to the running worker |
-| It observes **post-intervention** values | Cache + edit in the same trace records the edited value |
-| A cache opened inside an invoke sees that invoke's rows, padded to the batch's length | Not the full batch, and no mask comes with it |
-| `cache.keys()` is in reached order | Not the order you passed `modules=`; zipping the two misaligns |
-| Multiple visits → list | Don't assume a tensor when generating |
-| A module you call yourself is only recorded with `hook=True` | An attached adapter or SAE is otherwise invisible to the cache |
-
-The ordering rule is enforced, so a cache never quietly captures fewer modules
-than you asked for:
+| Open the cache before reading or writing any activation | otherwise `ValueError: tracer.cache() must be declared before reading or modifying a model value` |
+| It records values **after** the block's edits | cache and edit in one trace, and the cache holds the edited value |
+| A module that ran several times gives a **list** | under `generate`, `entry.output` is a list with one tensor per step: `(1, prompt_len, hidden)`, then `(1, 1, hidden)` |
+| `cache.keys()` is in the order the model reached them | not the order of `modules=`; do not zip the two |
+| Inside an invoke it holds that invoke's rows, padded to the batch's length | mask before reducing ([batching](batching.md#positions-shift-with-the-batch)); for the whole batch, open the cache in an empty `tracer.invoke()` |
+| A module you call yourself is recorded only with `hook=True` | an attached SAE or adapter is otherwise missing from the cache |
+| `detach=False, device=None` keeps the graph | `cache[...].output.sum().backward()` then works, and the forward graph lives as long as the cache |
 
 ```python
-with model.trace(prompt) as tracer:
-    hidden = model.transformer.h[0].output
-    cache = tracer.cache()
+with model.generate(prompt, max_new_tokens=3, min_new_tokens=3, do_sample=False) as tracer:
+    steps = tracer.cache(modules=[model.transformer.h[-1]])
+
+per_step = steps["model.transformer.h.11"].output
+assert isinstance(per_step, list) and len(per_step) == 3
+assert per_step[0].shape[1] == 10 and per_step[1].shape[1] == 1
 ```
 
-```python
-with model.trace(prompt) as tracer:
-    cache = tracer.cache(modules=[model.transformer.h[0]])
-    model.transformer.h[0].output[:] = 0
+A cache pickles without the model, so `torch.save(cache, path)` and
+`torch.load(path, weights_only=False)` work. On the loaded object use path keys;
+navigation (`cache.transformer.h[3]`) needs the model.
 
-print(cache["model.transformer.h.0"].output.abs().sum().item())   # 0.0 — post-intervention
-```
+A cache costs what a hand-written loop of saves over the same modules costs. Use
+it to avoid ordering the reads, not for speed.
 
-### A per-invoke cache is padded
+## model.scan()
 
-Inside `tracer.invoke(...)` you get that invoke's rows at the *whole batch's*
-padded length, left-padded, with no mask. Pad positions carry real values, often
-with a larger norm than the real tokens, so `out.mean(1)` can be mostly padding.
-Index from the right or mask before reducing — the mechanism is in
-[batching.md](batching.md#positions-shift-with-the-batch). It costs more here than
-in a `.save()`, because nobody eyeballs twelve layers times N invokes.
-
-To capture the whole combined batch, open the cache in an empty `tracer.invoke()`:
+`scan` runs the forward under fake tensors. Shapes and dtypes are real, values
+are not, and the model is never dispatched:
 
 ```python
-with model.trace() as tracer:
-    with tracer.invoke("the cat"): pass
-    with tracer.invoke("a much longer prompt here about many things"): pass
-    with tracer.invoke():
-        batch = tracer.cache(modules=[model.transformer.h[0]])
-
-print(batch["model.transformer.h.0"].output.shape)         # torch.Size([2, 8, 768])
-assert tuple(batch["model.transformer.h.0"].output.shape) == (2, 8, 768)
-```
-
-### detach=False makes the cache differentiable
-
-`detach` also decides whether you can call `backward()` on what you captured. With
-`device=None` so the tensors stay on the graph's device:
-
-```python
-with model.trace(prompt) as tracer:
-    grads = tracer.cache(modules=[model.transformer.h[0]], detach=False, device=None)
-
-out = grads["model.transformer.h.0"].output
-assert out.requires_grad
-out.sum().backward()
-print(model.transformer.wte.weight.grad.norm().item() > 0)   # True
-model.zero_grad(set_to_none=True)
-```
-
-That keeps the graph alive as long as the cache, so it costs what a backward pass
-costs. Leave `detach=True` for plain collection.
-
-### Cost
-
-A cache costs the same as a hand-written `.save()` loop over the same modules —
-pick it to avoid writing the loop, not for speed. Always pass `modules=`: on GPT-2,
-an unfiltered cache was about 20x slower and 30x larger than one restricted to the
-12 blocks.
-
-## model.scan() — shapes without compute
-
-`scan` runs the model under fake tensors: shapes and dtypes are real, data is not,
-no kernels run, and **the model is never dispatched**. Use it to check indexing
-before spending a forward pass — or before downloading weights at all.
-
-`scan` belongs to the wrappers that load from a repo id (`TransformersModel`,
-`DiffusionModel`, `VLLM`). A plain `NNsight(my_module)` has none — `AttributeError:
-'NNsight' object (nor its module) has attribute 'scan'` — so trace it instead.
-
-```python
-meta = TransformersModel("openai-community/gpt2")     # no dispatch=True
-print(meta.dispatched)                                # False
+meta = TransformersModel("openai-community/gpt2", task="text-generation")   # no dispatch
 
 with meta.scan(prompt):
-    hidden_size = nnsight.save(meta.transformer.h[0].output.shape[-1])
-    n_layers = nnsight.save(len(meta.transformer.h))
+    attn_kind = nnsight.save(type(meta.transformer.h[0].attn.output).__name__)
     resid_shape = nnsight.save(tuple(meta.transformer.h[-1].output.shape))
 
-print(hidden_size, n_layers, resid_shape)             # 768 12 (1, 10, 768)
-print(meta.dispatched)                                # still False
+assert resid_shape == (1, 10, 768) and attn_kind == "tuple"
+assert not meta.dispatched
 ```
 
-Scan is a tracing context like any other: `.save()` is still required, module
-access is still in forward order, and `tracer.invoke` / `tracer.cache` still work.
+It is a tracing context like any other: saves, forward order and invokes apply.
 
-**You cannot branch on fake data.** Shapes are fine; values are not:
+- **Shapes only.** Branching on a value (`if x.mean() > 0:`) raises
+  `GuardOnDataDependentSymNode: Could not guard on data-dependent expression`.
+- `scan` belongs to the classes that load from a repo id. A plain
+  `NNsight(module)` has none (`AttributeError: 'NNsight' object (nor its module)
+  has attribute 'scan'`), and `VLLM` refuses it. Trace an input there.
+- Some operations have no fake-tensor kernel and some vision-language
+  preprocessing takes a size from tensor data. When `scan` raises on a model
+  that traces fine, use a real trace.
 
-```python
-with meta.scan(prompt):
-    if meta.transformer.h[0].output.mean() > 0:       # data-dependent — raises
-        pass
-```
-
-Use scan for shape questions and a real trace for value questions. Some ops have
-no fake/meta kernel and will raise under scan even though they run fine for real —
-move those out of the scan block.
-
-## Choosing between them
-
-| You want | Use |
-|---|---|
-| One value from one module | `module.output.save()` |
-| The same value from many modules | a loop inside one trace, saving a list |
-| Everything, unknown names, or across generation steps | `tracer.cache()` |
-| Shapes, no compute, possibly no weights | `model.scan()` |
-
-## Related
-
-- [access-and-modify.md](access-and-modify.md)
-- [batching.md](batching.md) — many inputs in the same pass
-- [execution-model.md](execution-model.md) — `.save()` semantics
+`scripts/inspect_model.py --prompt` is a scan over every block child.

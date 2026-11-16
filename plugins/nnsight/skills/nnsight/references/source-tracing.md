@@ -1,26 +1,26 @@
-# Source Tracing — Values Inside a Forward
+# Source Tracing: Values Inside a Forward
 
-`.output` and `.input` only reach values at module boundaries. When the value you
-want is computed *inside* a `forward` and never returned — attention
-probabilities, a pre-activation, an intermediate projection — use `.source`.
-
-nnsight rewrites the module's forward so every call site *and every assignment*
-becomes hookable, with the same `.input` / `.output` / `.skip` interface.
+`.output` and `.input` reach values at module boundaries. For a value computed
+inside a `forward` and never returned (attention scores, a pre-activation, an
+intermediate projection) use `.source`: every call and every assignment in the
+forward becomes a location with the same `.output` / `.input` / `.inputs` /
+`.skip` interface as a module.
 
 ```python
 import torch
 import nnsight
 from nnsight import TransformersModel
 
-model = TransformersModel("openai-community/gpt2", dispatch=True,
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True,
                           attn_implementation="eager")
 prompt = "The cat sat on the"
 ```
 
-## Discovering operations
+## Find the operation: print the source
 
-`print(module.source)` renders the forward with each call site and assignment labelled. It works
-**outside** a trace, so use it to explore before writing anything:
+`print(module.source)` works outside a trace and lists the forward with a label
+on every operation. **Read names off this listing; never guess them**, they
+change with the model class and the transformers version.
 
 ```python
 print(model.transformer.h[0].mlp.source)
@@ -32,214 +32,91 @@ print(model.transformer.h[0].mlp.source)
  hidden_states_0 ->  +     ...
  self_act_0      ->  1     hidden_states = self.act(hidden_states)
  hidden_states_1 ->  +     ...
- self_c_proj_0   ->  2     hidden_states = self.c_proj(hidden_states)
- hidden_states_2 ->  +     ...
- self_dropout_0  ->  3     hidden_states = self.dropout(hidden_states)
- hidden_states_3 ->  +     ...
-                     4     return hidden_states
 ```
 
-Names are the dotted callee joined by `_`, plus an occurrence index in execution
-order: `self.act(...)` → `self_act_0`, `torch.relu(...)` → `torch_relu_0`, a second
-`relu` → `torch_relu_1`. Every assignment is an operation too, named after its
-target: `hidden_states = self.act(hidden_states)` is `hidden_states_1`, and its
-`.output` is the assigned value. Calls and assignments share one counter per name,
-so where a forward binds a name and then calls it, the binding is `_0` and the call
-`_1` — GPT-2's attention call is `attention_interface_1`.
-
-**Do not guess these names** — print the source and read the label off the line.
-Every label here was read off `transformers` 5.15; a version that renames an
-internal variable renames its operation. An assignment's `.output` need not be a
-tensor: `attention_interface_0` binds the *implementation function*,
-`hidden_shape_0` a shape tuple.
-
-## Reading and replacing an operation
+A call is named by its dotted callee joined with `_` plus an occurrence index
+(`self.act(...)` is `self_act_0`, a second `torch.relu` is `torch_relu_1`). An
+assignment is named after its target (`hidden_states_1`), and its `.output` is the
+assigned value, which need not be a tensor. Calls and assignments share one
+counter per name.
 
 ```python
 with model.trace(prompt):
-    post_gelu = model.transformer.h[0].mlp.source.self_act_0.output.save()
-    model.transformer.h[0].mlp.source.self_c_proj_0.output[:] = 0    # ablate the write
+    mlp = model.transformer.h[0].mlp
+    post_gelu = mlp.source.self_act_0.output.save()
+    mlp.source.self_c_proj_0.output[:] = 0            # ablate the write
     logits = model.output.logits.save()
 
-# GPT-2's MLP is 4x hidden, and this is the value after the GELU.
 assert post_gelu.shape[-1] == 4 * model.config.n_embd
-assert (post_gelu > 0).any() and (post_gelu < 0).any()
-print(post_gelu.shape)
 ```
 
-`.input` is the first argument, `.inputs` is `(args, kwargs)`, and `.skip(value)`
-bypasses the call entirely — same semantics as a module.
+## Attention scores and probabilities
 
-## Values that are not a call's result
-
-A product, a slice, a state carried through a loop — anything a forward *assigns*
-but never returns from a call — is reachable by the name the forward gives it.
-Inside GPT-2's eager attention, the pre-softmax scores are `attn_weights_0`
-(`q @ k^T * scale`) and the probabilities `attn_weights_2` (after the mask and
-softmax):
+Load with `attn_implementation="eager"`: the default kernel never builds the
+probability matrix. The attention module's forward calls the eager attention
+function (`attention_interface_1` here); drill into that call with a second
+`.source`, inside the trace, to reach what it assigns:
 
 ```python
-with model.trace(prompt):
-    inner = model.transformer.h[0].attn.source.attention_interface_1.source
-    scores = inner.attn_weights_0.output.save()
-    probs = inner.attn_weights_2.output.save()
+attn = model.transformer.h[0].attn
+_ = attn.source                                   # instrument once, before the trace (see Limits)
 
-assert scores.shape == probs.shape                       # [batch, heads, q, k]
+with model.trace(prompt):
+    inner = attn.source.attention_interface_1.source          # ask for the drill first
+    scores = inner.attn_weights_0.output.save()               # q @ k^T * scale, before the mask
+    probs = inner.attn_weights_2.output.save()                # after the mask and the softmax
+    out, weights = attn.source.attention_interface_1.output   # then the call's own result
+    returned = weights.save()
+
+assert tuple(probs.shape) == (1, model.config.n_head, 5, 5)                   # batch, heads, query, key
 assert torch.allclose(probs.sum(-1), torch.ones_like(probs.sum(-1)), atol=1e-4)
-assert not torch.allclose(scores.sum(-1), torch.ones_like(scores.sum(-1)))  # pre-softmax
-print(scores.shape, probs[0, 0].sum(-1))
+assert not torch.allclose(scores.sum(-1), torch.ones_like(scores.sum(-1)))    # pre-softmax
+assert torch.equal(returned, probs)
 ```
 
-An assignment inside a Python loop is one location that fires once per iteration,
-so `tracer.iter[k]` selects the k-th iteration; the loop's bound is usually a call
-in the same source (`range_0`, `nonzero_0`), so `len(op.output)` gives the count
-in-trace.
+Llama-style models call the same function with the same assignment names:
+`model.model.layers[i].self_attn.source.attention_interface_1.source` has
+`attn_weights_0` (scaled scores), `attn_weights_1` (mask added), `attn_weights_2`
+(softmax). The scores are taken before the causal mask is added, so future keys
+hold real numbers there.
 
-## The main use: attention patterns
+When all you need is the probabilities, `attn.output[1]` is the same tensor with
+no `.source` at all: [attention-analysis](attention-analysis.md).
 
-The attention module returns the value-weighted result, not the probability
-matrix. The probabilities come from the attention-interface call:
+Every layer in one trace:
 
 ```python
 with model.trace(prompt):
-    # Bind the save itself — unpacking inside the block would name the elements,
-    # and a save comes back keyed by the name bound to the saved object.
-    attn = model.transformer.h[0].attn.source.attention_interface_1.output.save()
+    patterns = nnsight.save([block.attn.source.attention_interface_1.output[1]
+                             for block in model.transformer.h])
 
-attn_out, attn_weights = attn
-n_tokens = len(model.tokenizer(prompt)["input_ids"])
-assert attn_weights.shape == (1, model.config.n_head, n_tokens, n_tokens)
-assert torch.allclose(attn_weights.sum(-1), torch.ones_like(attn_weights.sum(-1)), atol=1e-4)
-print(attn_weights.shape)            # [batch, heads, q_seq, k_seq]
+assert len(patterns) == model.config.n_layer and not torch.equal(patterns[0], patterns[-1])
 ```
 
-**You must load the model with `attn_implementation="eager"`.** The default `sdpa`
-kernel never materializes the probability matrix and returns `None` for the
-weights.
+## Loops and generation
 
-All layers in one pass. Instrument every attention *before* opening the trace: the
-first `.source` on a module has to land before that module's forward runs, and inside
-a sweep it would not for any layer after the first read. A bare attribute access does
-it, with no forward pass:
-
-```python
-for block in model.transformer.h:
-    _ = block.attn.source                  # instrument now, once per module
-
-with model.trace(prompt):
-    patterns = nnsight.save([])
-    for block in model.transformer.h:
-        _, weights = block.attn.source.attention_interface_1.output
-        patterns.append(weights)
-
-assert len(patterns) == model.config.n_layer
-assert all(p.shape == patterns[0].shape for p in patterns)
-assert not torch.equal(patterns[0], patterns[-1])     # real per-layer patterns
-print(len(patterns), patterns[0].shape)
-```
-
-Per-head metrics on these patterns (previous-token, induction, sink, entropy) are
-in the [attention-analysis guide](attention-analysis.md).
-
-## Drilling deeper
-
-An operation that calls a plain Python function can itself be traced — chain
-`.source` again. This only works **inside** a trace, because the callee is
-resolved from the live value at run time:
-
-```python
-with model.trace(prompt):
-    inner = (model.transformer.h[0].attn
-             .source.attention_interface_1
-             .source.attn_output_transpose_0.output.save())
-
-# The per-head attention output, transposed back to [batch, seq, heads, head_dim].
-assert inner.shape[-1] == model.config.n_embd // model.config.n_head
-assert inner.shape[-2] == model.config.n_head
-print(inner.shape)
-```
-
-Ask for the drill **before** the operation's own `.output`: `op.source` is served
-just as the call is about to run, one step earlier than the value it returns.
-
-A drill needs Python source at the other end, and one common case has none — a
-function that refers to its own name in its body, which every
-`torch.nn.functional` entry point does to reach the torch-function dispatcher. So
-`nn_functional_softmax_0.source` raises `KeyError: 'softmax'`. Its `.output` works,
-and for softmax that is the tensor you were after anyway.
-
-## Iteration
-
-Source ops work with `tracer.iter[...]`, and their counter is **per invocation**,
-not per forward pass — an op inside a loop within one forward fires many times in
-one step:
-
-```python
-with model.generate(prompt, max_new_tokens=3) as tracer:
-    per_step = nnsight.save([])
-    for step in tracer.iter[:3]:
-        _, weights = model.transformer.h[0].attn.source.attention_interface_1.output
-        per_step.append(weights.shape[-1])
-
-assert len(per_step) == 3
-assert per_step == sorted(per_step) and per_step[0] < per_step[-1]   # key length grows
-print(per_step)
-```
-
-Read ops before the module's own `.output` in the loop body — in the wrong order
-the op can silently bind to the next step; see
-[generation.md](generation.md#a-wrong-order-source-read-lands-on-the-next-step).
+An operation inside a Python loop is one location that fires once per iteration,
+so `tracer.iter[k]` selects the k-th. Under `model.generate` its counter runs per
+call, not per step. In a generation loop read an operation *before* the output of
+the module that contains it; after it, the read binds to the next step and the
+list comes back one short
+([generation](generation.md#source-operations-inside-a-loop)).
 
 ## Limits
 
-| Limit | What to do |
+| Situation | What happens |
 |---|---|
-| The op calls a **submodule** | Refused (`SourceNotAvailable`) — use that submodule's own `.source` |
-| The op calls a **builtin / C function** | No Python source exists; not drillable |
-| The op calls a function that **names itself** (`F.softmax` and friends) | Not drillable — `KeyError` on the function's own name. Read its `.output` instead |
-| The `forward` is **decorated** | Instrumented: a wrapper that calls the function is peeled and rebuilt; a dispatcher that picks an implementation at run time shows the dispatch — drill into that op for what ran |
-| The op is an **assignment** | No callee — `.source` on it raises `SourceNotAvailable` |
-| Recursive `.source` outside a trace | Raises; open a trace first |
-| Recursive `.source` on NDIF | may raise `SourceNotAvailable` (arrives as `RemoteError`); one level works, so read the outer op's `.output` instead |
-| Ops requested out of execution order | `OutOfOrderError`, same as modules |
-| **First** `.source` on a module, after something else in the block was read | `OutOfOrderError` (inside a `tracer.iter` loop: a silent next-step bind instead). Instrumenting rewrites the forward, so do `_ = module.source` outside the trace, once per module |
-| `op.source` asked for after `op.output` on the same op | `OutOfOrderError` on `...{op}.fn` — the drill is served one step earlier; ask for it first |
-| The op is on a **branch this config never takes** | `OutOfOrderError`, worded as though you were late. See below |
+| The **first** `.source` on a module is asked after that module's forward has begun: a block or the model itself, once any of its children was read | `OutOfOrderError: ... already ran past it` on an operation that has not run yet. Instrumenting rewrites the forward, so do `_ = module.source` before the trace |
+| `op.source` asked after `op.output` on the same operation | `OutOfOrderError` on `...{op}.fn`; the drill is served just before the call runs, so ask for it first |
+| An operation on a branch this model never takes | `OutOfOrderError`, worded as though you were late. The listing shows every branch; GPT-2's `transpose_0` is the cross-attention key transpose that never runs, `transpose_2` the one that does. Look for the live twin further down |
+| Operations asked out of execution order | `OutOfOrderError`, as for modules |
+| The operation calls a **submodule** | `SourceNotAvailable`; use that submodule's own `.source` |
+| The operation is an **assignment**, a builtin or C function | no source to drill into; read its `.output` |
+| The function names itself in its body (every `torch.nn.functional` entry point) | `nn_functional_softmax_0.source` raises `KeyError: 'softmax'`; read its `.output` |
+| Recursive `.source` outside a trace | raises; the callee is resolved from the live value |
+| Recursive `.source` on NDIF | may raise `SourceNotAvailable`; read the outer operation's `.output` |
 
-## Operations on branches that never run
-
-`print(module.source)` and `.names` list every operation in the `forward`, including
-those under an `if` this config makes false. Asking for one fails with the
-*ordering* error, pointing at a problem you do not have. GPT-2's attention lists 50
-operations and runs 28: `transpose_0` is the dead cross-attention key transpose,
-`transpose_2` the one GPT-2 performs.
-
-```python
-with model.trace(prompt):
-    dead = model.transformer.h[0].attn.source.transpose_0.output.save()
-# OutOfOrderError: '...attn.source.transpose_0.output.i0' was requested but the
-#                  model already ran past it
-```
-
-```python
-with model.trace(prompt):
-    key = model.transformer.h[0].attn.source.transpose_2.output.save()
-
-head_dim = model.config.n_embd // model.config.n_head
-assert key.shape == (1, model.config.n_head, len(model.tokenizer(prompt)["input_ids"]), head_dim)
-print(key.shape)     # [batch, heads, seq, head_dim]
-```
-
-When a listed operation reports as run past, read the listing around it before
-suspecting your request order: an operation under a false condition
-(`is_cross_attention`, an `is_updated` cache hit, `use_parallel_residual`) is dead,
-and its live twin is usually further down with the next occurrence index.
-
-Prefer a real submodule when one exposes the value (`mlp.output` beats
-`source.self_c_proj_0.output`) — it is cheaper and stable across library versions.
-
-## Related
-
-- [access-and-modify.md](access-and-modify.md)
-- [modules-and-architectures.md](modules-and-architectures.md#adding-your-own-served-value-eproperty-envoys) — a writable per-head view of `attn.c_proj`'s input, without `.source`
-- [execution-model.md](execution-model.md)
+Prefer a real submodule when one exposes the value (`mlp.output` over
+`source.self_c_proj_0.output`): it is cheaper and survives a transformers upgrade.
+For a writable per-head view of the projection input with no `.source`, see
+[modules-and-architectures](modules-and-architectures.md#custom-values-eproperty-and-envoys).
