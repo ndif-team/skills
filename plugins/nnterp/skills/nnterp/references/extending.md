@@ -129,9 +129,9 @@ ENVOYS = {<X>DecoderLayer: Layer, <X>Attention: Attention, <X>MLP: Mlp}
 - **A block hands its children what their modules lack**, in `Layer.__init__` after
   `super().__init__` (Gemma-4: `self.mlp.router = self.router`, the mixture's router being
   the block's child). Handed envoys survive the weight swap. Runnable on GPT-2:
-  [references/descriptors.md](extending-descriptors.md).
+  [extending-descriptors.md](extending-descriptors.md).
 
-Shipped modules quoted, the rules, the test file: [references/family-module-recipe.md](extending-family-module-recipe.md).
+Shipped modules quoted, the rules, the test file: [extending-family-module-recipe.md](extending-family-module-recipe.md).
 
 ### Sizes and the logit lens
 
@@ -178,7 +178,7 @@ Keep the name, the layout annotation and the description; change only the locati
 | scales a sublayer's output when adding it | preprocess `* multiplier`, postprocess `/ multiplier` + `rewrap` | granite.py |
 | holds the value flat over tokens `[batch*seq, ...]` | `TokenEProperty(...)` with the base's layout | hunyuan_v1_moe.py `router_logits` |
 
-Each descriptor's arguments, a run of each, and its traps: [references/descriptors.md](extending-descriptors.md).
+Each descriptor's arguments, a run of each, and its traps: [extending-descriptors.md](extending-descriptors.md).
 
 ## Finding the operation names
 
@@ -213,7 +213,7 @@ The base `Attention` pins `attention_scores` at `nn_functional_softmax_0`'s inpu
 call's output element 0, q/k/v at its `inputs` 1, 2, 3. A wrong name raises
 `SourceNotAvailable` listing every operation; a name under a branch this config never
 takes fails as `OutOfOrderError`. Naming rules, the SmolLM2 listing, dead branches, read
-order: [references/finding-source-ops.md](extending-finding-source-ops.md).
+order: [extending-finding-source-ops.md](extending-finding-source-ops.md).
 
 ## A value of your own
 
@@ -317,7 +317,7 @@ assert vlm.get("model.language_model.layers.0") is vlm.layers[0]        # the wr
 ```
 
 The rules, the per-tower exceptions, `ROOT_SCATTER` and the suite's attributes:
-[references/family-module-recipe.md](extending-family-module-recipe.md#a-vision-tower-in-a-family).
+[extending-family-module-recipe.md](extending-family-module-recipe.md#a-vision-tower-in-a-family).
 
 ## Registering a family from outside the package
 
@@ -397,15 +397,15 @@ with `HF_HUB_OFFLINE=1 pytest tests/families/test_<model_type>.py`. It checks th
 aliases, the envoy classes, `support()` against what reads, the contribution identity,
 every source value on every attention block, root and per-module sizes against the
 weights, `project_on_vocab(layers[-1].layer_output) == logits`, and every value against
-its layout. Attributes and test groups: [references/family-module-recipe.md](extending-family-module-recipe.md).
+its layout. Attributes and test groups: [extending-family-module-recipe.md](extending-family-module-recipe.md).
 
 ## References
 
 | File | Covers |
 |---|---|
-| [references/family-module-recipe.md](extending-family-module-recipe.md) | `known()`, `UnsupportedFamily`; llama, gpt2, gemma2, bloom, falcon quoted from source; MoE, recurrent-mixer, class-key and `project_on_vocab` excerpts; `RENAME`/`ENVOYS` rules; a vision tower in a family (tower keys, `ImageScatter`, `ROOT_SCATTER`, `no_tower_run`, per-tower exceptions, `VisionSuite`); `FamilySuite` |
-| [references/descriptors.md](extending-descriptors.md) | `EProperty` paths, `select`, `unavailable`, `sourced`, `DerivedEProperty`, `TokenEProperty`, handing values down, per-module sizes, `StandardizedProperty`/`StandardizedCapability`, helpers |
-| [references/finding-source-ops.md](extending-finding-source-ops.md) | operation naming, the GPT-2 and SmolLM2 listings, read order and the `.fn` error, dead branches, what cannot be drilled, what a release moves |
+| [extending-family-module-recipe.md](extending-family-module-recipe.md) | `known()`, `UnsupportedFamily`; llama, gpt2, gemma2, bloom, falcon quoted from source; MoE, recurrent-mixer, class-key and `project_on_vocab` excerpts; `RENAME`/`ENVOYS` rules; a vision tower in a family (tower keys, `ImageScatter`, `ROOT_SCATTER`, `no_tower_run`, per-tower exceptions, `VisionSuite`); `FamilySuite` |
+| [extending-descriptors.md](extending-descriptors.md) | `EProperty` paths, `select`, `unavailable`, `sourced`, `DerivedEProperty`, `TokenEProperty`, handing values down, per-module sizes, `StandardizedProperty`/`StandardizedCapability`, helpers |
+| [extending-finding-source-ops.md](extending-finding-source-ops.md) | operation naming, the GPT-2 and SmolLM2 listings, read order and the `.fn` error, dead branches, what cannot be drilled, what a release moves |
 
 ## Related guides
 
