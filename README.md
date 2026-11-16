@@ -86,9 +86,9 @@ its description. Describe the task and the agent does the rest:
 - "Run this experiment on Llama-70B through NDIF without downloading 3 GB of logits"
 - "Deploy Llama-3.1-8B on my own NDIF and pin it"
 
-Agents are more likely to skip a skill when a request does not use the words in
-its description. In a project that works on model internals, add this to the
-project's `AGENTS.md` or `CLAUDE.md` so that the choice is not left to chance:
+The descriptions are written so that an agent loads the right skill without being
+told to. If yours skips them on the kind of request you make, add this to the
+project's `AGENTS.md` or `CLAUDE.md`:
 
 ```markdown
 ## Interpretability work
