@@ -129,9 +129,9 @@ landed: GPT-2 adds no BOS, so position 0 is `When`.
 **Ablation** changes what `patched` writes: `{"op": "swap", "with": 0.0}` for zero, or `{"op": "swap", "with":
 "mean"}` with the step `"mean": {"kind": "op", "op": "mean", "of": "clean.v_self"}` written after `clean`. A
 `mean` with no `over` removes the rows and positions, pooling every token read once, and the vector left
-broadcasts over both. The self-swap stays the null.
-Averaged over the rows, the logit difference is -2.80 clean, +0.26 under zero and -2.05 under the mean: a zero
-vector is a point no forward reaches, so report mean (or resample) ablation and keep zero as the extreme.
+broadcasts over both. The self-swap stays the null. Averaged over the rows, the logit difference (the other
+name less the answer) is -2.80 clean, +0.26 under zero and -2.05 under the mean: a zero vector is a point no
+forward reaches, so report mean (or resample) ablation and keep zero as the extreme.
 
 **A sweep** runs the document at each value on one model load: `"layers": {"sweep": [0, 1, 2, 3, 4, 5, 6, 7, 8,
 9, 10, 11]}` on `resid` patches each layer in turn. The read and the write share the swept site, so they pair
@@ -154,7 +154,8 @@ different interventions into one forward, which is the nnsight skill's ground. A
 
 **The logit lens** reads what each layer predicts. `readout` projects a residual-stream value through the
 model's own final norm, head and whatever follows the head (Gemma-2's logit softcap), and any metric scores the
-result as it scores logits. `"layers": ":"` reads every block in one forward. `documents/ioi_lens.json` is `ioi_patch.json` with these `sites`, `steps` and `saves`:
+result as it scores logits. `"layers": ":"` reads every block in one forward. `documents/ioi_lens.json` is
+`ioi_patch.json` with these `sites`, `steps` and `saves`:
 
 ```json
 {
@@ -354,7 +355,7 @@ swept.table("mean_patched")[8]                       # {'at': {'layers': 8}, 'va
 - **What each layer predicts**, beyond the lens above: the model's top tokens, a sublayer's lens, a tuned lens: [lens](references/lens.md).
 - **Where heads look**: induction and previous-token heads, one head's pattern, entropy, queries and keys: [attention](references/attention.md).
 - **Steering with a direction**: the dose, random-direction controls, layer grids, steering a generation: [steering](references/steering.md).
-- **Generating text and scoring it**: did it say the answer, where and how confidently, the text after a marker, reasoning length, chats, teacher forcing an answer of several tokens: [generation](references/generation.md).
+- **Generating text and scoring it**: did it say the answer, where and how confidently, the text after a marker, reasoning length, chats: [generation](references/generation.md). Scoring a fixed answer of several tokens or a whole reply: [teacher forcing](references/generation-teacher-forcing.md).
 - **Probes, SAEs, DAS, masks over heads or units, LoRA** (`featurizers`, `fit`, saved bundles): [featurizers](references/featurizers.md), then [subspaces and masks](references/featurizers-subspaces-and-masks.md), [SAEs](references/featurizers-sae.md), [probes and LoRA](references/featurizers-probes-and-lora.md), and [bundles and cached harvests](references/featurizers-bundles-and-harvests.md) to reuse one run's values in another.
 - **Datasets**: files, hub datasets, narrowing and deriving columns, answer columns, joined inputs, chats: [data](references/data.md).
 - **Reads and writes**: choosing a component, `layers` and `select`, the order entries run in, operands, reusable entries, a gradient: [sites and interventions](references/sites-and-interventions.md).

@@ -22,6 +22,7 @@ each one's layout: `[rows, pos, num_heads, key]` for the pattern and the scores,
   a `top_k` gives `values`, the pattern's own weights, where over a vocabulary it gives `probs`.
 - **Query heads and key heads counted alike.** `attention_keys` and `attention_values` are per KV head
   (`num_kv_heads`), before they are repeated across query heads: SmolLM2-135M has 9 query heads and 3 KV heads.
+  The pattern, the scores and the queries stay per query head (`num_heads`) on such a model.
 - **A stripe read as a function.** A high score says where a head looks, not what it does: test a candidate by
   [ablating](ablation.md) or [patching](patching-heads-neurons-and-paths.md) it.
 

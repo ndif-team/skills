@@ -168,7 +168,10 @@ makes the fit, its members and their users a list of points. `nnspec describe st
   "test"}}` runs the body's forwards on `test`, with its columns as targets. Where the body reads a harvest
   of `train`, as above, it is refused: score held-out rows in steps after the fit, through `fit.<name>`.
 - **The body and the evals run at the fit's own `batch_size`**, whatever `--batch-size` says; a step before
-  the fit runs at `--batch-size`.
+  the fit runs at `--batch-size`, which is the `batch size` the run's first line prints.
+- **A swept fit is one fit per point**: twelve layers crossed with two `epochs` values train 24 featurizers,
+  each with its own forwards, so the run takes the points times one fit. Harvest once before the fit where
+  the body only reads ([a fit, start to finish](#a-fit-start-to-finish)).
 - **A reduction over rows inside the body is the minibatch's statistic.** A statistic of the dataset is a
   step before the fit.
 - **`adamw` and `adam` step each parameter by about `lr`**, whatever the objective's scale; `sgd` steps by

@@ -186,6 +186,9 @@ at                                          clean_ld            ablated_ld
 - **A head can work against the answer**: without 10.7 the score rises. Zero still overstates: 11.0's zero
   costs 0.25 and its mean 0.02.
 - **A head set is a list**, `"select": {"num_heads": [6, 9]}`: both heads in one write, one point.
+- **To ablate at every position, leave `pos` out of the read and of the write.** A `mean` with no `over` then
+  pools every token of every row into one vector per head, and the null still equals the clean run where
+  the rows are one length ([pairing](positions.md#pairing-with-another-forward)).
 
 For a set of neurons beside random sets of its size from its layer, the sets are one sweep:
 
