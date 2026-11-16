@@ -1,230 +1,173 @@
 # Quantization
 
-Hold each weight in fewer bits instead of splitting the model across GPUs. The
-format goes in the dtype slot — no config to build, nothing to import.
-
-> The `fp8` row of the table below needs compute capability 8.9 or later; see
-> [`fp8` is refused below compute capability 8.9](#fp8-is-refused-below-compute-capability-89).
+Hold each weight in 4 or 8 bits by naming the format where a dtype goes. It
+needs `pip install bitsandbytes accelerate`: neither comes with nnsight, and
+without them the first quantized load raises an `ImportError` that names the
+missing one. Quantization changes the model's numbers and needs one device;
+[tensor-parallel](tensor-parallel.md) keeps the numbers and needs one GPU per
+rank.
 
 ## Loading
 
 ```python
 import torch
-from nnsight.modeling.transformers import TransformersModel
+import nnsight
+from nnsight import TransformersModel
 
-model = TransformersModel(
-    "openai-community/gpt2",
-    task="text-generation",
-    dtype="nf4",          # where you would write "bfloat16"
-    dispatch=True,
-    device=0,
-)
+model = TransformersModel("openai-community/gpt2", task="text-generation",
+                          dtype="nf4", dispatch=True)       # where "bfloat16" would go
+prompt = "The Eiffel Tower is in the city of"
 
-assert type(model.transformer.h[0].attn.c_attn._module).__name__ == "Linear4bit"
+with model.trace(prompt):
+    act = model.transformer.h[5].attn.c_attn.output.save()
+    logits = model.lm_head.output.save()
+
+c_attn = model.transformer.h[0].attn.c_attn._module
+assert type(c_attn).__name__ == "Linear4bit"                        # same path, another class
+assert act.shape == (1, 10, 2304) and act.dtype == torch.bfloat16   # activations: ordinary tensors
+assert c_attn.weight.shape == (884736, 1) and c_attn.weight.dtype == torch.uint8   # weights: packed
+print(model.tokenizer.decode(logits[0, -1].argmax()))
 ```
 
-| Name | What you get | Bytes/weight |
+```
+ Paris
+```
+
+| Name | Format | Bytes per weight |
 |---|---|---|
 | `nf4`, `int4`, `4bit` | bitsandbytes 4-bit, NF4 | 0.5 |
 | `fp4` | bitsandbytes 4-bit, FP4 | 0.5 |
 | `int8`, `8bit` | bitsandbytes LLM.int8() | 1.0 |
-| `fp8` | transformers block-wise FP8, compute capability 8.9+ | 1.0 |
+| `fp8` | transformers block-wise FP8 | 1.0 |
 
-The unqualified 4-bit names mean **NF4**, what bitsandbytes recommends; `fp4` only
-by name.
+- `fp8` needs a GPU of compute capability 8.9 or later
+  (`torch.cuda.get_device_capability()`). Below that nnsight raises `ValueError`
+  before any weights are fetched, where transformers alone would load bfloat16.
+- The bitsandbytes formats load and run on a CPU as well.
+- A `quantization_config=` of your own is passed through. Together with a
+  format name it raises.
 
-Passing your own `quantization_config=` still works, but not *together* with a
-quantization name — two answers to how the weights are held, so it raises.
+## What a trace sees
 
-Requires `pip install bitsandbytes accelerate`. Neither is a dependency of
-nnsight, so a clean install raises `ImportError` at the first quantized load.
+**The module tree is the same.** A quantized linear is another class at the same
+path, so every module reference, and a trace written for the unquantized model,
+works unchanged.
 
-### `fp8` is refused below compute capability 8.9
-
-`fp8` is transformers' own quantizer rather than bitsandbytes, and it needs a
-4090, an L40S, an H100 or later — Ampere cards (8.0, 8.6) do not qualify.
-Transformers alone would silently load bfloat16 there, at twice the width
-budgeted; nnsight instead raises `ValueError` below compute capability 8.9, before
-any weights are fetched.
-
-```python
-if torch.cuda.get_device_capability() < (8, 9):
-    try:
-        TransformersModel(
-            "openai-community/gpt2", task="text-generation", dtype="fp8",
-            dispatch=True, device=0,
-        )
-        raise AssertionError("fp8 was not refused below capability 8.9")
-    except ValueError as e:
-        assert "compute capability 8.9" in str(e)
-```
-
-## Your intervention code does not change
-
-The module tree is **identical**: a quantized linear is a different class holding
-a packed weight, but it sits at the same path with the same children, so every
-module reference, envoy and remote request lines up. Activations are ordinary
-16-bit tensors of the usual shape.
+**Activations arrive in the compute dtype**, which is `bfloat16` (`float16` for
+`int8`) whatever the checkpoint declares: gpt2 is a float32 checkpoint and the
+activation above is bfloat16, norms and LM head included. Set it with
+`compute_dtype=`:
 
 ```python
-with model.trace("The Eiffel Tower is in the city of"):
-    attn = model.transformer.h[5].attn.c_attn.output.save()
-    logits = model.lm_head.output.save()
-
-assert attn.shape == (1, 10, 2304) and attn.dtype == torch.bfloat16
-print(model.tokenizer.decode(logits[0, -1].argmax()))
-```
-
-GPT-2 is a **float32** checkpoint, yet the activation comes back `bfloat16`:
-quantizing moves the whole model to the compute dtype, norms and LM head included.
-
-**Raw weights are the exception.** A 4-bit weight really is stored packed, so
-reading one gives a `uint8` blob rather than the matrix:
-
-```python
-weight = model.transformer.h[0].attn.c_attn._module.weight
-assert weight.shape == (884736, 1) and weight.dtype == torch.uint8
-```
-
-Nothing errors; the shape is just not what a weight-space method assumes. Read
-activations, or load unquantized when the weights are the object of study.
-`sum(p.numel())` follows the storage too, reporting about half the real count.
-
-## The compute dtype
-
-Everything the format leaves alone (norms, embeddings, the LM head) and everything
-the model computes in is `bfloat16` — except **`int8`, which computes in
-`float16`**: bitsandbytes implements LLM.int8() that way and casts anything else on
-the way in, warning *once per matmul*. Override the compute dtype with
-`compute_dtype=` (or its bitsandbytes synonym `bnb_4bit_compute_dtype=`):
-
-```python
-model32 = TransformersModel(
-    "openai-community/gpt2", task="text-generation",
-    dtype="nf4", compute_dtype="float32", dispatch=True, device=0,
-)
+model32 = TransformersModel("openai-community/gpt2", task="text-generation",
+                            dtype="nf4", compute_dtype="float32", dispatch=True)
 with model32.trace("Hello"):
     out = model32.lm_head.output.save()
+
 assert out.dtype == torch.float32
 ```
 
-### `int8` gradients overflow to NaN
+**A raw `.weight` is the packed storage**, a `(N, 1)` `uint8` blob in place of
+the matrix, and nothing raises when a weight-space method reads it.
+`sum(p.numel() ...)` counts the storage too (82.0M for gpt2 at `nf4`, 124.4M
+unquantized). Read activations, or load unquantized when the weights are the
+object of study.
 
-float16's narrow exponent overflows on a backward pass over a large-magnitude
-loss. This silently kills attribution patching and every other gradient method on
-an `int8` model:
+### `int8` computes in float16, and its gradients overflow
+
+bitsandbytes implements LLM.int8() in float16. Its narrow exponent overflows on
+a backward pass from a large-magnitude metric, and every gradient method then
+returns NaN with no error. This example needs a GPU:
 
 ```python
-int8 = TransformersModel(
-    "openai-community/gpt2", task="text-generation",
-    dtype="int8", dispatch=True, device=0,
-)
+int8 = TransformersModel("openai-community/gpt2", task="text-generation",
+                         dtype="int8", dispatch=True)
 
-with int8.trace("The Eiffel Tower is in the city of"):
+with int8.trace(prompt):
     activation = int8.transformer.h[0].output
-    loss = int8.output.logits.sum()               # large magnitude
-    with loss.backward():
+    metric = int8.output.logits.sum()                 # large magnitude
+    with metric.backward():
         summed = activation.grad.save()
 
-with int8.trace("The Eiffel Tower is in the city of"):
+with int8.trace(prompt):
     activation = int8.transformer.h[0].output
-    loss = torch.log_softmax(int8.output.logits[0, -1], -1).max()
-    with loss.backward():
+    metric = torch.log_softmax(int8.output.logits[0, -1], -1).max()
+    with metric.backward():
         normalized = activation.grad.save()
 
-assert torch.isnan(summed).all()                  # every element
-assert torch.isfinite(normalized).all()           # a normalized loss survives
+assert summed.dtype == torch.float16
+assert torch.isnan(summed).all()                      # every element
+assert torch.isfinite(normalized).all()               # a log-probability survives
 ```
 
-Use a loss on a scale float16 can hold, or `nf4`, which computes in bfloat16 and
-gives a finite gradient for either loss.
+Use a metric on a scale float16 can hold, or `nf4`, which computes in bfloat16
+and gives a finite gradient for both. On a CPU a backward pass through an `int8`
+model raises `RuntimeError: one of the variables needed for gradient computation
+has been modified by an inplace operation`, whatever the metric.
 
 ## What it costs
 
-Llama-3.2-1B, over the 86 next-token distributions of a fixed passage. **KL** is
-against the same model at `bfloat16` and **top-1 agreement** is how often the two
-pick the same next token:
+Measured on Llama-3.2-1B against the same model at bfloat16, over the 87
+next-token distributions of one passage:
 
-| dtype | weights | vs bf16 | mean KL | top-1 agreement | forward |
-|---|---|---|---|---|---|
-| `bfloat16` | 2.30 GB | 1.00x | — | — | 14–18 ms |
-| `int8` | 1.40 GB | 0.61x | 0.011 | 95.3% | 50–67 ms |
-| `nf4` | 1.00 GB | 0.43x | 0.143 | 87.1% | 20–24 ms |
-| `fp4` | 1.00 GB | 0.43x | 0.182 | 82.4% | — |
+- **4-bit is a different model.** `nf4` picks a different next token at 20% of
+  the positions and `fp4` at 25%. Do not compare activations across formats, and
+  do not report a 4-bit result as the checkpoint's.
+- **`int8` is the accurate format and the slow one**: it agrees at 94% of the
+  positions and takes 4.8 times the forward time, where `nf4` takes 1.2 times.
+- **It saves less than the arithmetic says.** Embeddings, norms and the LM head
+  stay 16-bit, so `nf4` takes 1.01 GB where 0.5 bytes per weight predicts 0.62,
+  and `int8` 1.50 where 1.24. Measure with `model._module.get_memory_footprint()`.
 
-**4-bit changes the argmax next token more than one time in ten.** Treat a
-quantized run as a *different model*, not a cheaper copy — do not compare
-activations across widths, and do not report a 4-bit result as the checkpoint's.
-A hidden-state norm hides this: it moves about 3% at `nf4`. The damage shrinks
-with size (Llama-3.1-8B: `nf4` 92.9% agreement).
+**A mixture-of-experts model barely shrinks.** bitsandbytes swaps `nn.Linear`
+and nothing else, and transformers holds the experts as stacked 3-D parameters
+on one module. At `nf4` a Qwen3-MoE's `q_proj` becomes `Linear4bit` while the
+experts' `gate_up_proj` and `down_proj` stay bfloat16. For an MoE that does not
+fit, shard it: [tensor-parallel](tensor-parallel.md).
 
-**`int8` is the accurate format and the slow one** — about 3x bfloat16's forward,
-which for a sweep over hundreds of forwards usually decides it in `nf4`'s favor.
+## A checkpoint that ships quantized
 
-**It saves less than the arithmetic predicts.** Embeddings, norms and the LM head
-stay 16-bit and each block stores a scale, so `nf4` takes 1.00 GB where 0.5
-bytes/weight predicts 0.58 — worst on small models with large vocabularies.
-Budget from measurement.
+A repo whose `config.json` carries a `quantization_config` (a bitsandbytes
+4-bit upload, an FP8 or MXFP4 release) is loaded by transformers with the
+quantizer that config names. Pass no format name.
 
-## What it will not do
+- **`dispatch=False` does not apply it.** The meta build has plain linears at
+  the checkpoint's dtype, and the quantized classes appear when the weights
+  load, at the same paths. `dtype="nf4"` on an ordinary checkpoint behaves the
+  same way.
+- **A format the machine cannot run is dequantized to bfloat16 with a log line
+  and no error**: an FP8 checkpoint below compute capability 8.9 (`We will
+  default to dequantizing the model to bf16`), an MXFP4 one without the `kernels`
+  package. The model then takes its unquantized size. The `fp8` refusal above
+  covers only the name `dtype="fp8"`.
+- A format name on such a checkpoint is ignored with a `UserWarning` when it
+  belongs to the same backend (an NF4 checkpoint loaded with `dtype="int8"` stays
+  4-bit) and raises `ValueError: The model is quantized with ... but you are
+  passing a ... config` otherwise.
 
-**A mixture-of-experts model barely shrinks.** bitsandbytes swaps `nn.Linear` only,
-and transformers 5 holds the experts as stacked 3-D parameters, so only attention,
-router and shared layers are quantized: Qwen1.5-MoE-A2.7B at `nf4` goes from 12.89
-to 12.53 GiB, while every routing decision is perturbed. For an MoE that does not
-fit, use the [tensor-parallel guide](tensor-parallel.md).
+After any quantized load, check what the weights are held in:
 
-**A narrow torch dtype that nothing can load falls back to float32.**
-`torch.int1` through `torch.int7` exist, so `dtype="int3"` is not rejected as a
-name: transformers logs `Falling back to torch.float32 because loading with the
-original dtype failed on the target device` and loads float32 — twice bfloat16's
-size, with no exception.
+```python
+import collections
 
-**`load_in_4bit=` / `load_in_8bit=` are not transformers 5 arguments.** The
-transformers 4 tutorials' spelling surfaces deep in a nested traceback as
-`TypeError: LlamaForCausalLM.__init__() got an unexpected keyword argument
-'load_in_4bit'`. Rewrite as `dtype="nf4"` or `dtype="int8"`.
-
-**A GPU is not required**: with bitsandbytes 0.50, `nf4` loads and runs on CPU.
-What the quantizers reject is the `meta` device — so `dispatch=False` builds the
-architecture at the compute dtype, ignoring the quantization, and weights are
-quantized only when actually loaded.
+held = collections.Counter(str(p.dtype) for p in model._module.parameters())
+assert held == {"torch.bfloat16": 100, "torch.uint8": 48}      # gpt2 at nf4: 48 packed weights
+```
 
 ## On NDIF
 
-A **client cannot request a quantization**; the deployment decides. A remote model
-key is the repo id, revision, task and `trust_remote_code` — nothing about how the
-weights are held —
-so `dtype=` on a `remote=True` model shapes only your own meta build. Because the
-module tree is unchanged, a trace written against an unquantized model runs
-against a quantized deployment as is.
+A client cannot request a quantization. The remote model key is the repo id,
+revision, task and `trust_remote_code`, so `dtype=` on a remote model shapes only
+your own meta build and the deployment decides how the weights are held. A trace
+written against the unquantized tree runs against a quantized deployment as is.
 
 ## Diagnosing
 
 | Symptom | Cause |
 |---|---|
-| `.weight` is a `(N, 1)` uint8 tensor | Expected — 4-bit weights are packed. Read activations instead |
-| Activations are `float16` when you expected `bfloat16` | `int8`, which computes in float16 by design. Pass `compute_dtype="bfloat16"` if you must, and accept the per-matmul warnings |
-| `MatMul8bitLt: inputs will be cast ...` repeated per matmul | An `int8` model given a non-float16 compute dtype |
-| Gradients through the model are all NaN | `int8` plus a large-magnitude loss overflowing float16. Use a normalized loss, or `nf4` |
-| An `fp8` model is exactly as big as the bfloat16 one | Compute capability below 8.9. Check `config.quantization_config.dequantize` |
-| An MoE saved almost nothing | Its experts are not `nn.Linear`, so bitsandbytes never touched them |
-| `dtype="int3"` gave a model twice the expected size | float32 fallback. Use `int4` / `nf4` |
-| `TypeError: ... unexpected keyword argument 'load_in_4bit'` | transformers 4 spelling; use `dtype="nf4"` |
-| `ValueError: dtype='nf4' and an explicit quantization_config ...` | Both were passed; keep one |
+| `TypeError: ... got an unexpected keyword argument 'load_in_4bit'`, at the end of a `ValueError: Could not load model` | `load_in_4bit=` and `load_in_8bit=` are not accepted. Write `dtype="nf4"` or `dtype="int8"` |
 | `AttributeError: module 'torch' has no attribute 'nf8'` | A misspelled format name reaches torch as a dtype. Check it against the table |
-| `ImportError` naming bitsandbytes or accelerate | `pip install bitsandbytes accelerate` |
-
-## Choosing between this and tensor parallelism
-
-**Quantization** costs accuracy and needs one GPU; **tensor parallelism** (the
-[tensor-parallel guide](tensor-parallel.md)) is numerically faithful but needs N GPUs and `torchrun`,
-and puts rules on your intervention code. Prefer tensor parallelism when the
-activations are the result, and for any MoE; quantization when you are limited to
-one card.
-
-**They compose**, and for a model that fits neither way alone they have to:
-transformers shards the packed weights, and the gather works through the
-quantization — on Llama-3.3-70B-Instruct at `nf4` and tp=4,
-`layers[40].mlp.gate_proj.output` reads at its full 28672, and the weights take
-about 43 GB in total against ~141 GB for bfloat16.
+| `dtype="int3"` gave a model twice the bfloat16 size | `torch.int1` to `torch.int7` exist, so the name is not rejected. transformers logs `Falling back to torch.float32` and loads float32 |
+| `MatMul8bitLt: inputs will be cast from torch.bfloat16 to float16`, once per matmul | `int8` with a `compute_dtype` other than float16 |
+| Gradients are all NaN | `int8` and a large-magnitude metric |
+| A quantized checkpoint is as large as its bfloat16 original | It was dequantized at load, or it is an MoE |
