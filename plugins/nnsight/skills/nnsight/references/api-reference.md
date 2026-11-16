@@ -1,152 +1,137 @@
-# API Reference (nnsight 0.8)
+# API Reference
 
-Every public surface in one place. `model` is an `NNsight` / `TransformersModel` /
-`DiffusionModel` / `VLLM`; `tracer` is what `as tracer:` binds.
+Signatures and names, for looking up. `model` is any model class below; `tracer`
+is what `as tracer:` binds.
 
 ## Model classes
 
 | Class | Import | For |
 |---|---|---|
-| `TransformersModel` | `from nnsight import TransformersModel` | **primary** — any HuggingFace checkpoint, any task |
-| `NNsight` | `from nnsight import NNsight` | any `torch.nn.Module` |
-| `DiffusionModel` | `from nnsight import DiffusionModel` | `diffusers` pipelines |
-| `VLLM` | `from nnsight.modeling.vllm import VLLM` | vLLM engine; `mode="sync"｜"async"` |
-| `LanguageModel`, `VisionLanguageModel` | — | **deprecated**, warn on construction |
+| `TransformersModel` | `from nnsight import TransformersModel` | any HuggingFace checkpoint, any pipeline task |
+| `NNsight` | `from nnsight import NNsight` | any `torch.nn.Module` you already built |
+| `DiffusionModel` | `from nnsight import DiffusionModel` | a `diffusers` pipeline |
+| `VLLM` | `from nnsight.modeling.vllm import VLLM` | the vLLM engine, `mode="sync"` or `"async"` |
 
-Constructor: `TransformersModel(repo_id, *, task=None, tokenizer=None, processor=None,
+`TransformersModel(repo_id, *, task=None, tokenizer=None, processor=None,
 image_processor=None, feature_extractor=None, peft=None, revision=None,
-dispatch=False, rename=None, **hf_kwargs)`.
+dispatch=False, rename=None, envoys=None, **hf_kwargs)`. `hf_kwargs` carries
+`device`, `device_map`, `dtype`, `attn_implementation`, `trust_remote_code` and
+anything else transformers accepts.
+
+`NNsight(module, rename=None, envoys=None)`.
 
 ## Run methods
 
-Each is usable as `with model.<method>(...) as tracer:`, or called directly to just
-run. Pass input to the method for one implicit invoke; pass nothing and define the
-batch with `tracer.invoke(...)` blocks.
-
-| Method | Runs | `tracer.result` |
-|---|---|---|
-| `model.trace(*inputs, **kw)` | one forward pass | the forward's return value |
-| `model.generate(*inputs, max_new_tokens=N)` | the model's `generate` (sampling per the checkpoint's `generation_config`) | **token ids** `[batch, seq]` |
-| `model.pipe(*inputs, **kw)` | the whole task pipeline | pipeline **records** (text, labels) |
-| `model.scan(*inputs)` | one forward under fake tensors — no weights, no compute | (read shapes inside) |
-| `model.edit(*, inplace=False)` | captures interventions as replayed defaults | `as (tracer, edited)` / `as tracer` |
-| `model.session(*, remote=False)` | a scope enclosing several traces | (only saves survive) |
-| `with tensor.backward(...):` | a backward pass, interleaved | — |
-
-`model.trace(..., trace=False)` bypasses tracing for a plain forward.
+| Method | Signature |
+|---|---|
+| `model.trace` | `trace(*inputs, trace=True, remote=False, blocking=True, backend=None, **forward_kwargs)` |
+| `model.generate` | `generate(*inputs, max_new_tokens=N, remote=False, **generate_kwargs)` (`TransformersModel`, `DiffusionModel`) |
+| `model.pipe` | `pipe(*inputs, **pipeline_kwargs)` (`TransformersModel`) |
+| `model.scan` | `scan(*inputs, **kwargs)` (not on plain `NNsight`) |
+| `model.edit` | `edit(*, inplace=False)`; binds `(tracer, edited_copy)`, or `tracer` when `inplace=True` |
+| `model.session` | `session(remote=False, blocking=True)` |
+| `tensor.backward` | `with tensor.backward(retain_graph=False):` |
+| `model.dispatch` | `dispatch()` loads the weights now |
 
 ## Tracer
 
 | Member | Signature | Does |
 |---|---|---|
-| `tracer.invoke` | `invoke(*args, **kwargs)` | add one batched input group; empty = whole batch |
-| `tracer.result` | — | the traced call's return value; served after the forward, so read it *after* `model.output` |
-| `tracer.iter` | `iter[slice｜int｜list]` | target occurrences; loop `for step in tracer.iter[:3]:` |
-| `tracer.all` | `all()` | `tracer.iter[:]` — every occurrence (unbounded; drops trailing code) |
-| `tracer.cache` | `cache(modules=None, device=cpu, dtype=None, detach=True, include_output=True, include_inputs=False, non_blocking=False)` | record many modules at once |
-| `tracer.barrier` | `barrier(n) -> Barrier` | cross-invoke meeting point; call it, don't enter it |
+| `tracer.invoke` | `invoke(*inputs, **kwargs)` | one batched input group; with no input, the whole batch |
+| `tracer.result` | property | the traced call's return value; the last thing a block can read |
+| `tracer.iter` | `iter[int \| slice \| list]` | select occurrences (generation steps, repeated calls): `for step in tracer.iter[:3]:` |
+| `tracer.all` | `all()` | `tracer.iter[:]` |
+| `tracer.cache` | `cache(modules=None, device=cpu, dtype=None, detach=True, include_output=True, include_inputs=False, non_blocking=False)` | record many modules |
+| `tracer.barrier` | `barrier(n)` | a meeting point for `n` invokes; call the object it returns |
 | `tracer.stop` | `stop()` | end the forward pass now |
+| `tracer.backend` | attribute | after a remote block: the job (`job_id`, `status`, `meta`, callable to poll) |
 
-`tracer.next()` does not exist in 0.8.
-
-## Envoy properties (any module)
+## Envoy (every module)
 
 | Member | Is |
 |---|---|
-| `.output` | the module's forward return value (read/assign) |
-| `.input` | first positional arg, or first kwarg (read/assign) |
-| `.inputs` | `(args, kwargs)` (read/assign — the only way to edit past the first argument) |
-| `.source` | operation-level handle into the forward |
-| `.device` / `.devices` | device(s) of its parameters |
-| `.path` | its dotted path in the tree |
+| `.output` | the forward's return value, read or assign |
+| `.input` | first positional argument (or first keyword), read or assign |
+| `.inputs` | `(args, kwargs)`, read or assign |
+| `.source` | operations inside the forward; `print(envoy.source)` lists them |
+| `.skip(replacement)` | do not run the module; use `replacement` as its output |
+| `envoy(*args, hook=False, **kwargs)` | apply the module to a value; `hook=True` makes its internals readable |
+| `.get("transformer.h.0.mlp")` | a descendant by dotted path |
+| `.modules(include_fn=None, names=False)`, `.named_modules(include_fn=None)` | descendants; names are absolute (`model.transformer.h.0`) |
+| `envoy[i]`, `len(envoy)`, iteration | children of a `ModuleList` or `Sequential` |
+| `.to(device)`, `.cpu()`, `.cuda()` | move the module; returns the envoy |
+| `.device`, `.devices` | device, or set of devices, of its parameters |
+| `.path` | its dotted path |
+| `._module` | the wrapped `torch.nn.Module` itself |
+| `.edit(inplace=False)`, `.clear_edits()` | store or drop persistent interventions |
+| `.E_output`, `.E_input` | a child module literally named `output` / `input` |
 
-If a child module is named after one of these (BERT's and RWKV-4's attention have
-a child literally called `output`), the child moves to `.E_output` / `.E_input` on
-that module, the property keeps the plain name, and nnsight warns at load.
-`print(model)` labels the child `E_output/output`, so the printed tree is the one to
-type. Its path is unchanged — `named_modules()` still lists `...attention.output` —
-only attribute access moved, which is what `get()` and `rename` go through.
+## Model handles
 
-## Envoy methods
-
-| Member | Signature | Does |
+| Member | On | Is |
 |---|---|---|
-| `envoy.skip` | `skip(replacement)` | bypass this module's forward |
-| `envoy(...)` | `envoy(*args, hook=False, **kwargs)` | apply the module to a value; `hook=True` lets *nnsight* watch the call, so its submodules become addressable (the module's own PyTorch hooks fire either way) |
-| `envoy.get` | `get("transformer.h.0.mlp")` | fetch a descendant by dotted path |
-| `envoy.modules` | `modules(include_fn=None, names=False)` | list descendants |
-| `envoy.named_modules` | `named_modules(include_fn=None)` | `(path, envoy)` pairs (**absolute** paths) |
-| `envoy.to` / `.cpu` / `.cuda` | `to(device)` | move the underlying module |
-| `envoy.clear_edits` | `clear_edits()` | drop stored edits |
-| `envoy[i]`, `len(envoy)`, iteration | — | index / iterate direct children |
-| `envoy.source.<op>` | e.g. `.source.self_act_0` | one call site inside the forward; `print(envoy.source)` lists them |
+| `model.tokenizer`, `.processor`, `.image_processor`, `.feature_extractor` | `TransformersModel` | what the task loaded; the others are `None` |
+| `model.pipeline` | `TransformersModel`, `DiffusionModel` | the underlying pipeline |
+| `model.config`, `.repo_id`, `.revision`, `.task`, `.dispatched` | `TransformersModel` | metadata |
+| `model.generator.streamer.output` | `TransformersModel` | this step's tokens during `generate` |
+| `model.load_adapter(peft_id)` | `TransformersModel` | attach or swap a PEFT adapter; `None` removes it |
+| `model.to_model_key()` | remote-capable models | the identity a remote request carries: repo id, revision, task |
+| `model.logits`, `model.samples` | `VLLM` | this step's pre-sampling logits and sampled ids |
 
 ## Top-level functions
 
 | Member | Signature | Does |
 |---|---|---|
-| `nnsight.save` | `save(obj) -> obj` | mark a value to survive the outermost trace. **Raises outside a trace.** |
-| `nnsight.register` | `register(module｜"name")` | ship a local module's source with remote requests |
-| `nnsight.status` | `status(raw=False)` | query NDIF; `print()` shows deployed models |
-| `nnsight.is_model_running` | `is_model_running(repo_id, revision="main", task=None, trust_remote_code=None)` | is it RUNNING on NDIF; `task` and `trust_remote_code` are in the model key |
-| `nnsight.compare` | `compare()` | local vs NDIF package/python diff |
-| `nnsight.CONFIG` | — | the config singleton |
+| `nnsight.save` | `save(value)` | mark a value to leave the outermost trace; same as `value.save()`. Raises `ValueError` outside a trace |
+| `nnsight.register` | `register(module)` | ship a local Python module's source with remote requests |
+| `nnsight.status` | `status(raw=False)` | deployed models on NDIF and their state |
+| `nnsight.is_model_running` | `is_model_running(repo_id, revision="main", task=None, trust_remote_code=None)` | whether that deployment is RUNNING |
+| `nnsight.compare` | `compare(host=None)` | local against server Python and package versions |
+| `nnsight.CONFIG` | object | settings, below |
+| `nnsight.NNsightDeprecationWarning` | `FutureWarning` subclass | the category of every nnsight deprecation |
 
-Removed in 0.8: `nnsight.list/dict/int/float/bool`, `nnsight.apply`, `nnsight.cond`,
-`nnsight.log`, `nnsight.local`, `nnsight.session`. Use plain Python and
-`model.session()`.
-
-## Model-specific handles
-
-| Member | On | Is |
-|---|---|---|
-| `model.tokenizer` / `.processor` / `.image_processor` / `.feature_extractor` | `TransformersModel` | whatever the task loaded (any may be `None`) |
-| `model.pipeline` | `TransformersModel`, `DiffusionModel` | the underlying pipeline |
-| `model.config`, `.repo_id`, `.revision`, `.dispatched` | `TransformersModel` | metadata |
-| `model.generator.streamer.output` | `TransformersModel` | per-step tokens during decoding |
-| `model.generator.output` | `TransformersModel` | **deprecated** — use `tracer.result` |
-| `model.logits`, `model.samples` | `VLLM` | this step's pre-sampling logits / drawn ids |
+Command line: `nnsight login` stores an NDIF key, `nnsight whoami` shows whose it
+is, `nnsight-serve <repo_id>` serves a vLLM engine.
 
 ## Remote
 
-`remote=` on `trace` / `generate` / `session`:
+`remote=` on `trace`, `generate` and `session`:
 
 | Value | Behavior |
 |---|---|
-| `True` | run on `CONFIG.API.HOST`; `blocking=True` (default) waits, `blocking=False` returns a job to `poll()` |
-| `"local"` | serialize/deserialize and run in-process — an offline dry run |
-| `"http://host:port"` | same as `True` against that host |
+| `True` | run on `CONFIG.API.HOST`; with `blocking=False`, submit and return a job to poll |
+| `"local"` | serialize, deserialize and run in this process: a dry run of the remote path |
+| `"http://host:port"` | as `True`, against that host |
 
-See the [remote guide](remote.md).
+`RemoteBackend(model_key, host=None, api_key=None, blocking=True, job_id=None)`
+and `AsyncRemoteBackend` are in `nnsight.intervention.backends.remote`, with
+`RemoteError`. See [remote](remote.md).
 
-## Config
+## CONFIG
 
-`nnsight.CONFIG`, loaded from package defaults → `~/.config/nnsight/config.yaml` →
-environment.
+Loaded from the package defaults, then `~/.config/nnsight/config.yaml` (or
+`$NNSIGHT_CONFIG`), then the environment. `CONFIG.save()` writes the user file.
 
-| Setting | Default | Does |
-|---|---|---|
-| `CONFIG.API.HOST` | `https://api.ndif.us` | NDIF base URL (`NDIF_HOST`) |
-| `CONFIG.API.APIKEY` | `None` | NDIF key (`NDIF_API_KEY`, or `CONFIG.set_default_api_key(...)`) |
-| `CONFIG.API.COMPRESS` | `True` | compress payloads and results |
-| `CONFIG.APP.DEBUG` | `False` | keep nnsight's internal frames in tracebacks (`NNSIGHT_DEBUG`) |
-| `CONFIG.APP.REMOTE_LOGGING` | `True` | stream remote `print()` back as log events |
-| `CONFIG.APP.PYMOUNT` | `True` | mount `.save()` on every object; when off use `nnsight.save(x)` |
-
-`CONFIG.save()` writes to the user file.
+| Setting | Default | Does | Environment |
+|---|---|---|---|
+| `CONFIG.API.HOST` | `https://api.ndif.us` | NDIF base URL | `NDIF_HOST` |
+| `CONFIG.API.APIKEY` | `None` | NDIF key; `CONFIG.set_default_api_key(key)` sets and saves it | `NDIF_API_KEY` |
+| `CONFIG.API.COMPRESS` | `True` | compress request and result payloads | |
+| `CONFIG.APP.DEBUG` | `False` | keep nnsight's frames in tracebacks; log remote payload sizes | `NNSIGHT_DEBUG` |
+| `CONFIG.APP.REMOTE_LOGGING` | `True` | show remote status and the block's `print()` output | |
+| `CONFIG.APP.PYMOUNT` | `True` | mount `.save()` on every object; when off, use `nnsight.save(x)` | |
+| `CONFIG.APP.DISABLE_CPP_BACKTRACE` | `True` | keep a torch C++ error inside a trace from crashing the process | `NNSIGHT_DISABLE_CPP_BACKTRACE` |
 
 ## Exceptions
 
-| Exception | Means |
+| Exception | Raised when |
 |---|---|
-| `OutOfOrderError` | a location was requested after the model ran past it |
-| `EarlyStopException` | `tracer.stop()` — a clean exit, swallowed by the interleaver |
-| `SourceNotAvailable` | no Python source to instrument (builtin/C), a submodule call, or an assignment op |
-| `WithBlockNotFoundError` | the trace body's source could not be read |
-| `NotImplementedError` (batching) | this model can't batch multiple input invokes |
-| `NameError` / `UnboundLocalError` after the block | the name was never `.save()`d (`UnboundLocalError` when the trace is inside a function) |
-| `NameError` inside the block | a name bound in an invoke, read by trace-body code outside the invokes (which runs first) or by a sibling invoke that has not parked — see [batching.md](batching.md#sharing-values-across-invokes) |
-| `ValueError: save() was called outside a trace` | move the save inside |
-| `ValueError: Cannot access ... outside of interleaving` | `.output` read outside a trace — also what an input-less `trace()` with no `invoke` says |
+| `OutOfOrderError` | a location was requested after the model ran past it, or never ran |
+| `SourceNotAvailable` | `.source` cannot drill into that operation |
+| `WithBlockNotFoundError` | the trace body's source text is not available |
+| `RemoteError` | a remote job failed; the message ends with the original error |
+| `ValueError: save() was called outside a trace` | a save before or after the `with` |
+| `ValueError: Cannot access ... outside of interleaving` | `.output` read with no trace running |
+| `NotImplementedError: ... does not support batching multiple invokes` | plain `NNsight` with two input invokes |
 
-Full diagnosis: the [debugging guide](debugging.md).
+Diagnosis by message: [debugging](debugging.md).
