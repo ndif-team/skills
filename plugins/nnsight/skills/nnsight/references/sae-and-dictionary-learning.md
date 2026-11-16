@@ -1,11 +1,11 @@
-# SAEs and Dictionary Learning
+# SAEs and dictionary learning
 
-An SAE re-expresses activations in an overcomplete, sparse basis where each
-dimension is (hopefully) one interpretable feature:
+A sparse autoencoder re-expresses an activation in a wide basis in which few
+dimensions are active at once:
 
 ```
-features = ReLU(W_enc (x − b_dec))          # sparse, wide
-x̂        = W_dec features + b_dec           # reconstruction
+features = ReLU(W_enc (x - b_dec))      # wide, mostly zero
+x_hat    = W_dec features + b_dec       # the reconstruction
 ```
 
 ```python
@@ -14,21 +14,18 @@ import nnsight
 from nnsight import TransformersModel
 
 torch.manual_seed(0)
-model = TransformersModel("openai-community/gpt2", dispatch=True)
-LAYER = 6
-d_model = model.config.n_embd
-d_features = 2048
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
+LAYER, d_model, d_features = 6, model.config.n_embd, 2048
+prompt = "The Eiffel Tower is in the city of"
 ```
 
-## Attaching an SAE to the model
-
-Define it as a normal `torch.nn.Module` and assign it into the envoy tree:
+## Attach an SAE and read its features
 
 ```python
 class SparseAutoencoder(torch.nn.Module):
     def __init__(self, d_in, d_hidden):
         super().__init__()
-        # the ReLU lives inside `encoder`, so `encoder.output` is the feature activations
+        # the ReLU is inside `encoder`, so `encoder.output` is the feature activations
         self.encoder = torch.nn.Sequential(torch.nn.Linear(d_in, d_hidden), torch.nn.ReLU())
         self.decoder = torch.nn.Linear(d_hidden, d_in)
 
@@ -39,44 +36,31 @@ class SparseAutoencoder(torch.nn.Module):
         return self.decoder(self.encode(x))
 
 sae = SparseAutoencoder(d_model, d_features).to(model.device)
-model.transformer.h[LAYER].sae = sae            # now part of the tree
-```
+model.transformer.h[LAYER].sae = sae                  # a module of the model now
 
-**Reading features** — apply it to the activation inside the trace:
-
-```python
-prompt = "The Eiffel Tower is in the city of"
-
-with model.trace(prompt):
+with torch.no_grad(), model.trace(prompt):
     resid = model.transformer.h[LAYER].output
-    features = model.transformer.h[LAYER].sae.encode(resid).detach().save()
+    features = model.transformer.h[LAYER].sae.encode(resid).save()
 
-print(features.shape, f"active per token: {(features > 0).float().sum(-1).mean():.1f}")
+assert tuple(features.shape) == (1, 10, d_features)
 ```
 
-**Splicing it into the forward pass** — replace the activation with its
-reconstruction:
+Assigning a module into the tree attaches it. An activation inside a trace is a
+real tensor, so calling the unattached `sae.encode(resid)` there returns the same
+values. Attaching is what lets an edit route through the SAE and a trace read its
+internals, below.
 
-```python
-with model.trace() as tracer:
-    with tracer.invoke(prompt):
-        clean = model.output.logits[0, -1].argmax().save()
-    with tracer.invoke(prompt):
-        resid = model.transformer.h[LAYER].output
-        model.transformer.h[LAYER].output = model.transformer.h[LAYER].sae(resid)
-        through_sae = model.output.logits[0, -1].argmax().save()
+## Splice it in and measure the cost
 
-print(f"clean {model.tokenizer.decode(clean)!r}  through SAE {model.tokenizer.decode(through_sae)!r}")
-```
-
-That comparison is the **cheapest quality check there is**: if the model's output
-changes when you route through the SAE, the reconstruction is losing something the
-model uses. Put a number on it — KL(original ‖ spliced) — between two controls: an
-unchanged copy (≈ 0, or the harness itself moves the output) and a zeroed layer:
+Assigning the reconstruction to the site's output makes the rest of the forward
+run on it. The KL between the original and the spliced next-token distribution
+is what the reconstruction costs the model. Read it between two controls: an
+unchanged copy, which must give zero or the harness itself moves the output, and
+a zeroed layer, the cost of deleting the site.
 
 ```python
 def splice_kl(replace):
-    """KL(original ‖ spliced) at the last position, with h[LAYER].output := replace(it)."""
+    """KL(original || spliced) at the last token, with h[LAYER].output = replace(it)."""
     with torch.no_grad(), model.trace() as tracer:
         with tracer.invoke(prompt):
             original = model.output.logits[0, -1].log_softmax(-1).save()
@@ -85,55 +69,47 @@ def splice_kl(replace):
             spliced = model.output.logits[0, -1].log_softmax(-1).save()
     return float((original.exp() * (original - spliced)).sum())
 
-copy, through, zeroed = (splice_kl(f) for f in (lambda r: r.clone(), model.transformer.h[LAYER].sae,
-                                                 torch.zeros_like))
-print(f"KL  copy {copy:.1e}   SAE {through:.2f}   zeroed layer {zeroed:.2f}")
-assert copy < 1e-4 and through < zeroed
+copy = splice_kl(lambda r: r.clone())
+untrained = splice_kl(model.transformer.h[LAYER].sae)
+zeroed = splice_kl(torch.zeros_like)
+print(f"KL  copy {copy:.1e}   untrained SAE {untrained:.2f}   zeroed layer {zeroed:.2f}")
+assert copy < 1e-4 and untrained < zeroed
 ```
 
 ```
-KL  copy 0.0e+00   SAE 14.03   zeroed layer 16.56
+KL  copy 0.0e+00   untrained SAE 14.03   zeroed layer 16.56
 ```
 
-This untrained SAE costs 85% of what deleting the layer does.
+This untrained SAE costs most of what deleting the layer does. Assign the
+reconstruction, as above: the in-place form `output[:] = sae(resid)` overwrites
+the SAE's own input, and a backward pass then raises for an SAE whose encoder
+reads that input directly ([gradients](gradients.md)).
 
-**Replace the output, do not write into it.** `output[:] = sae(resid)` overwrites
-the SAE's own input, and any gradient through the layer then raises
-`RuntimeError: one of the variables needed for gradient computation has been
-modified by an inplace operation`. `output = sae(resid)` keeps the graph.
+## Read the SAE's internals in later traces
 
-To make the SAE's internals observable from later traces, call it inside an
-`edit` with `hook=True`. Calling it and discarding the result *observes*; assigning
-the result to `.output` inside the edit would *splice* permanently. Reconstruction
-error enters the model only when you assign back to `.output`:
+An edit that calls the attached SAE with `hook=True` makes its submodules
+readable in every later trace. Discarding the result observes. Assigning it to
+`.output` inside the edit splices on every run.
 
 ```python
 with model.edit(inplace=True):
     model.transformer.h[LAYER].sae(model.transformer.h[LAYER].output, hook=True)
 
-with model.trace(prompt):
-    observed = model.transformer.h[LAYER].sae.encoder.output.save()   # post-ReLU features
+with torch.no_grad(), model.trace(prompt):
+    observed = model.transformer.h[LAYER].sae.encoder.output.save()    # post-ReLU features
     answer = model.output.logits[0, -1].argmax().save()
-
-print(observed.shape, repr(model.tokenizer.decode(answer)))
 model.clear_edits()
 
-assert model.tokenizer.decode(answer) == model.tokenizer.decode(clean)
-assert (observed >= 0).all()          # the encoder module contains the ReLU
+assert torch.allclose(observed, features, atol=1e-5)
+assert model.tokenizer.decode(answer) == " Paris"      # observing leaves the output alone
 ```
 
-```
-torch.Size([1, 10, 2048]) ' Paris'
-```
+Without `hook=True`, or with the call and the read in one trace body, the read
+raises `OutOfOrderError: '...sae.encoder.output.i0' was requested but the model
+already ran past it`. The pattern is in
+[modules-and-architectures](modules-and-architectures.md).
 
-The routing call and the read must be in **different** workers (edit vs trace);
-both in one trace body raises `OutOfOrderError`. So does forgetting `hook=True` —
-`... already ran past it`, though the submodule never ran: on an attached module,
-read that message as "is it hooked?".
-
-## Training a dictionary
-
-Collect activations, then fit. The nnsight part is one trace:
+## Collect activations: drop pads and first tokens
 
 ```python
 corpus = [
@@ -154,268 +130,238 @@ held_out = [
 ]
 
 def collect(texts):
-    """Activations at LAYER, pad positions dropped."""
-    with torch.no_grad():                 # collection only — see note
-        with model.trace(texts):
-            args, kwargs = model.inputs   # the mask the forward actually ran with
-            mask = kwargs["attention_mask"].bool().save()
-            acts = model.transformer.h[LAYER].output.detach().save()
-    return acts[mask].float()
+    """Residuals at LAYER, token ids, the real-token mask, and the positions to keep."""
+    with torch.no_grad(), model.trace(texts):
+        args, kwargs = model.inputs                    # what the forward ran with
+        ids = kwargs["input_ids"].save()
+        real = kwargs["attention_mask"].bool().save()
+        acts = model.transformer.h[LAYER].output.float().save()
+    keep = real & (real.cumsum(dim=1) > 1)             # not a pad, not a text's first token
+    return acts, ids, real, keep
 
-data = collect(corpus)
-held = collect(held_out)
-unit = data.norm(dim=-1).mean()
-data, held = data / unit, held / unit
-print("fit vectors:", tuple(data.shape), " held-out vectors:", tuple(held.shape))
+acts, ids, real, keep = collect(corpus)
+first, norms = real & ~keep, acts.norm(dim=-1)
+print(f"{int((~real).sum())} pads (mean norm {norms[~real].mean():.0f}), {int(first.sum())} first "
+      f"tokens ({norms[first].mean():.0f}), {int(keep.sum())} kept ({norms[keep].mean():.0f})")
+
+everything = acts[real]                                # pads dropped, first tokens left in
+two_vectors = torch.where(first[..., None], acts[first].mean(0), acts[keep].mean(0))[real]
+explained = 1 - ((two_vectors - everything).pow(2).sum()
+                 / (everything - everything.mean(0)).pow(2).sum())
+print(f"first tokens left in: two constant vectors explain {explained:.3f} of the variance")
+assert explained > 0.99
 ```
 
 ```
-fit vectors: (83, 768)  held-out vectors: (47, 768)
+29 pads (mean norm 3118), 8 first tokens (3044), 75 kept (92)
+first tokens left in: two constant vectors explain 0.996 of the variance
 ```
 
-**Mask the padding — everywhere you read activations from a batch.** A batched
-`trace(...)` left-pads every input to the longest, so a plain
-`.reshape(-1, d_model)` over this corpus would hand the optimizer 112 vectors of
-which 29 are pad. They are not small: at GPT-2's layer 6 the mean residual norm
-is 3118 on a pad position against 92 on a real token past the first, so an
-unmasked dictionary spends capacity modelling the padding and every feature
-ranking downstream inherits it. Each sentence's *first* real token is the same
-kind of outlier (3044) — see the max-activation section. Take the mask from `model.inputs` inside the trace rather than
-re-tokenizing: it is the one the forward ran with. [SKILL.md](../SKILL.md) →
-batching has the padding rule itself.
+GPT-2's residual at a pad position and at each text's first token is some thirty
+times larger than anywhere else. Left in, those positions are what a dictionary
+fits, what explained variance measures, and what every feature ranking returns.
+The same mask drops the BOS token on tokenizers that add one. Padding and masks
+in general: [batching](batching.md).
 
-**Collect under `torch.no_grad()`, and `.detach()` what you save.** A trace runs
-with autograd on, so a saved activation arrives with a live `grad_fn` that keeps
-the forward graph alive for as long as you hold the tensor. `.detach()` on the
-saved tensor is what drops that reference; `torch.no_grad()` stops the graph
-being built at all, which lowers peak memory during the forward. `collect()` does
-both. Dictionary *training* below still needs gradients, but only through the
-SAE, not through the frozen model.
+## Train a dictionary
 
 ```python
+held_acts, held_ids, _, held_keep = collect(held_out)
+unit = acts[keep].norm(dim=-1).mean()                  # fit at unit scale
+data, held = acts[keep] / unit, held_acts[held_keep] / unit
+
 optimizer = torch.optim.Adam(sae.parameters(), lr=1e-3)
 for step in range(800):
-    reconstruction = sae(data)
-    features = sae.encode(data)
-    loss = ((reconstruction - data).pow(2).sum(-1).mean()
-            + 0.01 * features.abs().sum(-1).mean())
+    codes = sae.encode(data)
+    loss = (sae.decoder(codes) - data).pow(2).sum(-1).mean() + 0.01 * codes.abs().sum(-1).mean()
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
 ```
 
-## Evaluating it — and why this one is worthless
+Training differentiates through the SAE only: the activations were collected
+under `no_grad`. The dictionary is fit on activations divided by `unit`, so every
+later use divides by it too.
 
-Three numbers, on activations the dictionary was **not** fit to — metrics on the
-fitting set answer a different question:
+## Evaluate: three numbers, on held-out data, beside a null
 
 ```python
 @torch.no_grad()
 def report(module, activations):
-    reconstruction = module(activations)
-    features = module.encode(activations)
+    reconstruction, codes = module(activations), module.encode(activations)
     explained = 1 - ((reconstruction - activations).pow(2).sum()
                      / (activations - activations.mean(0)).pow(2).sum())
-    l0 = (features > 0).float().sum(-1).mean()
-    dead = int((features.max(0).values == 0).sum())
+    l0 = (codes > 0).float().sum(-1).mean()            # features active per token
+    dead = int((codes.max(0).values == 0).sum())       # features that never fire
     return float(explained), float(l0), dead
 
-for label, activations in (("fit", data), ("held-out", held)):
-    explained, l0, dead = report(sae, activations)
-    print(f"{label:9s} explained variance {explained:.3f}"
-          f"   L0 {l0:5.1f} of {d_model}   dead {dead}/{d_features}")
-
-assert dead > 0.9 * d_features          # the number this SAE is caught by
-```
-
-```
-fit       explained variance 0.997   L0   5.7 of 768   dead 2032/2048
-held-out  explained variance 0.996   L0   9.3 of 768   dead 1950/2048
-```
-
-By the first two metrics this SAE is superb — 99.7% of variance from six
-features per token, held up on unseen text — and it is **meaningless**: 2032 of
-its 2048 features never fire. Sixteen directions memorized 83 vectors, and every
-"feature" you interpreted would be an artifact.
-
-### What each number has to clear
-
-**L0 is a ratio to `d_model`, not a distance from zero.** A dictionary firing 768
-features per token on a 768-dimensional activation has re-expressed it, not
-decomposed it. For scale, Gemma Scope's residual SAEs average L0 82 on a
-`d_model` of 2304. Print the two side by side, as above.
-
-**Reconstruction says nothing on its own.** The null hypothesis is an identity map
-in a rotated basis: perfect reconstruction, every "feature" a rotated neuron. Run
-it beside the SAE you are evaluating.
-
-```python
 class RotatedIdentity(torch.nn.Module):
-    """The null hypothesis: exact reconstruction, zero decomposition."""
+    """The null: exact reconstruction, no decomposition. Every feature is a rotated axis."""
     def __init__(self, d):
         super().__init__()
-        rotation, _ = torch.linalg.qr(torch.randn(d, d))
-        self.register_buffer("R", rotation)
-        self.n_features = 2 * d              # one half per sign
+        self.register_buffer("R", torch.linalg.qr(torch.randn(d, d))[0])
 
     def encode(self, x):
         z = x @ self.R
-        return torch.cat([torch.relu(z), torch.relu(-z)], -1)
+        return torch.cat([torch.relu(z), torch.relu(-z)], -1)      # one feature per sign
 
     def forward(self, x):
         z = self.encode(x)
         return (z[..., :self.R.shape[0]] - z[..., self.R.shape[0]:]) @ self.R.T
 
 null = RotatedIdentity(d_model).to(model.device)
-explained, l0, dead = report(null, held)
-print(f"rotated identity: explained variance {explained:.3f}"
-      f"   L0 {l0:5.1f} of {d_model}   dead {dead}/{2 * d_model}")
+for label, module, activations, width in (("SAE, fit set", sae, data, d_features),
+                                          ("SAE, held-out", sae, held, d_features),
+                                          ("null, held-out", null, held, 2 * d_model)):
+    explained, l0, dead = report(module, activations)
+    print(f"{label:15s} explained variance {explained:.3f}   L0 {l0:5.1f} of {d_model}"
+          f"   dead {dead}/{width}")
 
-assert explained > 0.999 and round(l0) == d_model     # perfect, and disqualified
+trained = splice_kl(lambda r: sae(r / unit) * unit)
+print(f"spliced KL {trained:.2f}   (zeroed layer {zeroed:.2f})")
+
+assert report(sae, data)[0] > 0.99 > 0.5 > report(sae, held)[0]
+assert report(sae, held)[2] > 0.9 * d_features and round(report(null, held)[1]) == d_model
 ```
 
 ```
-rotated identity: explained variance 1.000   L0 768.0 of 768   dead 39/1536
+SAE, fit set    explained variance 1.000   L0   3.9 of 768   dead 1917/2048
+SAE, held-out   explained variance 0.163   L0   6.4 of 768   dead 1917/2048
+null, held-out  explained variance 1.000   L0 768.0 of 768   dead 41/1536
+spliced KL 5.04   (zeroed layer 16.56)
 ```
 
-On a larger held-out set the null also scores loss recovered 1.0000 and no dead
-features: every metric comes back perfect except L0, at exactly `d_model`. Add
-this row to any evaluation; it is the only control that separates "reconstructs
-the activation" from "decomposes the activation".
+- **Evaluate on activations the dictionary was not fit to.** On its fitting set
+  this SAE reconstructs everything from four features per token. On held-out
+  text explained variance is 0.16, and splicing it in costs a third of deleting
+  the layer: it memorized 75 vectors.
+- **Count dead features.** 1,917 of the 2,048 never fire on either set, so a
+  feature read off this dictionary is an artifact.
+- **Reconstruction alone says nothing.** The null reconstructs exactly and
+  decomposes nothing. Only L0 catches it, at exactly `d_model`: read L0 against
+  `d_model`, not against zero.
 
-**Deadness is measured on data you did not fit to.** A memorizing dictionary
-looks alive on exactly the vectors it memorized, and deadness is where the
-fit/held-out split shows up first, before explained variance moves.
+## A pretrained SAE goes where it was trained
 
-Real SAE training needs millions of tokens, and resampling or auxiliary losses to
-revive dead features.
-
-## Using a pretrained SAE
-
-In practice you load someone else's. The wiring is identical — build the module,
-load the weights, assign it into the tree, and read it at the point it was
-trained on:
+Build or load the module, attach it, and apply it at the site it was trained
+on. Where a release names the site as a TransformerLens hook,
+`blocks.L.hook_resid_pre` is `h[L].input`, the same tensor as `h[L-1].output`,
+and `blocks.L.hook_resid_post` is `h[L].output`:
 
 ```python
-from sae_lens import SAE                     # or: from dictionary_learning import AutoEncoder
+with torch.no_grad(), model.trace(prompt):
+    previous = model.transformer.h[LAYER - 1].output.save()
+    resid_pre = model.transformer.h[LAYER].input.save()
 
-# sae_lens >= 6 returns the SAE alone; 3.x-5.x returned (sae, cfg_dict, sparsity).
+assert torch.equal(resid_pre, previous)
+```
+
+One site off, an SAE still runs and returns features. A published residual
+dictionary for Pythia-70m (512 dimensions, 32,768 features), trained on layer
+3's output, explains 0.99 of the variance there with an L0 of 76. On the same
+block's input it gives explained variance -19.6 and an L0 of 6,244, with no
+error. Measure explained variance and L0 at your site and compare them with the
+release's numbers before reading any feature.
+
+The next block is illustrative: it needs the `sae_lens` package and downloads
+the SAE.
+
+```python
+from sae_lens import SAE
+
 pretrained = SAE.from_pretrained(release="gpt2-small-res-jb", sae_id="blocks.6.hook_resid_pre")
-if isinstance(pretrained, tuple):
-    pretrained = pretrained[0]
 model.transformer.h[6].pretrained_sae = pretrained.to(model.device)
 
-with model.trace(prompt):
-    resid_pre = model.transformer.h[6].input           # hook_resid_pre = the block's INPUT
+with torch.no_grad(), model.trace(prompt):
+    resid_pre = model.transformer.h[6].input           # hook_resid_pre: the block's input
     features = model.transformer.h[6].pretrained_sae.encode(resid_pre).save()
 ```
 
-Check what the SAE was trained on: the **hook point** (`blocks.L.hook_resid_pre`
-is `h[L].input`, equal to `h[L-1].output`; `hook_resid_post` is `h[L].output`),
-the layer index, and the model revision. An SAE applied at the wrong point
-produces plausible-looking garbage.
+## Max-activating examples
 
-## Feature analysis
-
-**Max-activating examples** — what makes a feature fire. The trace's own
-`input_ids` and mask give the token at the winning position without any
-left-padding arithmetic. Exclude the **first real token** as well as the pads:
-GPT-2's first-position residual has norm ~3000 against ~92 elsewhere, so an
-unexcluded max returns the same features for every prompt:
+Mask before taking a maximum over tokens, with the mask `collect` returns. Here
+on the held-out texts:
 
 ```python
-examples = [
-    "The Eiffel Tower is in Paris.",
-    "Dogs are loyal pets.",
-    "The stock market fell sharply.",
-    "She wrote a poem about the sea.",
-]
-
 with torch.no_grad():
-    with model.trace(examples):
-        args, kwargs = model.inputs
-        input_ids = kwargs["input_ids"].save()
-        real = kwargs["attention_mask"].bool().save()
-        resid = model.transformer.h[LAYER].output
-        all_features = model.transformer.h[LAYER].sae.encode(resid).detach().save()
+    all_features = sae.encode(held_acts / unit)        # (texts, tokens, features), pads included
 
-first = real & (real.cumsum(dim=1) == 1)                  # each prompt's first real token
-keep = real & ~first                                      # pads and the first-token sink out
-acts = all_features.masked_fill(~keep[..., None], 0)
-feature = int(acts.amax(dim=(0, 1)).argmax())
-best_example, best_position = divmod(int(acts[..., feature].argmax()), acts.shape[1])
-token = model.tokenizer.decode(input_ids[best_example, best_position])
-print(f"feature {feature} fires hardest on {examples[best_example]!r} at token {token!r}")
+masked = all_features.masked_fill(~held_keep[..., None], 0)
+feature = int(masked.amax(dim=(0, 1)).argmax())
+best_text, best_position = divmod(int(masked[..., feature].argmax()), masked.shape[1])
+token = model.tokenizer.decode(held_ids[best_text, best_position])
+print(f"feature {feature} fires hardest on {held_out[best_text]!r} at token {token!r}")
 
-assert keep[best_example, best_position]
-unmasked_top = [all_features[i].amax(0).topk(5).indices.tolist() for i in range(len(examples))]
-assert all(top == unmasked_top[0] for top in unmasked_top)   # unmasked: one top-5 for every prompt
+flat = all_features.flatten(0, 1)
+live = flat.amax(0) > 0
+on_outlier = (~held_keep.flatten())[flat.argmax(0)][live].float().mean()
+print(f"unmasked, {on_outlier:.0%} of the live features peak on a pad or a first token")
+assert held_keep[best_text, best_position] and on_outlier > 0.5
 ```
 
 ```
-feature 1888 fires hardest on 'The Eiffel Tower is in Paris.' at token 'iff'
+feature 1865 fires hardest on 'He painted a watercolour of the harbour at dawn.' at token ' painted'
+unmasked, 90% of the live features peak on a pad or a first token
 ```
 
-Unmasked, 47% of the live features here put their top activation on a pad or a
-first token, and all four prompts share one top-5.
+Read a feature from a large corpus and from its whole activation distribution,
+including the inputs it stays silent on. A top example from four sentences shows
+the masking, not a meaning.
 
-Interpret features from a *large* corpus, not four sentences, and check the
-bottom of the distribution too: a feature that fires on everything is not a
-feature.
+## Steer with a feature, or ablate it
 
-**Feature steering** — add a decoder column to the residual stream, the causal
-test of a feature's meaning. Sweep the coefficient, scaled to the measured
-residual norm:
+Adding a feature's decoder column to the residual stream is the causal test of
+what the feature means. Sweep the coefficient in units of the residual norm at
+the site:
 
 ```python
-feature_direction = sae.decoder.weight[:, feature].detach()
-feature_direction = feature_direction / feature_direction.norm()
+column = sae.decoder.weight[:, feature].detach()
+direction = column / column.norm()
 
-with model.trace("The movie was"):
-    residual_norm = model.transformer.h[LAYER].output[0, -1].norm().detach().save()
-    base = model.output.logits[0, -1].argmax().save()
-print(f"base {model.tokenizer.decode(base)!r}   residual norm {float(residual_norm):.1f}")
+with torch.no_grad(), model.trace() as tracer:
+    picks = nnsight.save({})
+    for alpha in (0.0, 0.5, 1.0, 2.0, 4.0):
+        with tracer.invoke("The movie was"):
+            norm = model.transformer.h[LAYER].output[0, -1].norm()
+            model.transformer.h[LAYER].output[:, -1, :] += alpha * norm * direction
+            picks[alpha] = model.output.logits[0, -1].argmax()
 
-for alpha in [0.5, 1.0, 2.0, 4.0]:
-    with model.trace("The movie was"):
-        model.transformer.h[LAYER].output[:, -1, :] += (
-            alpha * float(residual_norm) * feature_direction
-        )
-        steered = model.output.logits[0, -1].argmax().save()
-    print(f"  alpha {alpha}: {model.tokenizer.decode(steered)!r}")
+print({alpha: model.tokenizer.decode(token) for alpha, token in picks.items()})
+assert picks[0.0] != picks[4.0]
 ```
 
 ```
-base ' released'   residual norm 93.2
-  alpha 0.5: ' a'
-  alpha 1.0: ','
-  alpha 2.0: '-'
-  alpha 4.0: '-'
+{0.0: ' released', 0.5: ' released', 1.0: ' a', 2.0: ',', 4.0: ','}
 ```
 
-Read the residual norm before the logits: a trace body runs in model order, so
-layer 6 after `lm_head` raises `OutOfOrderError`.
+To ablate a feature, subtract its own contribution, its activation times its
+decoder column. That equals decoding with the feature zeroed and adding back
+what the SAE failed to reconstruct, so nothing but the feature changes. To clamp
+it at a value `v`, add `(v - activation) * unit` times the column instead.
 
-Read nothing into *these* tokens: the feature comes from the memorizing
-dictionary above, so this is a dose-response curve for an arbitrary direction.
-Steering tests a feature's meaning only once the dictionary survives evaluation;
-the [model-steering guide](model-steering.md) has the matched-norm control that says whether the
-direction's content mattered or only its magnitude.
+```python
+text = held_out[best_text]
 
-## What to be careful about
+with torch.no_grad(), model.trace() as tracer:
+    with tracer.invoke(text):
+        before = model.output.logits[0, -1].log_softmax(-1).save()
+    with tracer.invoke(text):
+        resid = model.transformer.h[LAYER].output
+        activation = sae.encode(resid / unit)[..., feature]        # (1, tokens)
+        activation[:, 0] = 0                                       # not fit on first tokens
+        model.transformer.h[LAYER].output = resid - (activation * unit)[..., None] * column
+        after = model.output.logits[0, -1].log_softmax(-1).save()
 
-- **Feature splitting.** One concept fragments across more features as the
-  dictionary grows, so "how many features encode X" is not stable across sizes.
-- **Interpretability illusions.** A feature that looks like "the Golden Gate
-  Bridge" on its top-20 examples may fire on something more general. Validate
-  with steering, the full activation distribution, and examples it does *not*
-  fire on.
-- **An SAE is a hypothesis fit to activations.** It can be a good sparse code and
-  still not carve the model's computation at its joints.
+kl = float((before.exp() * (before - after)).sum())
+print(f"KL after ablating feature {feature}: {kl:.2f}")
+assert kl > 0.01
+```
 
-## Related guides
+```
+KL after ablating feature 1865: 0.46
+```
 
-- [nnsight](../SKILL.md) — attaching modules, `edit`, `hook=True`
-- [probing](probing.md) — supervised directions instead of unsupervised features
-- [model-steering](model-steering.md) — validating a feature causally
-- [ablation](ablation.md) — removing a feature's contribution
+This feature comes from the memorizing dictionary above, so both results
+describe an arbitrary direction. Steering and ablation test a feature's meaning
+only once the dictionary has passed evaluation, and then beside a random
+direction of the same norm: [model-steering](model-steering.md).

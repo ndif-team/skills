@@ -1,181 +1,158 @@
 # Probing
 
-A probe asks: **is this property linearly decodable from the model's internal
-state?** Train a classifier on activations, report accuracy per layer.
-
-The technique is easy. Interpreting it is not — a probe measures what *you* can
-decode, not what the model computes or uses. Most of this guide is the controls
-that tell those apart.
+A probe is a classifier trained on activations. Its accuracy says a property can
+be decoded at a site, not that the model computes it there or uses it. The
+controls and the causal tests below are what tell those apart.
 
 ```python
 import torch
 import nnsight
 from nnsight import TransformersModel
 
-model = TransformersModel("openai-community/gpt2", dispatch=True)
-n_layers = len(model.transformer.h)
-hidden = model.config.n_embd
-```
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
+n_layers, hidden = len(model.transformer.h), model.config.n_embd
 
-## 1. Build a dataset
-
-Vary the property; hold everything else fixed. Templates keep surface form
-constant across labels.
-
-```python
 positive_words = ["wonderful", "fantastic", "delightful", "excellent", "brilliant",
                   "joyful", "superb", "enjoyable", "lovely", "amazing",
                   "great", "charming", "pleasant", "terrific", "marvelous", "splendid"]
 negative_words = ["terrible", "awful", "dreadful", "disgusting", "horrible",
                   "miserable", "dismal", "boring", "dull", "abysmal",
                   "bad", "unpleasant", "annoying", "atrocious", "lousy", "painful"]
+words = positive_words + negative_words
 templates = ["The movie was {}.", "I found the book {}.",
              "That meal was {}.", "Their performance was {}."]
-
-texts = ([t.format(w) for w in positive_words for t in templates]
-         + [t.format(w) for w in negative_words for t in templates])
+texts = [t.format(w) for w in words for t in templates]      # 4 rows per adjective
 labels = torch.tensor([1.0] * (len(positive_words) * len(templates))
                       + [0.0] * (len(negative_words) * len(templates)))
-print(f"{len(texts)} examples")
 ```
 
-## 2. Collect activations — one forward pass
+Templates vary the property and hold the surface form fixed.
 
-The whole dataset and every layer come from a single batched trace:
+## Collect every layer in one pass
 
 ```python
-with torch.no_grad():                              # see the note below — not optional
-    with model.trace(texts):
-        activations = nnsight.save([
-            block.output[:, -1, :].detach().cpu().float() for block in model.transformer.h
-        ])
+with torch.no_grad(), model.trace(texts):
+    activations = nnsight.save([block.output[:, -1, :].float().cpu()
+                                for block in model.transformer.h])
 
-print(len(activations), activations[0].shape)      # 12 layers, [128, 768]
+assert len(activations) == n_layers and tuple(activations[0].shape) == (len(texts), hidden)
 ```
 
-**Wrap collection in `torch.no_grad()`.** A trace runs with autograd on, so a saved
-activation comes back with a live `grad_fn` that pins the whole forward graph —
-several times the activation memory, for bit-identical values, growing with
-sequence length and batch size. `.detach()` on the saved tensor does not help: the
-graph is already built by then.
+A dataset too large for one batch is one pass per chunk of texts, never one pass
+per layer. The residual stream at the last token is the default site. Any other
+position needs a per-row index in a padded batch ([batching](batching.md)).
+`block.attn.output[0]` (what attention moved in) and `block.mlp.output` are
+collected the same way, each read before its block's `.output`.
 
-For datasets too large for one batch, chunk the texts and concatenate — still one
-pass per chunk, never one pass per layer. `tracer.cache()` is the alternative when
-you want inputs and outputs of many modules at once.
+## A probe per layer, split by lexical item
 
-## 3. Train a probe per layer
-
-Logistic regression with weight decay, no external dependencies. **Split by
-lexical item, not by row.** A random row split puts "The movie was wonderful."
-in test and "I found the book wonderful." in train, so for any concept the words
-carry, test accuracy measures recall of the word list. Hold out whole adjectives:
+Logistic regression on z-scored activations, in plain torch. **Hold out whole
+lexical items, not rows.** A row split puts "The movie was wonderful." in test
+and "I found the book wonderful." in train, and test accuracy then measures
+recall of the word list.
 
 ```python
 generator = torch.Generator().manual_seed(0)
-word_of_row = torch.arange(len(texts)) // len(templates)       # 0..31, one per adjective
+word_of_row = torch.arange(len(texts)) // len(templates)
 n_pos = len(positive_words)
 held_words = set(torch.randperm(n_pos, generator=generator)[:5].tolist())
 held_words |= {n_pos + i for i in torch.randperm(n_pos, generator=generator)[:5].tolist()}
 is_test = torch.tensor([int(w) in held_words for w in word_of_row])
 train_idx, test_idx = torch.where(~is_test)[0], torch.where(is_test)[0]
 
-def train_probe(features, y, y_train_idx, y_test_idx, steps=300, l2=0.02):
-    mean, std = features[y_train_idx].mean(0), features[y_train_idx].std(0) + 1e-6
-    x_train = (features[y_train_idx] - mean) / std
-    x_test = (features[y_test_idx] - mean) / std
-
+def train_probe(features, y, train, test, steps=300, l2=0.02):
+    mean, std = features[train].mean(0), features[train].std(0) + 1e-6
+    x_train, x_test = (features[train] - mean) / std, (features[test] - mean) / std
     weight = torch.zeros(features.shape[1], requires_grad=True)
     bias = torch.zeros(1, requires_grad=True)
     optimizer = torch.optim.Adam([weight, bias], lr=0.02)
     for _ in range(steps):
         loss = torch.nn.functional.binary_cross_entropy_with_logits(
-            x_train @ weight + bias, y[y_train_idx]
-        ) + l2 * weight.pow(2).sum()
+            x_train @ weight + bias, y[train]) + l2 * weight.pow(2).sum()
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+    accuracy = (((x_test @ weight + bias) > 0).float() == y[test]).float().mean()
+    return float(accuracy), weight.detach()          # the weight is in z-scored space
 
-    accuracy = (((x_test @ weight + bias) > 0).float() == y[y_test_idx]).float().mean()
-    return float(accuracy), weight.detach()     # weight lives in z-scored space
-
-for layer in range(0, n_layers, 2):
-    accuracy, _ = train_probe(activations[layer], labels, train_idx, test_idx)
-    print(f"layer {layer:2d}  test accuracy {accuracy:.2f}")
+per_layer = [train_probe(activations[layer], labels, train_idx, test_idx)[0]
+             for layer in range(n_layers)]
+print("held-out accuracy per layer:", [round(a, 2) for a in per_layer])
 ```
 
-## 4. Read that result correctly
+```
+held-out accuracy per layer: [0.95, 0.95, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+```
 
-Layer 0 scores 0.95 on adjectives the probe never saw, and every later layer 1.00.
-**High accuracy at layer 0 is a red flag, not a finding.** Layer 0 has barely
-processed anything — a probe that succeeds there is reading the *words*: sentiment
-adjectives' embeddings already share a direction, and one attention layer copies it
-to the final position. With a row split it would also score 1.00 by memorizing
-"wonderful" and "terrible" as tokens; the lexical split removes that, not the
-lexical semantics.
+**High accuracy at the first layer is a red flag.** The last token of every row
+is the same ".", so whatever block 0 holds there was copied from the adjective by
+one attention layer: the probe reads the words' lexical sentiment, a property of
+the input. To probe something the model computes, build a dataset whose label no
+token gives away (whether a stated fact is true, the number of a subject read at
+a later noun as in the [interchange](#calibrated-interchange-along-the-direction)
+below). Accuracy that appears only in the last layers may be the prediction
+itself: check the direction's cosine with the answer's unembedding, as that
+example does. Accuracy at chance means not linearly decodable at this site.
 
-The shape of a curve tells you what you found:
+## Controls
 
-| Curve | Interpretation |
-|---|---|
-| High from layer 0 | surface feature — token identity, position, formatting |
-| Rises in the middle and plateaus | a genuinely computed representation |
-| Only high in late layers | close to the output; may just be the prediction itself |
-| Flat at chance | not linearly decodable *here* — try other positions or sublayers |
-
-## 5. Controls
-
-Run all three. They are cheap and each kills a different false positive.
-
-**Shuffled labels** — destroys the real relationship; anything above chance is
-memorization capacity, and tells you your probe is too expressive for the dataset:
+**Shuffled labels**: give every adjective a random label, the same on all its
+rows, and train again. **Held-out template**: train on three templates and test
+on the fourth. A collapse there means the probe learned the template.
 
 ```python
-shuffled = labels[torch.randperm(len(labels), generator=generator)]
-control_accuracy, _ = train_probe(activations[6], shuffled, train_idx, test_idx)
-print(f"shuffled-label control at layer 6: {control_accuracy:.2f}   (chance = 0.50)")
+def random_word_labels():
+    per_word = labels[::len(templates)][torch.randperm(len(words), generator=generator)]
+    return per_word[word_of_row]
+
+rows = torch.randperm(len(texts), generator=generator)
+row_train, row_test = rows[40:], rows[:40]
+by_row, by_word = [], []
+for _ in range(20):
+    y = random_word_labels()
+    by_row.append(train_probe(activations[6], y, row_train, row_test)[0])
+    by_word.append(train_probe(activations[6], y, train_idx, test_idx)[0])
+by_row, by_word = torch.tensor(by_row), torch.tensor(by_word)
+print(f"random word labels, row split:     mean {by_row.mean():.2f}")
+print(f"random word labels, lexical split: mean {by_word.mean():.2f}  max {by_word.max():.2f}")
+
+fourth = torch.arange(len(texts)) % len(templates) == 3
+accuracy, _ = train_probe(activations[6], labels, torch.where(~fourth)[0], torch.where(fourth)[0])
+print(f"held-out template: {accuracy:.2f}")
+
+assert by_row.mean() > 0.8 > by_word.mean()
 ```
 
-**Held-out template** — train on three templates, test on the fourth. If accuracy
-collapses, the probe learned the template, not the property:
+```
+random word labels, row split:     mean 0.90
+random word labels, lexical split: mean 0.52  max 0.73
+held-out template: 1.00
+```
+
+With a row split the probe scores 0.90 on labels that mean nothing: it recalls
+words. With the lexical split the same labels average chance, and their spread
+(up to 0.73 here) is the band a real accuracy has to clear. The band is set by
+the ten held-out adjectives, not by the 40 rows.
+
+## Directions: the probe's, mass-mean, and the random floor
+
+A direction from the probe is `weight / std`: `train_probe` fits in z-scored
+space, and steering, projection and interchange all happen in activation space.
+The difference of class means (the mass-mean direction) needs no fit and is in
+activation space already. Score any direction as a 1-D classifier (project,
+threshold at the midpoint of the class means) beside random directions of the
+same norm. That floor is not 0.5:
 
 ```python
-per_template = len(templates)
-held_out = torch.tensor([i for i in range(len(texts)) if i % per_template == 3])
-kept = torch.tensor([i for i in range(len(texts)) if i % per_template != 3])
-accuracy, _ = train_probe(activations[6], labels, kept, held_out)
-print(f"held-out template at layer 6: {accuracy:.2f}")
-```
-
-```
-shuffled-label control at layer 6: 0.50   (chance = 0.50)
-held-out template at layer 6: 1.00
-```
-
-The shuffled control lands at chance — the probe is not simply memorizing, so the
-regularization is doing its job. The held-out template still scores 1.00, which
-means the probe is not keyed to the template either. Combined with the layer-0
-result, the honest summary is: *the probe reads the adjectives' lexical
-sentiment*, which generalizes across words and templates and is available from the
-embeddings up. That
-is a real property of the input, not a discovered internal representation.
-
-To probe something the model must *compute*, the property has to not be readable
-off the tokens: entailment between two sentences, whether a stated fact is true,
-the eventual answer to a question. Design the dataset so that no surface cue
-predicts the label.
-
-**A random direction** of the same norm, scored the same way, is the floor for any
-claim that "this direction encodes X". Score each as a 1-D classifier — project,
-threshold at the midpoint of the class means — next to the probe's own direction.
-`train_probe` returns its weight in z-scored space; **as a direction in activation
-space it is `weight / std`** — for steering, a 1-D classifier or an interchange
-alike. (The mass-mean directions below are built in activation space already.)
-
-```python
-features = activations[6]
+LAYER = 6
+features = activations[LAYER]
 std = features[train_idx].std(0) + 1e-6
-_, weight = train_probe(features, labels, train_idx, test_idx)
-probe_dir = weight / std                                    # z-scored -> activation space
+probe_dir = train_probe(features, labels, train_idx, test_idx)[1] / std
+probe_dir = probe_dir / probe_dir.norm()
+
+positive = features[train_idx][labels[train_idx] == 1].mean(0)
+negative = features[train_idx][labels[train_idx] == 0].mean(0)
+mass_mean = (positive - negative) / (positive - negative).norm()
 
 def one_d_accuracy(direction):
     train_proj, test_proj = features[train_idx] @ direction, features[test_idx] @ direction
@@ -184,267 +161,202 @@ def one_d_accuracy(direction):
     pred = (torch.sign(pos - neg) * (test_proj - (pos + neg) / 2)) > 0
     return float((pred.float() == labels[test_idx]).float().mean())
 
-random_accs = torch.tensor([one_d_accuracy(r / r.norm() * probe_dir.norm())
-                            for r in torch.randn(50, hidden, generator=generator)])
-print(f"probe direction {one_d_accuracy(probe_dir):.3f}   "
-      f"50 random directions: mean {random_accs.mean():.3f}  max {random_accs.max():.3f}")
+random_dirs = torch.randn(50, hidden, generator=generator)
+random_accs = torch.tensor([one_d_accuracy(r / r.norm()) for r in random_dirs])
+print(f"probe {one_d_accuracy(probe_dir):.2f}   mass-mean {one_d_accuracy(mass_mean):.2f}   "
+      f"50 random: mean {random_accs.mean():.2f}  max {random_accs.max():.2f}")
 ```
 
 ```
-probe direction 1.000   50 random directions: mean 0.659  max 0.950
+probe 1.00   mass-mean 1.00   50 random: mean 0.68  max 1.00
 ```
 
-Here a random direction averages 0.66 and reaches 0.95: sentiment adjectives are
-so separable at layer 6 that the probe's 1.00 is barely above the floor. On a
-concept the tokens do not give away (subject number read at the attractor, the
-dataset of the interchange below) random directions average 0.54 at layer 8
-against the mass-mean direction's 0.98.
-The floor depends on the dataset; measure it, do not assume 0.5. It does the most
-work in the causal step below, where it is run against the probe direction on the
-same prompt.
+Sentiment adjectives are so separable at this layer that random directions
+average 0.68 and one of the fifty matches the probe. Measure the floor on your
+dataset before claiming a direction encodes anything.
 
-## 6. Difference-in-means probes
+## Causal test: push along the direction
 
-Instead of fitting, take the mean activation difference between classes. This
-"mass-mean" direction is the one used in geometry-of-truth work — it is more robust
-on small datasets and, importantly, tends to be **more causally effective** than a
-trained probe, because a trained probe is free to use directions that discriminate
-without being the ones the model acts on.
+Decoding is correlational. To claim the model uses a direction, add it and watch
+the behavior, next to random directions of the same norm:
 
 ```python
-def mass_mean_direction(features, index):
-    positive = features[index][labels[index] == 1].mean(0)
-    negative = features[index][labels[index] == 0].mean(0)
-    direction = positive - negative
-    return direction / direction.norm()
+good, bad = (model.tokenizer.encode(w, add_special_tokens=False)[0] for w in (" great", " bad"))
 
-LAYER = 6
-direction = mass_mean_direction(activations[LAYER], train_idx)
-projections = activations[LAYER][test_idx] @ direction
-threshold = (activations[LAYER][train_idx] @ direction).mean()
-accuracy = ((projections > threshold).float() == labels[test_idx]).float().mean()
-print(f"difference-in-means accuracy at layer {LAYER}: {float(accuracy):.2f}")
-```
-
-## 7. Causal validation — the step that matters
-
-A probe is correlational. To claim the model *uses* the direction, intervene along
-it and check the behavior moves:
-
-```python
-scale = 0.5
-probe_direction = direction.to(model.device)
-
-test_prompt = "The movie was"
-good = model.tokenizer.encode(" great")[0]
-bad = model.tokenizer.encode(" bad")[0]
-
-def logit_gap(vector):
-    """logit(' great') - logit(' bad'), after adding `vector` at LAYER or nothing."""
-    with model.trace(test_prompt):
+def logit_gap(vector, scale=0.5):
+    """logit(' great') - logit(' bad'), with `vector` added at LAYER at half the residual's norm."""
+    with torch.no_grad(), model.trace("The movie was"):
         if vector is not None:
             norm = model.transformer.h[LAYER].output[0, -1].norm()
-            model.transformer.h[LAYER].output[:, -1, :] += scale * norm * vector
+            model.transformer.h[LAYER].output[:, -1, :] += scale * norm * vector.to(norm.device)
         logits = model.output.logits[0, -1]
-        gap = (logits[good] - logits[bad]).detach().save()
+        gap = (logits[good] - logits[bad]).save()
     return float(gap)
 
 baseline = logit_gap(None)
-steered = logit_gap(probe_direction)
-negated = logit_gap(-probe_direction)
+random_gaps = [logit_gap(r / r.norm()) for r in random_dirs[:8]]
+print(f"baseline {baseline:+.2f}")
+print(f"mass-mean {logit_gap(mass_mean):+.2f} / negated {logit_gap(-mass_mean):+.2f}")
+print(f"probe     {logit_gap(probe_dir):+.2f} / negated {logit_gap(-probe_dir):+.2f}")
+print(f"8 random  {min(random_gaps):+.2f} to {max(random_gaps):+.2f}")
 
-random_generator = torch.Generator().manual_seed(0)
-random_gaps = []
-for _ in range(8):
-    noise = torch.randn(probe_direction.shape, generator=random_generator)
-    random_gaps.append(logit_gap((noise / noise.norm()).to(model.device)))
-
-print(f"baseline {baseline:+.3f}   probe {steered:+.3f}   negated {negated:+.3f}")
-print(f"random directions: mean {sum(random_gaps) / len(random_gaps):+.3f}"
-      f"   max {max(random_gaps):+.3f}")
-
-assert steered > baseline > negated
-assert steered > max(random_gaps)
+assert logit_gap(mass_mean) > max(random_gaps) and logit_gap(-mass_mean) < min(random_gaps)
 ```
 
 ```
-baseline +1.130   probe +5.203   negated -3.024
-random directions: mean +1.020   max +1.846
+baseline +1.13
+mass-mean +5.20 / negated -3.02
+probe     +4.18 / negated -2.32
+8 random  +0.68 to +1.82
 ```
 
-The direction moves the gap by `+4.07` and its negation by `-4.15`; eight random
-directions of the same norm land between `-0.02` and `+1.85`, straddling the
-baseline. **The last two lines are the result.** Without them the first two
-numbers are equally consistent with "any perturbation of this size moves the
-logits", and a steering demonstration with no random control is the failure this
-guide is about.
+The random row is the result. Without it the rows above are equally consistent
+with "any push of this size moves the logits". At the same norm the mass-mean
+direction moves the gap further than the fitted probe's (+4.07 against +3.05):
+the best classifier is not the best handle, so test both. A direction that
+decodes and does not move the behavior is a decodable feature the model does not
+read at that site, and is reported as that. Scaling and sweeping the coefficient:
+[model-steering](model-steering.md).
 
-If steering along the probe direction moves the behavior and a random direction of
-the same norm does not, the direction is causally relevant. If it does not move
-anything, you have a decodable feature the model does not read — a real and common
-result worth reporting as such. See the [model-steering guide](model-steering.md) for scaling and
-sweeping.
+## Calibrated: interchange along the direction
 
-### Calibrated: interchange along the direction
-
-Steering at `0.5 × norm` is a quick check, but its size is arbitrary and an
-unnatural push moves almost anything. The calibrated test works at natural scale:
-take a minimal pair, and **swap only the pair's projection along the direction**.
-If that 1-D swap recovers as much as patching the whole residual, the direction
-carries what that site contributes. It needs a concept with a pair metric, so this
-uses subject number ("The keys near the cabinet" → ` are`), read at the last
-position, where the token is the attractor and does not give the subject away:
+A push of half the residual norm is an arbitrary size. The calibrated test works
+at natural scale: take a minimal pair and swap only the pair's difference along
+the direction. If that 1-D swap recovers what patching the whole residual
+recovers, the direction carries what the site contributes. It needs a pair
+metric, so this uses subject number ("The keys near the cabinet" continues with
+` are`), read at the last token, which is the other noun and does not give the
+subject away:
 
 ```python
-nouns = [(w, w + "s") for w in ("key dog car book girl boy bird house table player doctor "
-                                 "road window letter song tree farmer cat student teacher "
-                                 "lake king ship wall").split()]
-preps = [" near", " behind", " beside", " with", " for"]
-ARE, IS = model.tokenizer.encode(" are")[0], model.tokenizer.encode(" is")[0]
+nouns = ("key dog car book girl boy bird house table player doctor road window letter "
+         "song tree farmer cat student teacher lake king ship wall").split()
+preps = ["near", "behind", "beside", "with", "for"]
+ARE, IS = (model.tokenizer.encode(w, add_special_tokens=False)[0] for w in (" are", " is"))
 gen = torch.Generator().manual_seed(0)
 
-def pairs_for(lemmas, per_lemma=8):
-    """(singular-subject, plural-subject) prompts; prep and attractor shared."""
-    out = []
-    for s in lemmas:
-        for _ in range(per_lemma):
-            a, p, an = (int(torch.randint(n, (1,), generator=gen)) for n in (len(nouns), len(preps), 2))
-            p = preps[p]
-            out.append(tuple(f"The {nouns[s][n]}{p} the {nouns[a][an]}" for n in (0, 1)))
-    return out
+def pairs_for(subjects, per_subject=8):
+    """(singular-subject, plural-subject) prompts that share preposition and second noun."""
+    pairs = []
+    for subject in subjects:
+        for _ in range(per_subject):
+            other, prep, plural = (int(torch.randint(n, (1,), generator=gen))
+                                   for n in (len(nouns), len(preps), 2))
+            tail = f" {preps[prep]} the {nouns[other]}{'s' * plural}"
+            pairs.append((f"The {nouns[subject]}{tail}", f"The {nouns[subject]}s{tail}"))
+    return pairs
 
-order = torch.randperm(len(nouns), generator=gen).tolist()     # split by lemma
+order = torch.randperm(len(nouns), generator=gen).tolist()        # split by subject noun
 train_pairs, test_pairs = pairs_for(order[:16]), pairs_for(order[16:])
 assert all(len(model.tokenizer(t).input_ids) == 5 for pair in train_pairs + test_pairs for t in pair)
 
 def last_resid(prompts):
     with torch.no_grad(), model.trace(prompts):
-        acts = nnsight.save([b.output[:, -1, :].detach() for b in model.transformer.h])
+        acts = nnsight.save([block.output[:, -1, :] for block in model.transformer.h])
         gap = (model.output.logits[:, -1, ARE] - model.output.logits[:, -1, IS]).save()
     return acts, gap
 
 sing_train, _ = last_resid([s for s, _ in train_pairs])
 plur_train, _ = last_resid([p for _, p in train_pairs])
-corrupt = [s for s, _ in test_pairs]                    # singular: the donor fixes ` are`
-clean_resid, clean_gap = last_resid([p for _, p in test_pairs])
-_, corrupt_gap = last_resid(corrupt)
-hi, lo = float(clean_gap.mean()), float(corrupt_gap.mean())
+singular, plural = [s for s, _ in test_pairs], [p for _, p in test_pairs]
+sing_resid, sing_gap = last_resid(singular)                       # the runs to repair
+plur_resid, plur_gap = last_resid(plural)                         # the donors
+lo, hi = float(sing_gap.mean()), float(plur_gap.mean())
 unembed = model.lm_head.weight[ARE] - model.lm_head.weight[IS]
 ```
 
-Per layer, one trace: the full-residual patch, the 1-D interchange, a random shift
-of the *same per-row magnitude* (the null that matches scale), then mean-ablation of
-the direction (projection set to its training mean) on both halves of the test set
-for necessity, and the direction's cosine with the ` are` − ` is` unembedding:
+Per layer, one trace holds the full-residual patch, the 1-D swap, the same shift
+along a random direction (the null of matched size), and a mean-ablation of the
+direction (its projection set to the training mean) on all test prompts, also
+along the random direction. `decodes` is the direction's 1-D accuracy on the
+held-out prompts at the same site:
 
 ```python
 def gap_now():
     return model.output.logits[:, -1, ARE] - model.output.logits[:, -1, IS]
 
-def recovery(gap):
+def recovery(gap):                                    # 0 = singular run, 1 = plural run
     return (float(gap.mean()) - lo) / (hi - lo)
 
-both = corrupt + [p for _, p in test_pairs]
-truth = torch.tensor([0] * len(corrupt) + [1] * len(corrupt))
-accuracy = lambda gap: float(((gap > 0).long().cpu() == truth).float().mean())
+both = singular + plural
+truth = torch.tensor([0] * len(singular) + [1] * len(plural))
 
-_, base_gap = last_resid(both)
-print(f"unablated agreement accuracy {accuracy(base_gap):.3f}")
-print("layer  full   1-D   rand-shift   ablated acc (random dir)   cos(d, unembed)")
-rows = {}
+def agreement(gap):
+    return float(((gap > 0).long().cpu() == truth).float().mean())
+
+print("layer  decodes   full    1-D  random   ablated (random)   cos(d, unembed)")
+table = {}
 with torch.no_grad():
     for layer in (3, 5, 7, 9, 10, 11):
         diff = plur_train[layer].mean(0) - sing_train[layer].mean(0)
-        d, r = diff / diff.norm(), torch.randn(hidden, generator=gen).to(diff.device)
+        d = diff / diff.norm()                                    # mass-mean direction
+        r = torch.randn(hidden, generator=gen).to(d.device)
         r = r / r.norm()
         train_mean = torch.cat([sing_train[layer], plur_train[layer]]).mean(0)
         with model.trace() as tracer:
             out = nnsight.save({})
-            with tracer.invoke(corrupt):                               # full residual
-                model.transformer.h[layer].output[:, -1, :] = clean_resid[layer]
+            with tracer.invoke(singular):                         # the whole residual
+                model.transformer.h[layer].output[:, -1, :] = plur_resid[layer]
                 out["full"] = gap_now()
-            for name, u in (("1d", d), ("rand", r)):                   # 1-D swap / matched null
-                with tracer.invoke(corrupt):
+            for name, u in (("1d", d), ("random", r)):            # the pair's gap along d, moved along u
+                with tracer.invoke(singular):
                     cur = model.transformer.h[layer].output[:, -1, :]
-                    shift = (clean_resid[layer] - cur) @ d
-                    if name == "rand":
-                        shift = shift.abs()                            # same size, wrong direction
+                    shift = (plur_resid[layer] - cur) @ d
                     model.transformer.h[layer].output[:, -1, :] = cur + shift[:, None] * u
                     out[name] = gap_now()
-            for name, u in (("abl", d), ("abl_rand", r)):              # mean-ablation: necessity
+            for name, u in (("ablated", d), ("ablated_random", r)):
                 with tracer.invoke(both):
                     cur = model.transformer.h[layer].output[:, -1, :]
                     model.transformer.h[layer].output[:, -1, :] = (
-                        cur + (train_mean @ u - cur @ u)[:, None] * u)
+                        cur + ((train_mean - cur) @ u)[:, None] * u)
                     out[name] = gap_now()
+        middle = (plur_train[layer].mean(0) + sing_train[layer].mean(0)) @ d / 2
+        decodes = float(torch.cat([plur_resid[layer] @ d > middle,
+                                   sing_resid[layer] @ d < middle]).float().mean())
         cos = float(torch.nn.functional.cosine_similarity(d, unembed, dim=0))
-        rows[layer] = full, one_d, rand, abl, abl_rand = (
-            recovery(out["full"]), recovery(out["1d"]), recovery(out["rand"]),
-            accuracy(out["abl"]), accuracy(out["abl_rand"]))
-        print(f"L{layer:<5}{full:+.2f}  {one_d:+.2f}   {rand:+.2f}        "
-              f"{abl:.3f} ({abl_rand:.3f})             {cos:+.2f}")
+        row = table[layer] = dict(
+            decodes=decodes, full=recovery(out["full"]), one_d=recovery(out["1d"]),
+            random=recovery(out["random"]), ablated=agreement(out["ablated"]),
+            ablated_random=agreement(out["ablated_random"]))
+        print(f"L{layer:<5} {row['decodes']:.2f}    {row['full']:+.2f}  {row['one_d']:+.2f}   "
+              f"{row['random']:+.2f}     {row['ablated']:.2f} ({row['ablated_random']:.2f})"
+              f"          {cos:+.2f}")
 
-assert all(abs(full - one_d) < 0.1 and abs(rand) < 0.1 for full, one_d, rand, _, _ in rows.values())
-assert rows[11][3] < 0.6 and min(row[4] for row in rows.values()) > 0.95
+assert all(abs(row["full"] - row["one_d"]) < 0.1 and abs(row["random"]) < 0.1 for row in table.values())
+assert table[11]["ablated"] < 0.6 and min(row["ablated_random"] for row in table.values()) > 0.95
+assert table[5]["decodes"] > 0.7 and table[5]["full"] < 0.1       # decodable, and not used here
 ```
 
 ```
-unablated agreement accuracy 1.000
-layer  full   1-D   rand-shift   ablated acc (random dir)   cos(d, unembed)
-L3    +0.00  +0.00   -0.00        1.000 (1.000)             +0.13
-L5    +0.07  +0.06   -0.00        1.000 (1.000)             +0.10
-L7    +0.51  +0.46   -0.02        0.922 (1.000)             +0.45
-L9    +0.74  +0.69   -0.03        0.766 (1.000)             +0.61
-L10   +0.96  +0.95   +0.05        0.641 (1.000)             +0.78
-L11   +1.00  +0.97   -0.08        0.523 (1.000)             +0.70
+layer  decodes   full    1-D  random   ablated (random)   cos(d, unembed)
+L3     0.75    +0.00  +0.00   -0.00     1.00 (1.00)          +0.13
+L5     0.79    +0.07  +0.06   -0.00     1.00 (1.00)          +0.10
+L7     0.98    +0.51  +0.46   -0.02     0.92 (1.00)          +0.45
+L9     0.99    +0.74  +0.69   -0.03     0.77 (1.00)          +0.61
+L10    1.00    +0.96  +0.95   +0.05     0.64 (1.00)          +0.78
+L11    0.87    +1.00  +0.97   -0.08     0.52 (1.00)          +0.70
 ```
 
-- **1-D vs full** — the swap along one direction recovers within 0.05 of the whole
-  residual at every layer: at this position, subject number *is* that direction.
-- **rand-shift** — the same per-row shift along a random direction stays within
-  ±0.08. That is the null that rules out "any push of this size".
-- **ablated** — mean-ablating the direction takes agreement from 1.000 to chance by
-  layer 11; the same ablation along a random direction changes nothing. Swap shows
-  sufficiency, ablation necessity.
-- **cos(d, unembed)** — rises from 0.13 to 0.78 by layer 10. Late, the direction
-  is largely the output itself; the claim "an abstract number feature" is clean
-  only mid-stack, where the effect exists and the cosine is still low.
+- **1-D against full.** The swap along one direction recovers what the whole
+  residual does at every layer: at this position, subject number is that
+  direction.
+- **random.** The same shift along a random direction recovers nothing, which
+  rules out "any change of this size".
+- **ablated.** Mean-ablating the direction takes agreement to chance by the last
+  layer and the random direction changes nothing. The swap shows sufficiency,
+  the ablation necessity.
+- **cos(d, unembed)** rises with depth. By layer 10 the direction is largely
+  the output itself (0.78), so "a number feature" is a cleaner claim at layer 7,
+  where the effect has appeared and the cosine is 0.45.
+- **decodes against full.** At layers 3 and 5 the direction classifies held-out
+  subject number at 0.75 and 0.79, and patching the whole residual there
+  recovers nothing. Decodable at a site is not used at that site: pair every
+  probe-site claim with this test
+  ([interp-experiment-design](interp-experiment-design.md)).
 
-Read the first column too: recovery is ~0 before layer 7, yet at this position the
-mass-mean direction already classifies held-out subject number at 0.71–0.79 over
-layers 2–5 (random directions: 0.51). The [interp-experiment-design guide](interp-experiment-design.md) covers that trap (position migration).
+## Erasing the concept
 
-## 8. Concept erasure — the strong version of the causal test
-
-Erasure removes the concept's linear subspace (LEACE, INLP) from the residual
-stream **inside the forward pass**, so everything downstream runs on the erased
-state — projecting cached activations afterwards proves nothing about the model.
-Judge it with a probe *retrained* on activations collected with the eraser
-running, against a rank-matched random eraser, and refit each later site on the
-already-erased stream: a per-site eraser fitted on baseline activations lets the
-concept back in one block later. A retrained probe that scores *below* chance on
-held-out items after erasure (0.40 on one split in the reference) means the signal is gone and
-the probe fit noise that anti-generalizes, not that something is inverted. Code,
-behavioral cost and measured tables:
-[references/concept-erasure.md](probing-concept-erasure.md).
-
-## Practical notes
-
-**Which activation.** The residual stream at the last position is the default.
-Also worth probing: specific token positions (where the property is mentioned),
-attention outputs (what was moved), MLP outputs (what was computed).
-
-**Class balance and dataset size.** Small probing sets overfit trivially. Balance
-classes, and treat any result from fewer than a few hundred examples as
-provisional.
-
-**Regularization.** With `hidden` ≫ examples, an unregularized probe fits anything.
-Keep weight decay on and report it.
-
-## Related guides
-
-- [model-steering](model-steering.md) — turning a probe direction into an intervention
-- [sae-and-dictionary-learning](sae-and-dictionary-learning.md) — unsupervised features instead of supervised probes
-- [activation-patching](activation-patching.md) — establishing causality component-wise
-- [nnsight](../SKILL.md) — batched activation collection, caching
-- [interp-experiment-design](interp-experiment-design.md) — controls and metric design in general
+The complement of pushing along a direction is removing the concept's subspace
+inside the forward pass (LEACE) and measuring what breaks, judged by a retrained
+probe against a random eraser of the same rank:
+[probing-concept-erasure](probing-concept-erasure.md).
