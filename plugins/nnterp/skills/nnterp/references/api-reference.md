@@ -236,7 +236,7 @@ mixer's input, not the stream, so the standard contributions mean nothing there)
 | `model.attention_probabilities[i]` with `enable_attention_probs=True` | `model.layers[i].self_attn.attention_probabilities` with `attn_implementation="eager"` at load |
 | `model.skip_layer(i)` | `model.skip_layers(i, i)` |
 | `StandardizedTransformer(repo, remote=True)` | `model.trace(prompt, remote=True)` |
-| `nnterp.interventions` (`logit_lens`, `patchscope_lens`, `TargetPrompt`) | removed: the [patterns guide](patterns.md)'s logit lens and patching recipes |
+| `nnterp.interventions` (`logit_lens`, `patchscope_lens`, `TargetPrompt`) | removed: the [patterns guide](patterns.md)'s logit lens and patching recipes. `logit_lens(model, prompts)` returned `[prompts, layers, vocab]`: per layer, the softmax of `model.project_on_vocab(layers[i].layer_output[:, -1])` |
 | `nnterp.nnsight_utils.get_layer_output` and the other `get_*` | removed: the values above |
 
 A load takes the checkpoint's dtype (often bf16), where a 1.x script on transformers 4 ran in
