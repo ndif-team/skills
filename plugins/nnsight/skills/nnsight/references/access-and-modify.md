@@ -1,212 +1,152 @@
-# Access and Modify Activations
+# Access and Modify: Tuples, Inputs, Heads, Repeated Modules
 
-Everything you do to a model's internals goes through three properties on any
-module (`Envoy`), read or written **inside a trace body**.
-
-| Property | Is | Assignable |
-|---|---|---|
-| `module.output` | the module's forward return value | yes |
-| `module.input` | its first positional arg (or first kwarg if none) | yes |
-| `module.inputs` | `(args, kwargs)` — everything it was called with | yes |
+[SKILL.md](../SKILL.md) covers reading `.output`, in-place and replacement edits,
+and calling a module on a value. This page is the cases past that.
 
 ```python
 import torch
 import nnsight
-from nnsight import TransformersModel
+from nnsight import NNsight, TransformersModel
 
-model = TransformersModel("openai-community/gpt2", dispatch=True)
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
 prompt = "The Eiffel Tower is in the city of"
 ```
 
+## Tuple outputs
+
+An attention module returns a tuple. Assigning into it, `attn.output[0] = x`, is
+`tuple.__setitem__` and raises `TypeError: 'tuple' object does not support item
+assignment`. Write into the element, or rebuild the tuple and assign it:
+
 ```python
 with model.trace(prompt):
-    resid = model.transformer.h[5].output.save()         # read
-    mlp_in = model.transformer.h[6].mlp.input.save()     # read an input
-    logits = model.output.logits.save()
+    model.transformer.h[0].attn.output[0][:] = 0                     # into the element
 
-print(resid.shape, mlp_in.shape, logits.shape)
+    attn = model.transformer.h[1].attn
+    attn.output = (torch.zeros_like(attn.output[0]),) + tuple(attn.output[1:])   # a new tuple
+
+    kinds = nnsight.save([type(model.transformer.h[2].attn.output).__name__,
+                          type(model.transformer.h[2].output).__name__])
+
+assert kinds == ["tuple", "Tensor"]
 ```
 
-## Know what a module actually returns
+Replacement is the only way to change a value that is not a tensor. A replacement
+built from a fresh tensor (`torch.zeros_like`) cuts the autograd graph at that
+point; see [gradients](gradients.md#replacements-and-the-graph) when a backward
+pass follows.
 
-**Do not assume `.output[0]`.** In `transformers` 5, a GPT-2 *block* returns a
-plain tensor, while the *attention* submodule returns a tuple. Older nnsight
-examples on the internet write `h[i].output[0]` everywhere, which silently indexes
-the batch dimension instead of unpacking a tuple.
+## Inputs
 
-This is a `transformers` fact, and it moved: in 4.x the same block returned
-`(hidden_states,)`, so `.output[0]` was correct there. The answer differs per
-version and per architecture
-([modules-and-architectures.md](modules-and-architectures.md#tensor-or-tuple) has
-the table), so check once at the top of an experiment:
+`.input` is the first positional argument (the first keyword argument when there
+are none) and assigning to it repacks the call. Everything else goes through
+`.inputs`, the `(args, kwargs)` pair, assigned whole:
 
 ```python
 with model.trace(prompt):
-    attn_out = model.transformer.h[0].attn.output    # attn runs before the block ends
-    block_out = model.transformer.h[0].output
-    kinds = nnsight.save({
-        "block": type(block_out).__name__,
-        "attn": type(attn_out).__name__,
-    })
-
-assert kinds == {"block": "Tensor", "attn": "tuple"}
-```
-
-Note the order: a block's `attn` and `mlp` return *before* the block does, so read
-them first. `model.scan(...)` gets the same answer with no real compute — see
-[caching-and-scan.md](caching-and-scan.md).
-
-## In-place vs replacement
-
-Both work, and they differ:
-
-```python
-with model.trace(prompt):
-    # IN-PLACE: mutate the tensor the model is holding.
-    model.transformer.h[0].output[:] = 0
-    zeroed = model.transformer.h[0].output.mean().save()
-
-    # REPLACEMENT: hand the model a different object to continue with.
-    model.transformer.h[1].output = model.transformer.h[1].output * 2
-
-    logits = model.output.logits.save()
-
-print(zeroed.item())     # 0.0
-```
-
-Use in-place (`[:] =`, `[..., idx] =`) for surgical edits to part of a tensor; use
-replacement when you are producing a new tensor wholesale. Replacement is also the
-only option when the value is not a tensor (a tuple, a dataclass output).
-
-A replacement built from a fresh tensor (`torch.zeros_like(output)`) cuts the
-autograd graph there; see [gradients.md](gradients.md#replacements-and-the-graph)
-if gradients are involved.
-
-**Mutating a tuple element by assignment fails** — `output[0] = x` is
-`tuple.__setitem__`. Either mutate in place through the element, or rebuild:
-
-```python
-with model.trace(prompt):
-    # in-place through the tuple's first element
-    model.transformer.h[0].attn.output[0][:] = 0
-
-    # or rebuild the tuple and assign the whole thing
-    attn = model.transformer.h[1].attn.output
-    model.transformer.h[1].attn.output = (torch.zeros_like(attn[0]),) + tuple(attn[1:])
-
-    out = model.output.logits.save()
-```
-
-## Positions and heads
-
-Activations are `(batch, seq, hidden)`. Positions index `seq`; `-1` is the last
-token, where next-token prediction is read (`output[:, -1, :] += v` steers only it).
-
-Heads live inside the hidden dimension: head `i` is the slice
-`[..., i * head_dim : (i + 1) * head_dim]` of the attention output projection's
-*input*. The attention module's own `.output` is past that projection, so the same
-slice there mixes every head:
-
-```python
-# read it off the module: equals n_embd // n_head on GPT-2, not on GQA/Gemma-style models
-head_dim = model.transformer.h[5].attn._module.head_dim
-head = 4
-
-with model.trace(prompt):
-    proj_in = model.transformer.h[5].attn.c_proj.input
-    proj_in[:, :, head * head_dim : (head + 1) * head_dim] = 0    # ablate one head
-    logits = model.output.logits.save()
-
-print(logits.shape)
-```
-
-For a reusable, writable per-head view, define an `eproperty` — see
-[modules-and-architectures.md](modules-and-architectures.md#adding-your-own-served-value-eproperty-envoys).
-
-## Clone when you need the "before"
-
-Reads after an in-place edit return the edited tensor. Clone to keep a snapshot:
-
-```python
-with model.trace(prompt):
-    before = model.transformer.h[0].output.clone().save()
-    model.transformer.h[0].output[:] = 0
-    after = model.transformer.h[0].output.save()
-
-print(before.abs().sum().item() > 0, after.abs().sum().item() == 0)   # True True
-```
-
-The same holds for anything you save: a saved tensor aliases the live one, so
-clone it if you also write to that location afterwards.
-
-## Tensors you create must land on the model's device
-
-Build new tensors on the activation's device and dtype:
-
-```python
-with model.trace(prompt):
-    resid = model.transformer.h[6].output
-    direction = torch.ones(resid.shape[-1], device=resid.device, dtype=resid.dtype)
-    model.transformer.h[6].output[:, -1, :] += 3.0 * direction
-    logits = model.output.logits.save()
-```
-
-Deriving them from the activation, not `model.device`, holds under `device_map`
-sharding and mixed precision.
-
-## Setting inputs
-
-`.input = value` repacks into the underlying `(args, kwargs)` for you
-(`h[3].input = h[3].input * 0.5`). For anything beyond the first argument, assign
-the whole pair through `.inputs`:
-
-```python
-with model.trace(prompt):
-    args, kwargs = model.transformer.h[3].inputs
-    model.transformer.h[3].inputs = ((args[0] * 0.5, *args[1:]), kwargs)
-    keys = nnsight.save(sorted(kwargs.keys()))
+    block = model.transformer.h[3]
+    args, kwargs = block.inputs
+    block.inputs = ((args[0] * 0.5, *args[1:]), kwargs)
+    names = nnsight.save(sorted(kwargs))
     halved = model.output.logits.save()
 
-print(keys, halved.shape)
+print(names)
 ```
 
-## Applying a module to a value
+`model.inputs` is the whole model's call: `kwargs["input_ids"]` and
+`kwargs["attention_mask"]` as the forward received them, padding included. Read
+it before any module.
 
-Calling an envoy inside a trace runs the module with nnsight stood down: it serves
-no value and spends no occurrence, so it is not bound by the ordering rule and does
-not consume the module's real place in the forward pass. This is how logit lens is
-written:
+## Attention heads
+
+Heads are separate only at the **input of the attention's output projection**:
+`attn.c_proj.input` on GPT-2, `self_attn.o_proj.input` on Llama-style models
+(`scripts/inspect_model.py <repo_id> --grep attn` prints the name for any other
+family). Head `i` is the slice `[..., i * head_dim : (i + 1) * head_dim]` of that
+tensor. `attn.output` is past the projection: the same slice there mixes every
+head, raises nothing, and ranks different "heads".
 
 ```python
-with model.trace(prompt):
-    mid = model.transformer.h[5].output
-    decoded = model.lm_head(model.transformer.ln_f(mid))    # apply out of order
-    top = decoded[0, -1].argmax(dim=-1).save()
+attn = model.transformer.h[5].attn
+head_dim = attn._module.head_dim          # read it off the module
+head = 4
 
-print(model.tokenizer.decode(top))
+with model.trace() as tracer:
+    out = nnsight.save({})
+    with tracer.invoke(prompt):
+        out["clean"] = model.output.logits[0, -1]
+    with tracer.invoke(prompt):
+        attn.c_proj.input[:, :, head * head_dim:(head + 1) * head_dim] = 0     # ablate head 4
+        out["ablated"] = model.output.logits[0, -1]
+
+assert not torch.equal(out["clean"], out["ablated"])
 ```
 
-Pass `hook=True` when you want the called module's own internals observable (an
-attached SAE or adapter) — see
-[modules-and-architectures.md](modules-and-architectures.md#attaching-your-own-module-sae-probe-adapter).
+- **Read `head_dim` from the module.** `hidden_size // num_attention_heads` is
+  wrong on some families: on `google/gemma-2-2b` it gives 288 and the module's
+  `head_dim` is 256. A slice with the wrong width raises nothing.
+- **Grouped-query attention** (Llama-3, Qwen, SmolLM2): the projection input has
+  one slice per *query* head, `num_attention_heads` of them. Only `k_proj` and
+  `v_proj` outputs are indexed by `num_key_value_heads`.
+- A head's write to the residual stream is its slice through the projection's
+  weight: `z[..., lo:hi] @ c_proj.weight[lo:hi]` on GPT-2's `Conv1D` (weight is
+  `[in, out]`), `z[..., lo:hi] @ o_proj.weight[:, lo:hi].T` on an `nn.Linear`.
 
-## Reading outside a trace
+For a reusable per-head view, define a custom value:
+[modules-and-architectures](modules-and-architectures.md#custom-values-eproperty-and-envoys).
+Attention probabilities are a different object:
+[attention-analysis](attention-analysis.md).
 
-`.output` raises outside interleaving — open a trace for values, or `model.scan(...)`
-for shapes:
+## A module that runs more than once
+
+`.output` is the module's **first** call in the forward pass. Reading it twice
+returns that first value twice, so a weight-tied or looped module looks as if
+every pass computed the same thing. `tracer.iter` steps through the calls, the
+same way it steps through generation steps:
 
 ```python
-hidden = model.transformer.h[0].output     # no trace running
+class Looped(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block = torch.nn.Linear(4, 4)
+
+    def forward(self, x):
+        for _ in range(3):
+            x = torch.relu(self.block(x)) + x
+        return x
+
+net = NNsight(Looped())
+x = torch.ones(1, 4)
+
+with net.trace(x) as tracer:
+    norms = nnsight.save([])
+    for call in tracer.iter[:3]:                 # call 0, 1, 2 of every module read below
+        norms.append(net.block.output.norm())
+
+with net.trace(x) as tracer:
+    for call in tracer.iter[1]:                  # the second call only
+        net.block.output[:] = 0
+    edited = net.output.save()
+
+assert len(norms) == 3 and len({round(float(n), 4) for n in norms}) == 3
 ```
 
-## Name collisions
+A loop that asks for more calls than the forward makes is cut short the way a
+generation loop is ([generation](generation.md#the-one-rule-for-iteration-loops)).
+Under `model.generate`, a module called `k` times per forward makes `k`
+occurrences per step, so `tracer.iter[n]` no longer means step `n` for it.
 
-A child module named like an nnsight property (BERT's `output` submodule) moves to
-`.E_output`; see [api-reference.md](api-reference.md#envoy-properties-any-module).
+## Calling a module with `hook=True`
 
-## Related
+`model.lm_head(x)` inside a trace runs the module with nnsight stood down: the
+call serves no values and its submodules cannot be read. Pass `hook=True` when
+the called module's own internals should be readable, which is how an attached
+SAE or adapter is observed:
+[modules-and-architectures](modules-and-architectures.md#attaching-a-module).
 
-- [execution-model.md](execution-model.md) — why reads block and what order they must be in
-- [batching.md](batching.md) — doing this for several prompts in one pass
-- [source-tracing.md](source-tracing.md) — reaching values *inside* a module's forward
-- [caching-and-scan.md](caching-and-scan.md) — grabbing many modules at once
+## A child named `output` or `input`
+
+A submodule named like an nnsight property (BERT's attention has a child called
+`output`) is reached as `.E_output` / `.E_input`; `.output` stays the module's own
+value. nnsight warns at load, and `print(model)` labels the child `E_output/output`.
+Its path in `named_modules()` and in cache keys is unchanged.
