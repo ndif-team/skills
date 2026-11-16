@@ -1,28 +1,26 @@
-# Model Steering
+# Model steering
 
-Steering adds a direction to the residual stream during the forward pass:
-
-```
-h_L  ←  h_L + α · v
-```
-
-Get `v` from the difference between activations on contrasting prompts, and `α`
-from a sweep. Everything else is detail.
+Steering adds a direction to the residual stream at one layer on every forward
+pass: `h ← h + α · s · v`. The unit direction `v` comes from contrasting
+activations, `s` is the measured norm of the residual at that layer, the
+coefficient `α` comes from a sweep, and a random direction of the same norm is
+the control that says a change is due to `v`.
 
 ```python
 import torch
 import nnsight
 from nnsight import TransformersModel
 
-model = TransformersModel("openai-community/gpt2", dispatch=True)
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
 LAYER = 6
 prompt = "The movie was"
 ```
 
-## Deriving a steering vector
+## A contrastive vector in one trace
 
-Contrastive activation addition: run positive and negative examples, take the
-difference of their mean activations. Both sets go in one forward pass.
+The direction is the difference between the mean last-token activations of two
+prompt sets. Both sets, and the norm of the residual the vector is added to, come
+from one forward pass:
 
 ```python
 positive = ["I love this", "This is wonderful", "What a great day", "I am so happy"]
@@ -30,43 +28,44 @@ negative = ["I hate this", "This is terrible", "What an awful day", "I am so sad
 
 with model.trace() as tracer:
     with tracer.invoke(positive):
-        # detach: a saved activation's live grad_fn keeps the whole forward graph alive
         pos_mean = model.transformer.h[LAYER].output[:, -1, :].mean(0).detach().save()
     with tracer.invoke(negative):
         neg_mean = model.transformer.h[LAYER].output[:, -1, :].mean(0).detach().save()
+    with tracer.invoke(prompt):
+        scale = model.transformer.h[LAYER].output[0, -1].norm().detach().save()
 
 raw = pos_mean - neg_mean
 direction = raw / raw.norm()
-print(f"raw norm {raw.norm().item():.1f}, unit direction {tuple(direction.shape)}")
+scale = float(scale)
+print(f"raw norm {raw.norm().item():.1f}, residual norm {scale:.1f}")
 ```
 
-More pairs is better — a handful of examples encodes prompt idiosyncrasies as much
-as the concept. Use contrast pairs that differ *only* in the attribute you want.
+```
+raw norm 27.3, residual norm 93.2
+```
 
-## Scale relative to the activation, then sweep
+Two disjoint sets of four pairs give directions with cosine 0.61 here, so four
+pairs carry their own wording as well as the concept. Use more, make each pair
+differ only in the attribute, and evaluate on prompts unlike them. A direction
+from a [probe](probing.md) or an
+[SAE feature](sae-and-dictionary-learning.md) is scaled, swept and evaluated the
+same way.
 
-**This is where most steering attempts fail.** The raw difference vector has no
-meaningful magnitude: here its norm is 27 while the residual it is added to has
-norm 93. Multiplying the raw vector by 5 or 10, the coefficients that appear in
-many tutorials, is α = 1.5 and α = 2.9 on the scale below: both past the point
-where this model starts repeating itself.
+## Scale by the residual norm, then sweep
 
-Scale the unit direction by the *measured* activation norm, then sweep. Track a
-cheap collapse signal alongside the text. The fraction of generated bigrams that
-repeat is zero for fluent output and jumps when the model starts looping:
+The raw difference has no meaningful magnitude: its norm is 27 where the residual
+has norm 93. Multiply the unit direction by the measured residual norm, so that α
+is a fraction of the activation, and sweep α. Print a collapse signal beside the
+text: the fraction of generated bigrams that repeat is 0 for fluent output and
+jumps when the model loops.
 
 ```python
-with model.trace(prompt):
-    scale = model.transformer.h[LAYER].output[0, -1].norm().detach().save()
-
-print(f"residual norm at layer {LAYER}: {float(scale):.1f}")
-
 alphas = [0.0, 0.25, 0.5, 1.0, 2.0]
 generations = {}
 for alpha in alphas:
-    with model.generate(prompt, max_new_tokens=12, min_new_tokens=12) as tracer:
+    with model.generate(prompt, max_new_tokens=12, min_new_tokens=12, do_sample=False) as tracer:
         for step in tracer.iter[:12]:
-            model.transformer.h[LAYER].output[:, -1, :] += alpha * float(scale) * direction
+            model.transformer.h[LAYER].output[:, -1, :] += alpha * scale * direction
         ids = tracer.result.save()
     sequence = ids[0].tolist()
     bigrams = list(zip(sequence, sequence[1:]))
@@ -74,12 +73,10 @@ for alpha in alphas:
     generations[alpha] = model.tokenizer.decode(sequence)
     print(f"alpha {alpha:>4}  repeat {repeat:.2f}  {generations[alpha]!r}")
 
-# Two rows that come out identical almost always mean one of them never ran.
-assert len(set(generations.values())) == len(alphas)
+assert len(set(generations.values())) == len(alphas)   # two equal rows: one of them did not run
 ```
 
 ```
-residual norm at layer 6: 93.2
 alpha  0.0  repeat 0.00  'The movie was released in Japan on May 7, 2016.\n\nThe'
 alpha 0.25  repeat 0.00  'The movie was released in the UK on May 7, 2016.\n\n'
 alpha  0.5  repeat 0.00  'The movie was a great way to get your hands on the first time you'
@@ -87,61 +84,72 @@ alpha  1.0  repeat 0.00  'The movie was a "tremie and the first step to my new'
 alpha  2.0  repeat 0.43  'The movie was the first and the first and the first and the I and'
 ```
 
-Three regimes: at 0.25 the output changes without carrying the concept (Japan
-becomes the UK), the sentiment arrives at 0.5, and by 2.0 the model loops. That
-sub-threshold row is why you sweep: **an output that moved is not an output that
-moved for your reason.** Report the whole sweep.
+At 0.25 the output changes without carrying the concept, the sentiment arrives at
+0.5, and at 2.0 the model loops. An output that moved has not moved for your
+reason: report the whole sweep, with the controls under
+[Evaluating a steering vector](#evaluating-a-steering-vector).
 
-**`min_new_tokens=12` is load-bearing.** Steering changes when the model emits
-EOS: at α = 0.25 this one stops after 11 passes. A `tracer.iter[...]` loop the run
-does not reach the end of is cut short with only a `UserWarning: … was never
-reached`, and every statement after it is dropped — `ids = tracer.result.save()`
-included, so that row comes back unbound. The same happens to an open
-`tracer.iter[1:]`, which always runs to the end of the generation. Pin the step
-count with `min_new_tokens=N`; it also makes the rows the same length and
-comparable.
+Steering changes when the model emits EOS. Without `min_new_tokens=12` the
+α = 0.25 run ends after 11 steps, the loop is cut short and that row's `ids` is
+never bound.
 
 ## Where to inject
 
-| Choice | Effect |
-|---|---|
-| **Layer** | Middle layers (⅓–⅔ depth) usually work best. Early layers get overwritten; late layers only nudge the surface form. Sweep it like α. |
-| **Positions** | `[:, -1, :]` steers only the token being predicted; `[:, :, :]` steers every position and is stronger but blunter. |
-| **Every step vs first step** | Inside a `tracer.iter[...]` loop the write repeats on every forward **pass**. Pass 0 is the *prefill*, whose hidden state is `[B, prompt_len, H]`: a `[:, -1, :]` write there touches only the last prompt position, and `[:, :, :]` touches all of them — the slice decides what gets steered, not the step. Passes 1+ carry one generated token each, so `tracer.iter[1:12]` steers only generated tokens. Applied once, the effect decays. |
-| **Timing** | A layer-L write on step k reaches the layers *above* L on that same pass, and the KV cache carries it to layers above L on every later step. Layers ≤ L stay bit-identical to the unedited run until a generated token actually changes: a 0.3× edit that does not flip the argmax leaves layers 3 and 6 (pre-edit) identical on later steps while layer 9 differs. So an edit on `tracer.iter[a:b]` can first change generated token a (absolute position prompt_len + a — the slice counts forward passes, step 0 is the prefill), and a later one only if it was too weak to flip that argmax. |
+- **Layer.** Sweep it like α, deriving `direction` and `scale` at each layer: the
+  residual norm on this prompt runs from 57 at layer 0 to 487 at layer 11. At
+  α = 0.5 layer 6 gives the fluent row above, layers 1 and 3 already repeat
+  (layer 3: `the story of the story of the story`), and layer 11 loops on `with
+  a Canon EF` with no sentiment in the text.
+- **Positions.** `[:, -1, :]` writes the position being predicted. `[:, :, :]`
+  writes every position the step holds and is stronger: here the sentiment
+  arrives at α = 0.25 (`a success, and the cast and crew are all very excited`)
+  where the last-position write needs 0.5.
+- **Steps.** The two slices differ only on step 0, the prefill, where
+  `[:, :, :]` covers the whole prompt. Every later step holds one token.
+  `tracer.iter[1:12]` steers generated positions only, and the first generated
+  token is then the unsteered model's.
+
+A write at layer L changes the layers at or below L on later steps only through
+the token it changes ([generation](generation.md)).
 
 ## Persistent steering
 
-`model.edit(inplace=True)` replays the intervention on every subsequent run:
+`model.edit(inplace=True)` stores the write and replays it on every later run,
+until `model.clear_edits()`:
 
 ```python
 with model.edit(inplace=True) as tracer:
     for _ in tracer.iter[:]:
-        model.transformer.h[LAYER].output[:, -1, :] += 0.5 * float(scale) * direction
+        model.transformer.h[LAYER].output[:, -1, :] += 0.5 * scale * direction
 
-with model.generate(prompt, max_new_tokens=10) as tracer:
-    ids = tracer.result.save()
-print("steered:", model.tokenizer.decode(ids[0]))
-
+steered = model.generate(prompt, max_new_tokens=10, min_new_tokens=10, do_sample=False)
 model.clear_edits()
+cleared = model.generate(prompt, max_new_tokens=10, min_new_tokens=10, do_sample=False)
 
-with model.generate(prompt, max_new_tokens=10) as tracer:
-    ids = tracer.result.save()
-print("cleared:", model.tokenizer.decode(ids[0]))
+print("steered:", repr(model.tokenizer.decode(steered[0])))
+print("cleared:", repr(model.tokenizer.decode(cleared[0])))
+assert not torch.equal(steered, cleared)
 ```
 
-Use `model.edit()` without `inplace=True` to get a steered *copy* and keep the
-original clean for comparison. An edit you forget to clear silently contaminates
-every later experiment; clear it in a `finally`, or use the copy form.
+```
+steered: 'The movie was a great way to get your hands on the first'
+cleared: 'The movie was released in Japan on May 7, 2016.\n'
+```
 
-The open `tracer.iter[:]` is right inside an edit, where nothing follows the loop;
-its "never reached" warning on each `generate` is expected.
+The loop over `tracer.iter[:]` applies the edit on every generation step; without
+it the edit applies on the first pass only. Each run then ends with a
+`UserWarning: ... was never reached` from the open loop, which is expected here.
+An edit left in place steers every later experiment. Clearing it, steering a copy
+with `model.edit()` and the other rules of edits are in
+[control-flow](control-flow.md).
 
 ## Function vectors
 
-A function vector (Todd et al.) encodes a *task* rather than an attribute. Extract
-the activation that in-context examples create, then inject it into a zero-shot
-prompt so the model performs the task without demonstrations.
+A function vector carries a task. Take the last-token state that in-context
+demonstrations produce, subtract the state of a prompt with no demonstrations,
+and add the difference to a zero-shot prompt. Two controls go in the same trace:
+a random vector of the same norm, and the few-shot prompt itself, which shows
+whether the model can do the task for that input at all.
 
 ```python
 icl = [
@@ -154,6 +162,12 @@ neutral = [
     "Chile is a country and Chile ->",
     "Norway is a country and Norway ->",
 ]
+few_shot = "France -> Paris, Japan -> Tokyo, Italy -> Rome, "
+capitals = {"Portugal": " Lisbon", "Russia": " Moscow", "Poland": " Warsaw",
+            "Greece": " Athens", "Sweden": " Stockholm", "Austria": " Vienna",
+            "Thailand": " Bangkok"}
+answer = {country: model.tokenizer.encode(capital, add_special_tokens=False)[0]
+          for country, capital in capitals.items()}
 
 with model.trace() as tracer:
     with tracer.invoke(icl):
@@ -162,128 +176,101 @@ with model.trace() as tracer:
         neutral_state = model.transformer.h[LAYER].output[:, -1, :].mean(0).detach().save()
 
 function_vector = icl_state - neutral_state
-
-# A matched-norm random direction: the control that says whether the vector's
-# content matters, or only its magnitude.
 generator = torch.Generator().manual_seed(0)
-control = torch.randn(function_vector.shape, generator=generator).to(function_vector)
-control = control / control.norm() * function_vector.norm()
+matched = torch.randn(function_vector.shape, generator=generator).to(function_vector)
+matched = matched / matched.norm() * function_vector.norm()
 
-capitals = {"Portugal": " Lisbon", "Brazil": " Brasília", "Poland": " Warsaw",
-            "Greece": " Athens", "Sweden": " Stockholm", "Austria": " Vienna",
-            "Thailand": " Bangkok"}
+columns = {"plain": None, "+fv": function_vector, "+random": matched, "few-shot": None}
+with model.trace() as tracer:
+    top = nnsight.save({})
+    for country in capitals:
+        for column, vector in columns.items():
+            demos = few_shot if column == "few-shot" else ""
+            with tracer.invoke(f"{demos}{country} ->"):
+                if vector is not None:
+                    model.transformer.h[LAYER].output[:, -1, :] += vector
+                top[country, column] = model.output.logits[0, -1].argmax()
 
-plain_out, fv_out, random_out = {}, {}, {}
+hits = {column: sum(int(top[c, column]) == answer[c] for c in capitals) for column in columns}
 for country in capitals:
-    zero_shot = f"{country} ->"
-    with model.trace() as tracer:
-        with tracer.invoke(zero_shot):
-            plain = model.output.logits[0, -1].argmax().save()
-        with tracer.invoke(zero_shot):
-            model.transformer.h[LAYER].output[:, -1, :] += function_vector
-            steered = model.output.logits[0, -1].argmax().save()
-        with tracer.invoke(zero_shot):
-            model.transformer.h[LAYER].output[:, -1, :] += control
-            random = model.output.logits[0, -1].argmax().save()
-    plain_out[country] = model.tokenizer.decode(plain)
-    fv_out[country] = model.tokenizer.decode(steered)
-    random_out[country] = model.tokenizer.decode(random)
-    print(f"{zero_shot:<14} plain {plain_out[country]!r:>12}"
-          f"   +fv {fv_out[country]!r:>12}"
-          f"   +random {random_out[country]!r:>12}")
+    print(f"{country:<9}" + "".join(
+        f"{column} {model.tokenizer.decode(top[country, column])!r:<12}" for column in columns))
+print(hits)
 
-hits = sum(fv_out[c] == capitals[c] for c in capitals)
-assert hits > sum(random_out[c] == capitals[c] for c in capitals)   # beats the control
-assert any(random_out[c] != plain_out[c] for c in capitals)         # control is not inert
+assert hits["+fv"] > hits["+random"]                                   # beats the control
+assert any(top[c, "+random"] != top[c, "plain"] for c in capitals)     # the control is not inert
 ```
 
 ```
-Portugal ->    plain         '\n'   +fv    ' Lisbon'   +random  ' Portugal'
-Brazil ->      plain         '\n'   +fv       ' New'   +random        ' US'
-Poland ->      plain         '\n'   +fv    ' Poland'   +random         '\n'
-Greece ->      plain         '\n'   +fv    ' Greece'   +random         '\n'
-Sweden ->      plain    ' Sweden'   +fv    ' Sweden'   +random    ' Sweden'
-Austria ->     plain   ' Austria'   +fv    ' Vienna'   +random   ' Germany'
-Thailand ->    plain  ' Thailand'   +fv   ' Bangkok'   +random  ' Thailand'
+Portugal plain '\n'        +fv ' Lisbon'   +random ' Portugal' few-shot ' Rome'
+Russia   plain '\n'        +fv ' Moscow'   +random ' ('        few-shot ' Moscow'
+Poland   plain '\n'        +fv ' Poland'   +random '\n'        few-shot ' Warsaw'
+Greece   plain '\n'        +fv ' Greece'   +random '\n'        few-shot ' Athens'
+Sweden   plain ' Sweden'   +fv ' Sweden'   +random ' Sweden'   few-shot ' Stockholm'
+Austria  plain ' Austria'  +fv ' Vienna'   +random ' Germany'  few-shot ' Vienna'
+Thailand plain ' Thailand' +fv ' Bangkok'  +random ' Thailand' few-shot ' Bangkok'
+{'plain': 0, '+fv': 4, '+random': 0, 'few-shot': 6}
 ```
 
-The vector produces the capital on three of seven; the rest echo the country or
-continue wrongly. The random control is not inert — it changes three outputs — so
-on any single prompt "the output moved" is worth nothing without the control
-column beside it.
+The random vector changes three outputs, so on one prompt "the output moved" says
+nothing without the control column. A hit where the few-shot column misses
+(Portugal) is a result to explain before reporting it: the vector should not
+install a capability the model lacks.
 
-Three of seven is what a whole-residual difference buys on GPT-2 small; it carries
-format as well as task. The published version averages the outputs of a few
-**attention heads** selected by causal attribution (slice per-head activations
-from `attn.c_proj.input` — the [activation-patching guide](activation-patching.md) has the head-slicing
-convention), and transfers across prompt formats far better.
-
-Run the few-shot control before believing any hit: put demonstrations in the
-prompt and check the model can do the task for that input at all. A function
-vector should not install a capability the model lacks, so a hit on a prompt the
-model fails few-shot is a result to explain before publishing it.
+This is the simplest form. The published method (Todd et al.) builds the vector
+from the mean outputs of a few attention heads chosen by their causal effect:
+per-head slicing is in [access-and-modify](access-and-modify.md), ranking heads
+by effect in [activation-patching](activation-patching.md).
 
 ## Evaluating a steering vector
 
-**Dose-response.** Behavior should increase smoothly with α before collapsing; a
-step from nothing to gibberish is disruption, not steering. The probability still
-assigned to the *unsteered* top token is a cheap continuous version of that curve
-and should fall monotonically:
+A concept metric, read for the vector, for its negation and for a matched-norm
+random direction, is a dose-response, a negation test and a control in one
+forward pass:
 
 ```python
-with model.trace(prompt):
-    unsteered = model.output.logits[0, -1].argmax().save()
-unsteered_top = int(unsteered)
+def first_ids(words):
+    return [model.tokenizer.encode(word, add_special_tokens=False)[0] for word in words]
 
-with model.trace() as tracer:
-    kept = nnsight.save([])
-    for alpha in alphas:
-        with tracer.invoke(prompt):
-            model.transformer.h[LAYER].output[:, -1, :] += alpha * float(scale) * direction
-            kept.append(model.output.logits[0, -1].softmax(-1)[unsteered_top].detach())
+good = first_ids([" great", " good", " amazing", " wonderful", " fantastic"])
+bad = first_ids([" terrible", " bad", " awful", " horrible", " boring"])
 
-probabilities = [float(p) for p in kept]
-for alpha, p in zip(alphas, probabilities):
-    print(f"alpha {alpha:>5}  p(unsteered top token) {p:.4f}")
+generator = torch.Generator().manual_seed(0)
+random_direction = torch.randn(direction.shape, generator=generator).to(direction)
+random_direction = random_direction / random_direction.norm()
 
-assert probabilities == sorted(probabilities, reverse=True)
+signed = [-2.0, -1.0, -0.5, -0.25, 0.0, 0.25, 0.5, 1.0, 2.0]
+with torch.no_grad(), model.trace() as tracer:
+    curve = nnsight.save({})
+    for name, vector in (("direction", direction), ("random", random_direction)):
+        for alpha in signed:
+            with tracer.invoke(prompt):
+                model.transformer.h[LAYER].output[:, -1, :] += alpha * scale * vector
+                logits = model.output.logits[0, -1]
+                curve[name, alpha] = (logits[good].mean() - logits[bad].mean()).item()
+
+steered = [curve["direction", alpha] for alpha in signed]
+control = [curve["random", alpha] for alpha in signed]
+print("alpha    ", "  ".join(f"{alpha:+5.2f}" for alpha in signed))
+print("direction", "  ".join(f"{value:+5.2f}" for value in steered))
+print("random   ", "  ".join(f"{value:+5.2f}" for value in control))
+
+assert steered == sorted(steered)                                         # monotonic, both signs
+assert max(control) - min(control) < 0.2 * (steered[-1] - steered[0])     # the control stays flat
 ```
 
 ```
-alpha   0.0  p(unsteered top token) 0.0880
-alpha  0.25  p(unsteered top token) 0.0703
-alpha   0.5  p(unsteered top token) 0.0281
-alpha   1.0  p(unsteered top token) 0.0045
-alpha   2.0  p(unsteered top token) 0.0004
+alpha     -2.00  -1.00  -0.50  -0.25  +0.00  +0.25  +0.50  +1.00  +2.00
+direction -2.41  -1.94  -0.79  +0.12  +1.39  +2.56  +3.99  +5.86  +8.32
+random    +1.55  +0.89  +1.15  +1.26  +1.39  +1.60  +1.79  +1.89  +2.02
 ```
 
-**Fluency.** Use the repeated-bigram fraction from the sweep, not next-token
-entropy: a single next-token distribution cannot see a loop that only exists
-across steps (here it is non-monotonic in α and flat where the output loops).
+Read this curve beside the generations, because a next-token metric and the text
+disagree in two places:
 
-**Held-out prompts.** Test on topics and structures unlike the contrast pairs.
-
-**A matched-norm random control**, as in the function-vector table: a comparable
-change from it means your vector is not carrying the concept.
-
-**The opposite direction.** Negating `v` should suppress the behavior. The
-sentiment vector above fails: α = −0.5 and −1.0 give neutral continuations, and
-−2.0 breaks the text. Difference-of-means directions are often asymmetric; check
-before calling one bidirectional.
-
-## Common failures
-
-| Symptom | Cause |
-|---|---|
-| Output is word salad at every α > 0 | vector not scaled to the activation norm |
-| Nothing changes at any α | wrong layer, or steering only the last position when the effect needs earlier tokens |
-| Effect vanishes after the first generated token | intervention not inside a `tracer.iter[...]` loop |
-| Works on the derivation prompts only | too few contrast pairs; the vector encodes the prompts |
-| Two rows of a sweep are identical | check they are not the same generation printed twice |
-
-## Related guides
-
-- [nnsight](../SKILL.md) — invokes, generation, edits
-- [probing](probing.md) — finding directions by training a classifier rather than differencing
-- [sae-and-dictionary-learning](sae-and-dictionary-learning.md) — steering with interpretable features instead of raw directions
-- [activation-patching](activation-patching.md) — verifying that a direction is causal, not correlational
+- **It cannot choose α.** The metric is still rising at α = 2.0, where the sweep's
+  text has collapsed into a loop.
+- **It overstates negation.** The metric falls below zero for negative α, while
+  the greedy text at α = -0.5 stays neutral (`The movie was released on May 4,
+  2014.`) and at -2.0 breaks. Call a direction bidirectional only when the text
+  follows.
