@@ -23,6 +23,9 @@ covers `task`, `dispatch`, `device` and `dtype`. The rest:
 - `trust_remote_code=True` and any other HuggingFace keyword are passed through.
 - The task decides the class and the class decides the tree. A multimodal
   checkpoint loaded with `task="text-generation"` is still the multimodal class.
+- A model already loaded with transformers goes in place of the repo id:
+  `TransformersModel(hf_model, tokenizer=tokenizer)`. The task is inferred from
+  its class.
 
 **One device: `device=`. Several: `device_map=`.** The model loads through
 `transformers.pipeline`, which moves a single-device model to its own default:
@@ -117,8 +120,10 @@ assert torch.equal(a, b)
 ```
 
 A dotted key mounts that subtree on the root under the alias. A single-component
-key (`"mlp"`) binds wherever a module has that child. A value may be a list of
-aliases. Aliases are extra names for the same envoy: `named_modules()` and cache
+key (`"mlp"`) binds wherever a module has that child. `*` stands for one path
+component (`{"*.h": "layers"}` works whatever the parent is called), and a module
+class as the key aliases the child of that type on every module that has one. A
+value may be a list of aliases. Aliases are extra names for the same envoy: `named_modules()` and cache
 path keys keep the original names. For one maintained vocabulary across families
 (`model.layers[i].self_attn`, `.mlp`, standard values), use the `nnterp` skill.
 
@@ -150,10 +155,10 @@ assert tuple(acts.shape) == (4, 32) and tuple(out.shape) == (4, 2)
 - A module called more than once per forward:
   [access-and-modify](access-and-modify.md#a-module-that-runs-more-than-once).
 - **Wrapping changes the module itself, for the rest of the process.** nnsight
-  installs itself on the module's submodules, not on a copy. So finish the module
-  first (`deepcopy`, `torch.compile` go before wrapping), do not assign a new
-  `forward` afterwards (nnsight is silently off for that module and the next read
-  is an `OutOfOrderError`).
+  installs itself on the module's submodules, not on a copy, so everything that
+  holds the module sees it. Do not assign a new `forward` to a submodule
+  afterwards: nnsight is silently off for it and the next read is an
+  `OutOfOrderError`.
 
 ## Attaching a module
 

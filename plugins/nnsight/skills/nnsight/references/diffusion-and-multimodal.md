@@ -8,6 +8,11 @@ and diffusion needs `diffusers`. Whisper, vision encoders and classifiers are in
 
 ## Vision-language models
 
+On a family the `nnterp` skill supports, prefer it: it serves the image-token
+mask, the image features and the language layers under the same names on every
+vision-language family. What follows is the raw path, for a model nnterp does not
+know or a value it does not name.
+
 Load with `task="image-text-to-text"` and pass chat messages with the image
 inside them. The task's processor builds the model's input:
 

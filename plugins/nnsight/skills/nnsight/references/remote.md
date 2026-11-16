@@ -90,7 +90,7 @@ For a tensor you do need, `.detach().cpu()` before saving.
 | Bind every save to a name | results come back keyed by variable name |
 | Variables from outside the block are shipped | everything the block reads is pickled into the request: it must be picklable, it arrives on the CPU in its own dtype, and changes to it stay on the server |
 | Take device and dtype from an activation | `vec.to(hidden.device, hidden.dtype)`. The deployment picks the dtype, often bfloat16, so near-tied logits can order differently from a local float32 run |
-| Imports must exist on the server | the standard library, `torch`, `numpy`, `transformers`, `einops` and nnsight's dependencies do. Check anything else with `nnsight.compare()` |
+| Imports must exist on the server | the standard library, `torch`, `numpy`, `transformers`, `accelerate`, `diffusers`, `einops`, `peft` and `nnsight` do. Check anything else with `nnsight.compare()` |
 | Your own helpers must be shipped | see [below](#shipping-your-own-code) |
 | `print()` is the debugger | output comes back as log lines, far cheaper than saving a tensor to look at it |
 | An optimizer or module built outside a session trains nothing | build both inside the session |

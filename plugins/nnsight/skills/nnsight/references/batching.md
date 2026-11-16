@@ -62,8 +62,9 @@ assert off(masked_mean[0], alone[0].mean(0)) < 1e-3
 ## Input formats, and what belongs to the batch
 
 Strings, lists of strings, token-id lists, tensors, a tokenizer encoding
-(`{"input_ids": ..., "attention_mask": ...}`) and chat-message lists mix freely
-across invokes. Tokenizer keywords on an invoke apply to that invoke:
+(`{"input_ids": ..., "attention_mask": ...}`), keyword tensors (`input_ids=`,
+or `inputs_embeds=` in place of ids) and chat-message lists mix freely across
+invokes. Tokenizer keywords on an invoke apply to that invoke:
 `tracer.invoke(text, truncation=True, max_length=8)`.
 
 All invokes reach the model in **one** forward call, so a forward or generation
@@ -131,11 +132,15 @@ Without that line the read raises `NameError`: the producer has not run. Simpler
 whenever it fits: run the donor in its own trace first and patch from the saved
 tensor, as the [activation-patching guide](activation-patching.md) does.
 
+A name saved in several invokes (`out = ....save()` in each) holds one value
+afterwards, the last invoke's. Key a saved dict by the loop variable.
+
 ## Barriers
 
 A consumer that must act at or before the producer's location cannot park past
-it. `tracer.barrier(n)` is a meeting point: `n` blocks call it and the last
-arrival releases them all.
+it, and one whose first statement is a write (`module.output = donor`) has not
+parked at all when it reads `donor`. `tracer.barrier(n)` is a meeting point: `n`
+blocks call it and the last arrival releases them all.
 
 ```python
 with model.trace() as tracer:

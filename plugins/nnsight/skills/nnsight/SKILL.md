@@ -6,10 +6,9 @@ description: "Read and edit the internals of any PyTorch model with nnsight: mod
 # nnsight
 
 nnsight reads, replaces and backpropagates through any intermediate value of a
-PyTorch model's forward pass, locally or on NDIF. This file covers loading a
-model, reading and editing activations, batching, generation and gradients.
-Everything else is a row under [Guides](#guides); open the one that names your
-task before writing code for it.
+PyTorch model's forward pass, locally or on NDIF. This file covers loading,
+reading and editing activations, batching, generation and gradients. For
+anything else, open the [guide](#guides) that names the task before writing code.
 
 ## Which library
 
@@ -48,17 +47,17 @@ assert model.tokenizer.decode(edited[0, -1].argmax()) == " London"
 Requires nnsight 0.8 with transformers 5 or later (`pip install nnsight`).
 
 - **`task=`** names the transformers pipeline task. Left out, it is looked up on
-  the Hub, which fails offline (`RuntimeError: You cannot infer task
-  automatically`).
-- **`dispatch=True`** loads the weights now. Without it the module tree is built
-  with no weights, and they load at the first run.
+  the Hub, and offline (`HF_HUB_OFFLINE=1`) the load fails with `RuntimeError: You
+  cannot infer task automatically within pipeline when using offline mode`.
+- **`dispatch=True`** loads the weights now. Without it they load at the first
+  run.
 - **Device**: the first GPU, or the CPU when there is none. Choose with
   `device="cpu"` or `device="cuda:1"`. `device_map="cpu"` still lands on the GPU.
 - **dtype**: the one the checkpoint declares, which is bfloat16 for most recent
-  models, on CPU too. Pass `dtype=torch.float32` when a check compares numbers:
-  in bfloat16 two near-tied logits swap between batch shapes.
-- A model you built yourself is `NNsight(module)`, with the same API. Diffusion
-  pipelines, vLLM and attention probabilities each need their guide.
+  models, on CPU too. Pass `dtype=torch.float32` (`torch_dtype=` is deprecated)
+  when a check compares numbers: in bfloat16 two near-tied logits swap between
+  batch shapes.
+- A model you built yourself is `NNsight(module)`, with the same API.
 
 Every module has `.output` (what its forward returns), `.input` (its first
 argument) and `.inputs` (`(args, kwargs)`), each readable and assignable inside a
@@ -68,11 +67,10 @@ trace. `model.output` and `model.inputs` are the whole model's.
 
 The body of `with model.trace(...)` does not run where it is written. nnsight
 compiles it and runs it as a worker that takes turns with the forward pass:
-reading `module.output` parks the worker until the model produces that value, and
-what it gets is the real `torch.Tensor`. So `if`, `for`, `print` and `.item()`
-work inside the body, and three rules follow: a value leaves the block only
-through a save, modules are touched in the order the model runs them, and one
-trace is one forward pass.
+reading `module.output` parks the worker until the model produces that value,
+which arrives as a real `torch.Tensor`. So `if`, `for`, `print` and `.item()`
+work inside the body, a value leaves it only through a save, modules must be
+touched in the order the model runs them, and one trace is one forward pass.
 
 ## Traps
 
@@ -93,11 +91,15 @@ with model.trace(prompt):
 assert len(per_layer) == 12
 ```
 
-A list created inside and not saved is gone. One created outside and appended to
-fills locally and comes back empty from a remote run. A saved activation aliases
-the live tensor and carries the forward graph (`requires_grad=True`): `.clone()`
-it if the block writes to that location later, `.detach()` what you keep, and
-wrap pure collection in `torch.no_grad()`.
+"My list is empty (or undefined) after the trace" is this rule: a list created
+inside the block and not saved is gone, and one created outside and appended to
+fills locally but comes back empty from a remote run.
+
+A saved activation carries the forward graph. `float()` or `.item()` on it then
+warns `Converting a tensor with requires_grad=True to a scalar may lead to
+unexpected behavior`, and holding it keeps the graph in memory: save
+`value.detach()`, or wrap pure collection in `torch.no_grad()`. It also aliases
+the live tensor, so `.clone()` it if the block writes to that location later.
 
 **2. Forward order.** Within one body, touch modules in the order the model runs
 them: layer 2 before layer 8, a block's submodules (`ln_1`, `attn`, `ln_2`, `mlp`
@@ -106,16 +108,19 @@ and `tracer.result` last. Out of order raises `OutOfOrderError: '...h.2.output.i
 was requested but the model already ran past it`. Writes follow the same rule
 silently: an in-place write to a tensor made after a later module was read
 changes nothing, because the model already consumed it. Reorder, give each
-ordering its own `tracer.invoke`, or collect with `tracer.cache()`.
+ordering its own `tracer.invoke`, or collect with `tracer.cache()`. For a module
+the forward calls several times (a looped or weight-tied net), `.output` is its
+**first** call however often you read it; step through the calls with
+`tracer.iter` ([access-and-modify](references/access-and-modify.md)).
 
 **3. Do not guess paths or output types.** GPT-2 blocks are
-`model.transformer.h[i]`, Llama, Qwen and Mistral `model.model.layers[i]`, Gemma-3
-`model.model.language_model.layers[i]`. A block's `.output` is a plain tensor on
-these and an attention module's is a tuple, so `.output[0]` copied from an older
-example silently selects batch row 0 of a block. Run
+`model.transformer.h[i]`, Llama, Qwen and Mistral `model.model.layers[i]`, a
+multimodal Gemma-3 `model.model.language_model.layers[i]`. A block's `.output` is
+a plain tensor on these and an attention module's is a tuple, so `.output[0]`
+copied from an older example silently selects batch row 0 of a block. Run
 `python scripts/inspect_model.py <repo_id> --prompt "..."`: without downloading
 weights it prints the layer path, each block child in execution order, and
-whether each output is a tensor or a tuple. `print(model)` shows the tree.
+whether each output is a tensor or a tuple.
 
 **4. Write through the model.** `acts = block.output; acts = acts * 0` rebinds a
 local and changes nothing. Write in place (`block.output[:] = 0`) or assign the
@@ -187,10 +192,9 @@ assert len(scores) == 13                          # 12 ablations and a baseline,
 Write results into a saved dict from inside each invoke. A list appended to from
 several invokes comes back in the order the model reached them, and code in the
 trace body outside the invokes runs before all of them, so it cannot read what
-an invoke binds. N traces for N variants are N forward passes, and N requests
-remotely. Mean and max over tokens need the padding masked, and a value passed
-between invokes needs a park or a barrier:
-[batching](references/batching.md).
+an invoke binds. N traces for N variants are N forward passes. A mean or max over
+tokens needs the padding masked, and passing a value between invokes has its own
+rules: [batching](references/batching.md).
 
 ## Generation
 
@@ -200,7 +204,7 @@ with model.generate(prompt, max_new_tokens=3, min_new_tokens=3, do_sample=False)
     for step in tracer.iter[:3]:                               # one step per generated token
         model.transformer.h[6].output[:, -1, :] *= 1.5         # an edit at every step
         picks.append(model.output.logits[0, -1].argmax(dim=-1))
-    ids = tracer.result.save()                                 # token ids, prompt included
+    ids = tracer.result.save()                                 # token ids: prompt, then new
 
 assert len(picks) == 3 and tuple(ids.shape) == (1, 13)
 print(model.tokenizer.decode(ids[0]))
@@ -211,10 +215,12 @@ print(model.tokenizer.decode(ids[0]))
   Each later step is one position, `(batch, 1, hidden)`. Step *k* produces
   generated token *k*; `tracer.iter[1:3]` and `tracer.iter[[0, 2]]` select steps.
 - **A loop must not ask for a step the run does not make.** It is cut short with
-  a `UserWarning ... was never reached`, what it saved is kept, and the statements
-  after the loop, `tracer.result.save()` included, never run. `max_new_tokens` is
-  only an upper bound, so pass `min_new_tokens=` to hold the count and check
-  `len()` of what you collected.
+  `UserWarning: '...' was never reached: the loop asked for a step the run did
+  not make`, what it saved is kept, and the statements after the loop,
+  `tracer.result.save()` included, never run. `max_new_tokens` is only an upper
+  bound, so pass `min_new_tokens=` to hold the count and check `len()` of what you
+  collected. The same warning appears when the loop body reads modules out of
+  forward order.
 - **Sampling follows the checkpoint's `generation_config`**, and most instruct
   checkpoints sample. Pass `do_sample=False`. Keywords go to the model's
   `generate`.
@@ -243,8 +249,11 @@ assert tuple(grad.shape) == (1, 10, 768) and tuple(saliency.shape) == (1, 10)
 ```
 
 Capture tensors before the backward block, read `.grad` on the exact tensor you
-captured (a slice of it is another tensor), in reverse forward order, inside the
-block. Outside it `.grad` is `None`. Activations need no `requires_grad_()`.
+captured (a slice such as `block.output[0]` is another tensor), in reverse
+forward order, inside the block. Break either rule and the error names an object
+id: `OutOfOrderError: '139853884760112.grad.i0' was requested but the model
+already ran past it`. Outside the block `.grad` is `None`. Activations need no
+`requires_grad_()`.
 Editing gradients, optimizing a vector through the model and the replacements
 that silently cut the graph: [gradients](references/gradients.md).
 
@@ -259,30 +268,29 @@ that silently cut the graph: [gradients](references/gradients.md).
 | several traces sharing values | `model.session()` | values flow between its traces |
 | an intervention on every later run | `model.edit(inplace=True)` | undone by `model.clear_edits()` |
 
-`generate` and `pipe` called without `with` run and return their result.
-`model.trace(x)` without `with` runs nothing; `model.trace(x, trace=False)` is a
-plain forward.
+Without `with`, `generate` and `pipe` run and return their result, and
+`model.trace(x)` runs nothing (`model.trace(x, trace=False)` is a plain forward).
 
 ## Remote
 
 The same trace runs on NDIF against a model you cannot host. Build the model
-without `dispatch=True`, add `remote=True`, and reduce before saving, because
-every save is a download:
+without `dispatch=True`, add `remote=True`, and reduce before saving: every save
+is a download.
 
 ```python
 with model.trace(prompt, remote=True):
     top = model.output.logits[0, -1].argmax().cpu().save()
 ```
 
-More than one trace belongs in `model.session(remote=True)`, which is one request.
-Read the [remote guide](references/remote.md) before writing remote code.
+Several traces belong in one `model.session(remote=True)`. Read the
+[remote guide](references/remote.md) before writing remote code.
 
 ## Scripts
 
-Run them; do not read them. `scripts/inspect_model.py <repo_id> [--prompt P]
-[--grep attn] [--task T]` prints module paths, execution order and tensor-or-tuple
-without weights. `scripts/check_env.py [--remote]` prints versions, GPUs, the NDIF
-key and host, and deployed models.
+Run them; do not read them. `scripts/inspect_model.py <repo_id> [--task T]
+[--prompt P] [--grep attn]` prints module paths, execution order and
+tensor-or-tuple without weights. `scripts/check_env.py [--remote]` prints
+versions, GPUs, the NDIF key and host, and deployed models.
 
 ## Guides
 
@@ -290,7 +298,7 @@ The API, one topic each:
 
 | To | Read |
 |---|---|
-| edit a tuple output, an input or keyword argument, or one attention head | [access-and-modify](references/access-and-modify.md) |
+| edit a tuple output, an input or keyword argument, or one attention head (GPT-2 or Llama-style); read a module that runs several times per forward | [access-and-modify](references/access-and-modify.md) |
 | run a sweep in one pass, mask padding, pass a value from one prompt into another | [batching](references/batching.md) |
 | generate with an unknown step count, stream tokens, fix a per-step list that is short or shifted | [generation](references/generation.md) |
 | edit a gradient, run several backward passes, train a vector or adapter through the model | [gradients](references/gradients.md) |

@@ -39,9 +39,10 @@ def p_paris():
 ## Every head in one trace
 
 Head `h` is columns `h * head_dim` to `(h + 1) * head_dim` of the output
-projection's input, `attn.c_proj.input`
-([access-and-modify](access-and-modify.md)). The baseline and one invoke per
-(layer, head) make one forward pass:
+projection's input: `attn.c_proj.input` on GPT-2,
+`model.model.layers[l].self_attn.o_proj.input` on a Llama-style model
+([access-and-modify](access-and-modify.md#attention-heads)). The baseline and one
+invoke per (layer, head) make one forward pass:
 
 ```python
 def head_sweep(site, value=lambda layer, lo, hi: 0):
