@@ -1,255 +1,152 @@
-# Attribution Patching
+# Attribution patching
 
-Activation patching costs one forward pass per component. For every (layer,
-position, head) of a real model that is intractable. Attribution patching replaces
-the measurement with its first-order Taylor approximation:
+Attribution patching estimates what activation patching would measure, for every
+component at once, from a first-order approximation taken at the corrupt run:
 
 ```
-effect of patching component a  ≈  (a_clean − a_corrupt) · ∇_a metric
+effect of patching a  ~  (a_clean - a_corrupt) * d metric / d a
 ```
 
-Both terms come from **two forward passes and one backward** — total, for every
-component at once. It is an approximation, so the workflow is always: attribute
-everything cheaply, then verify the top candidates with real patching.
+Two forward passes and one backward pass give every score, where
+[activation-patching](activation-patching.md) costs a forward pass per component.
+It is a screen: rank with it, check it against real patching on your task as
+below, and confirm the top candidates with real patching.
 
 ```python
 import torch
 import nnsight
 from nnsight import TransformersModel
 
-model = TransformersModel("openai-community/gpt2", dispatch=True)
-
-clean = "The Eiffel Tower is in the city of"       # → " Paris"
-corrupt = "The Colosseum is in the city of"        # → " Rome"
-
-paris = model.tokenizer.encode(" Paris")[0]
-rome = model.tokenizer.encode(" Rome")[0]
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
 n_layers = len(model.transformer.h)
-assert len(model.tokenizer(clean).input_ids) == len(model.tokenizer(corrupt).input_ids)
+
+clean = "The Eiffel Tower is in the city of"        # answer " Paris"
+corrupt = "The Colosseum is in the city of"         # answer " Rome", same token count
+paris = model.tokenizer.encode(" Paris", add_special_tokens=False)[0]
+rome = model.tokenizer.encode(" Rome", add_special_tokens=False)[0]
+
+def attribute(site):
+    """(clean - corrupt) * gradient at site(block), for every block."""
+    with torch.no_grad():
+        with model.trace(clean):
+            clean_acts = nnsight.save([site(block) for block in model.transformer.h])
+    with model.trace(corrupt):                      # not under no_grad: this pass needs its graph
+        refs = [site(block) for block in model.transformer.h]
+        corrupt_acts = nnsight.save([ref.detach() for ref in refs])
+        logits = model.output.logits[0, -1]
+        with (logits[paris] - logits[rome]).backward():
+            grads = nnsight.save({})
+            for layer in reversed(range(n_layers)):
+                grads[layer] = refs[layer].grad.clone()
+    scores = torch.stack([(clean_acts[i] - corrupt_acts[i]) * grads[i] for i in range(n_layers)])
+    return scores[:, 0].cpu(), clean_acts
+
+resid_scores, clean_resid = attribute(lambda block: block.output)   # (layer, position, hidden)
+by_position = resid_scores.sum(-1)                                   # the layer x position map
+assert tuple(by_position.shape) == (n_layers, 10)
 ```
 
-## Canonical implementation
+Use a logit difference as the metric. With `P(' Paris')` the estimate for the
+last position at the last block is six times too small (0.011 against a real
+0.067): a probability near 0 or 1 has almost no gradient.
+
+## Validate before reading a map
+
+Run real patching on the same cells and correlate. `real_effect` takes the cells
+and a function that writes one patch, and runs them as one batch with an
+unpatched baseline:
 
 ```python
-# Pass 1 — clean activations. No gradients needed.
-with torch.no_grad():
-    with model.trace(clean):
-        clean_acts = nnsight.save([block.output for block in model.transformer.h])
-
-# Pass 2 — corrupt forward, then backward through the metric.
-with model.trace(corrupt):
-    refs = [block.output for block in model.transformer.h]          # forward order
-    corrupt_acts = nnsight.save([h.detach() for h in refs])
-
-    logits = model.output.logits[0, -1]
-    metric = logits[paris] - logits[rome]
-
-    with metric.backward():
-        grads = nnsight.save([])
-        for layer in reversed(range(n_layers)):                     # reverse order
-            grads.append(refs[layer].grad.clone())
-
-grads = grads[::-1]                                                 # back to layer order
-
-attribution = [
-    float(((clean_acts[i] - corrupt_acts[i]) * grads[i]).sum())
-    for i in range(n_layers)
-]
-
-assert len(attribution) == n_layers and max(attribution) > 1.0
-
-for layer, score in enumerate(attribution):
-    print(f"layer {layer:2d}  attribution {score:+.4f}")
-```
-
-Three ordering rules, all inherited from the `nnsight` execution model:
-
-- capture activations in **forward** order in the corrupt trace
-- read `.grad` in **reverse** order inside `with metric.backward():`
-- ask for `.grad` on the tensor you captured, not a slice of it
-
-No `requires_grad_()` is needed — activations are already in the graph. Do not wrap
-the corrupt pass in `torch.no_grad()`.
-
-## Validate before you trust it
-
-The approximation is only useful if it ranks components the way real patching
-does. You already have both halves, so measure the agreement before you believe a
-heatmap. Patch one layer at a time — a *slice* of the residual, not all of it —
-and correlate the real effect against the attribution restricted to that same
-slice:
-
-```python
-def validate(positions, name):
-    approx = torch.tensor([
-        float(((clean_acts[i] - corrupt_acts[i]) * grads[i])[:, positions].sum())
-        for i in range(n_layers)
-    ])
-
-    # Keyed by layer rather than appended: with many invokes a keyed dict
-    # stays readable and survives reordering the loop later.
+def real_effect(cells, write):
+    """Change in the metric that write(cell) causes: one invoke per cell, one forward pass."""
     with model.trace() as tracer:
-        real = nnsight.save({})
-        for layer in range(n_layers):
+        out = nnsight.save({})
+        for cell in [None] + cells:                 # None is the unpatched corrupt run
             with tracer.invoke(corrupt):
-                model.transformer.h[layer].output[:, positions] = clean_acts[layer][:, positions]
-                patched = model.output.logits[0, -1]
-                real[layer] = (patched[paris] - patched[rome]).detach()
+                if cell is not None:
+                    write(cell)
+                logits = model.output.logits[0, -1]
+                out[cell] = (logits[paris] - logits[rome]).detach()
+    return torch.stack([out[cell] - out[None] for cell in cells]).cpu()
 
-    real_effects = torch.tensor([float(real[i]) for i in range(n_layers)])
+def agreement(approx, real):
+    """Pearson r between attribution and real patching over the same cells."""
+    assert real.max() - real.min() > 1e-3 * real.abs().max(), "degenerate sweep: every cell returns the same metric"
+    return torch.corrcoef(torch.stack([approx, real]))[0, 1].item()
 
-    # Layers that all return the same metric leave nothing to correlate against.
-    assert real_effects.std() > 0.5, f"{name}: degenerate sweep, std {real_effects.std():.2e}"
+def patch_resid(positions):
+    def write(layer):
+        model.transformer.h[layer].output[:, positions] = clean_resid[layer][:, positions]
+    return write
 
-    centered_a = approx - approx.mean()
-    centered_r = real_effects - real_effects.mean()
-    r = float((centered_a @ centered_r) / (centered_a.norm() * centered_r.norm()))
-    print(f"{name:<20} real-effect spread {real_effects.std():.4f}   Pearson r {r:+.3f}")
-    return approx, real_effects, r
+layers = list(range(n_layers))
+LAST, SUBJECT = slice(-1, None), slice(1, 5)        # ' of', and the four tokens that differ
 
-
-SUBJECT = slice(1, 5)        # ' Col', 'os', 'se', 'um' — the corrupt prompt's subject
-LAST = slice(-1, None)
-
-approx, real_effects, r_subject = validate(SUBJECT, "subject positions")
-_, _, r_last = validate(LAST, "last position")
-
-print(f"top-3 by attribution: {torch.topk(approx, 3).indices.tolist()}")
-print(f"top-3 by real patch:  {torch.topk(real_effects, 3).indices.tolist()}")
-assert r_last > 0.99, f"last-position linearization no longer near-exact: {r_last:+.3f}"
-assert abs(r_subject) < 0.5, f"subject-slice agreement left the weak band: {r_subject:+.3f}"
+for name, positions in (("last position", LAST), ("subject span", SUBJECT)):
+    approx = resid_scores[:, positions].sum((1, 2))
+    real = real_effect(layers, patch_resid(positions))
+    print(f"{name:<14} r {agreement(approx, real):+.3f}   top-3 layers: "
+          f"attribution {approx.topk(3).indices.tolist()}  real {real.topk(3).indices.tolist()}")
 ```
 
-On this prompt pair that prints:
-
 ```
-subject positions    real-effect spread 1.5652   Pearson r +0.168
-last position        real-effect spread 1.4942   Pearson r +0.999
-top-3 by attribution: [7, 6, 5]
-top-3 by real patch:  [2, 0, 1]
+last position  r +0.999   top-3 layers: attribution [11, 10, 9]  real [11, 10, 9]
+subject span   r +0.168   top-3 layers: attribution [7, 6, 5]  real [2, 0, 1]
 ```
 
-Two sizes of intervention, two verdicts. At one position the linearization is
-nearly exact and the rankings agree. Across the four subject tokens it falls to
-`+0.168`, and the top-3 lists share no layer at all — swapping four positions of
-residual at once moves the run well outside the regime a first-order term
-describes.
+**Residual scores are right where the two prompts share the token and wrong where
+they differ.** At the last position the two runs' activations differ by 4 to 29
+percent of their norm and the linearization is nearly exact. At the subject
+tokens they differ by 60 to 100 percent, which no first-order term describes: the
+two top-3 lists share no layer, and a single subject token does no better (r of
++0.29 at `'um'`, -0.01 at `'os'`). Patch those positions for real.
 
-The rule that falls out: **attribution patching is trustworthy for small, local
-interventions and decays as the intervention grows.** Patch a position, a head,
-or a feature. And run this check on your own task before believing a heatmap; it
-costs one extra sweep and it is the difference between a screening tool and a
-random number generator.
+**The assert in `agreement` is what catches a degenerate sweep.** Patch every
+position of a layer (`slice(None)`) and everything downstream is the clean run,
+so all twelve layers return the same number. A correlation against that is
+rounding error, and without the assert it still prints a coefficient.
 
-**Why the sweep asserts a spread.** Patch a layer's *entire* residual output and
-the sweep stops measuring anything. Overwriting all of layer L with the clean
-activation makes everything after it a deterministic function of a clean state,
-so every layer returns exactly the clean metric — `2.4247` at all twelve layers
-here, with a spread of `1.2e-05`. Correlating attribution against that vector is
-rounding error over rounding error, and it prints a confident-looking number
-either way. The assertion is what makes that failure loud instead of publishable.
+## Heads
 
-## Per-position heatmap
-
-Keep the position axis instead of summing it — the same two passes give a
-`[layer, position]` map:
-
-```python
-heatmap = torch.stack([
-    ((clean_acts[i] - corrupt_acts[i]) * grads[i]).sum(dim=-1)[0]
-    for i in range(n_layers)
-])
-
-tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(corrupt).input_ids]
-assert heatmap.shape == (n_layers, len(tokens))
-
-print(f"{'token':<12}" + "".join(f"L{l:<7}" for l in range(0, 12, 3)))
-for pos, token in enumerate(tokens):
-    row = "".join(f"{heatmap[l, pos]:+.3f} " for l in range(0, 12, 3))
-    print(f"{token!r:<12}{row}")
-```
-
-## Per-head attribution
-
-Attribute at the attention output projection's input, where heads are still
-separate slices — this is the cheap version of a head-level circuit scan:
+The same two passes at the attention output projection's input, where head `i` is
+a slice ([access-and-modify](access-and-modify.md)):
 
 ```python
 n_heads = model.config.n_head
-head_dim = model.transformer.h[0].attn._module.head_dim   # equals n_embd // n_head on GPT-2, not on GQA/Gemma models
+head_dim = model.transformer.h[0].attn._module.head_dim
 
-with torch.no_grad():
-    with model.trace(clean):
-        clean_heads = nnsight.save([
-            model.transformer.h[i].attn.c_proj.input for i in range(n_layers)
-        ])
+proj_scores, clean_heads = attribute(lambda block: block.attn.c_proj.input)
+head_scores = proj_scores.unflatten(-1, (n_heads, head_dim)).sum((1, 3))    # (layer, head)
 
-with model.trace(corrupt):
-    head_refs = [model.transformer.h[i].attn.c_proj.input for i in range(n_layers)]
-    corrupt_heads = nnsight.save([h.detach() for h in head_refs])
-    logits = model.output.logits[0, -1]
-    with (logits[paris] - logits[rome]).backward():
-        head_grads = nnsight.save([])
-        for i in reversed(range(n_layers)):
-            head_grads.append(head_refs[i].grad.clone())
+def patch_head(cell):
+    layer, head = cell
+    span = slice(head * head_dim, (head + 1) * head_dim)
+    model.transformer.h[layer].attn.c_proj.input[:, :, span] = clean_heads[layer][:, :, span]
 
-head_grads = head_grads[::-1]
+cells = [(layer, head) for layer in range(n_layers) for head in range(n_heads)]
+real_heads = real_effect(cells, patch_head)
 
-scores = torch.zeros(n_layers, n_heads)
-for layer in range(n_layers):
-    delta = (clean_heads[layer] - corrupt_heads[layer]) * head_grads[layer]
-    for head in range(n_heads):
-        lo, hi = head * head_dim, (head + 1) * head_dim
-        scores[layer, head] = delta[..., lo:hi].sum()
-
-assert scores.shape == (n_layers, n_heads) and scores.abs().max() > 0
-
-flat = scores.flatten().abs().topk(5).indices
-for index in flat.tolist():
-    layer, head = divmod(index, n_heads)
-    print(f"L{layer}H{head:<2} attribution {scores[layer, head]:+.4f}")
+print(f"144 heads  r {agreement(head_scores.flatten(), real_heads):+.3f}")
+for index in head_scores.flatten().abs().topk(4).indices.tolist():
+    layer, head = cells[index]
+    print(f"{f'L{layer}H{head}':<7}attribution {head_scores[layer, head]:+.3f}   real {real_heads[index]:+.3f}")
 ```
 
-144 head attributions from two forward passes. Screen by |score| — a head that
-pushes against the answer matters as much as one that pushes for it — then verify
-the top-k with real head patching ([activation-patching guide](activation-patching.md)), keeping the sign.
+```
+144 heads  r +0.989
+L9H8   attribution +1.240   real +1.431
+L8H11  attribution +1.023   real +1.071
+L6H4   attribution +0.621   real +0.721
+L10H0  attribution +0.477   real +0.513
+```
 
-## Edge attribution
+Head scores hold up here: the top four are the four that real patching finds, in
+the same order. Rank by absolute value, because a head that pushes against the
+answer matters as much as one that pushes for it, and keep the sign when you
+confirm. On a model where the full real sweep costs too much, pass
+`real_effect` the top-k cells and a random sample of the rest. Report the
+validation `r` beside any attribution map.
 
-The same trick applied to *connections* rather than components: pair the
-clean − corrupt difference in what an upstream component writes to the residual
-stream with the gradient at the downstream component's input, taken through that
-component only — not the gradient on the shared residual, which sums every path
-and gives back the node score. That is the basis of edge attribution patching and
-automated circuit discovery; the [circuit-discovery guide](circuit-discovery.md) shows the worked
-example.
-
-## When the approximation breaks
-
-| Condition | Effect |
-|---|---|
-| Large intervention (many positions at once, or a whole layer) | agreement decays toward chance — `+0.999` at one position against `+0.168` across four, measured above. Keep interventions local |
-| Saturated metric (softmax probability near 0 or 1) | gradients vanish; everything scores ~0. Use a logit difference, not a probability |
-| Components whose effect is gated or thresholded | attribution can be near zero for a component that fully controls the output |
-| Very deep interactions | error compounds across layers; treat late-layer scores more cautiously |
-
-State that a heatmap is approximate, and report the validation correlation with
-it. Integrated gradients — averaging the gradient along a path from
-corrupt to clean rather than taking it at one point — is the standard upgrade when
-the linearization is poor, at the cost of N backward passes.
-
-## Cost comparison
-
-| Approach | Passes for L layers × P positions × H heads |
-|---|---|
-| Activation patching, naive | one forward per component |
-| Activation patching, batched into invokes | one forward per layer |
-| Attribution patching | 2 forward + 1 backward, total |
-| Attribution + verification of top-K | 2 forward + 1 backward + K |
-
-## Related guides
-
-- [activation-patching](activation-patching.md) — the ground truth this approximates, and the verification step
-- [circuit-discovery](circuit-discovery.md) — edge attribution and automated circuit search
-- [nnsight](../SKILL.md) — gradients, ordering rules, batching
-- [remote](remote.md) — running the two passes on a model you cannot host
+[circuit-discovery](circuit-discovery.md) builds its head ranking on this block
+and extends the same product to connections between components (edge
+attribution).
