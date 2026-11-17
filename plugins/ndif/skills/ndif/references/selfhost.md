@@ -14,7 +14,7 @@ route: [production and auth](operate-production-and-auth.md).
 | ~8 GB under Docker's data root for the image, about as much again for a compose build | Check free space there, not only on the weights disk |
 | Disk for weights, and host RAM | Checkpoints download at first deploy. Evicted models wait in host RAM as WARM, up to `NDIF_MODEL_CACHE_PERCENTAGE` (0.7) of it |
 | Free space on the filesystem holding `NDIF_RAY_TEMP_DIR` (default `/tmp/ray`) | Ray stops scheduling when that filesystem is over 95 % full, and the only symptom is a server that never runs anything. `ndif doctor` does not check it |
-| `--shm-size 4g` or more on the container that runs ray (compose sets it) | Ray's object store lives in `/dev/shm`. With Docker's 64 MB default Ray moves it to disk and logs `The object store is using /tmp/ray instead of /dev/shm ... This will harm performance!` |
+| `--shm-size` on the container that runs ray | Ray's object store lives in `/dev/shm` and wants the smaller of 10 GB and 30 % of RAM. With less (Docker's 64 MB default, and on a host with plenty of RAM also the `4g` the compose file sets) Ray puts it under its temp dir and logs `The object store is using /tmp/ray instead of /dev/shm ... This will harm performance!`; the server still works. `--shm-size 10g` is always enough, and it is a ceiling, not a reservation |
 | Python 3.12 or 3.13 (from source) | The package requires `>=3.12,<3.14` |
 
 **Match the image to the driver.** Tags come one per CUDA line: `-cu126` runs on
@@ -69,8 +69,20 @@ other command replaces it (`docker run --rm ndif/ndif version`), and
 - **The container is root**, so what it writes into a bind mount (new files in
   the cache, a mounted Ray temp dir) is root-owned. Remove it through a
   container: `docker run --rm -v /path:/v --entrypoint rm ndif/ndif -rf /v/<dir>`.
+- **Only published ports touch the host.** 8001 and 9000 are the two a client
+  needs. Redis on 6379, Ray on 6385, 8265 and 10001 and the rest listen inside
+  the container's own network, so they cannot collide with host services (or
+  with a second NDIF container) unless you run with `--network host`.
 - **A host port already taken: change only the host side** of `-p`, and when it
   is 9000, `NDIF_OBJECT_STORE_PUBLIC_URL` as well (`SKILL.md`).
+- **The cache may be mounted read-only** (`-v ...:/root/.cache/huggingface:ro`).
+  Checkpoints already in it deploy and serve, nothing root-owned is written,
+  and anything not cached fails `[Errno 30] Read-only file system`.
+- **`HF_HUB_OFFLINE=1` breaks every deploy, cached or not.** Sizing and key
+  resolution ask the Hub, so a boot deployment, `ndif deploy <repo>` and a
+  first request all fail with `offline mode is enabled`. With no network, a
+  `models.yaml` entry that gives both `model_key` and `size_bytes` loads from
+  the cache and serves; plain `ndif status` does not list it, `--verbose` does.
 - **A full `/tmp`**: `-e NDIF_RAY_TEMP_DIR=/ndifray -v /big/disk/ray:/ndifray`.
   Keep the path short. Ray puts Unix sockets under it, and past 107 bytes ray
   dies at start with `OSError: validate_socket_filename failed: AF_UNIX path
@@ -176,7 +188,7 @@ names the head's Ray port, 6385, and the node then starts only Ray and joins:
 
 ```bash
 NDIF_RAY_HEAD_ADDRESS=10.0.0.5:6385 ndif start ray        # from source
-docker run -d --name ndif-worker --gpus all --shm-size 4g --network host \
+docker run -d --name ndif-worker --gpus all --shm-size 10g --network host \
     -e NDIF_SERVICE=ray -e NDIF_RAY_HEAD_ADDRESS=10.0.0.5:6385 -e HF_TOKEN \
     -v ~/.cache/huggingface:/root/.cache/huggingface ndif/ndif
 ```

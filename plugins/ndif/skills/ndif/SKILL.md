@@ -56,7 +56,7 @@ All three need an NVIDIA GPU and driver, and the first two the NVIDIA Container
 Toolkit. None needs any configuration. The published image:
 
 ```bash
-docker run -d --name ndif --gpus all --shm-size 4g \
+docker run -d --name ndif --gpus all --shm-size 10g \
     -p 127.0.0.1:8001:8001 -p 127.0.0.1:9000:9000 \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     ndif/ndif
@@ -71,13 +71,16 @@ docker run -d --name ndif --gpus all --shm-size 4g \
   `-p 127.0.0.1:9100:9000 -e NDIF_OBJECT_STORE_PUBLIC_URL=http://localhost:9100`.
 - The cache mount keeps downloaded weights when the container is removed. The
   container writes there as root.
-- `--shm-size 4g` is a floor: Ray's object store lives in `/dev/shm`.
+- `--shm-size`: Ray's object store lives in `/dev/shm`. Below the smaller of
+  10 GB and 30 % of RAM (`10g` is always enough) Ray keeps it on disk instead
+  and warns in its log; the server works either way.
 - `--gpus '"device=0,1"'` (that quoting) hands over only some cards.
   `-e HF_TOKEN` passes your token through for gated checkpoints.
 
 ```bash
 curl localhost:8001/ping        # "pong": the web process is up, nothing more
 curl localhost:8001/connected   # {"status":"connected"}: the dispatcher has reached Ray
+until curl -sf localhost:8001/connected >/dev/null; do sleep 2; done   # wait for it; without -f curl exits 0 on the 503
 docker exec ndif ndif doctor    # versions, binaries, the GPU as torch sees it, connectivity
 ```
 
@@ -148,7 +151,9 @@ ndif kill <request_id>                         # cancel a queued or a running re
 - **Pinned means the controller will not evict it.** To make room the
   controller evicts only replicas that are unpinned and at least an hour old;
   an incoming `--pinned` deploy may also evict younger unpinned ones. `ndif
-  evict` ignores both rules.
+  evict` ignores both rules. The flag is set when a replica is created;
+  [operate](references/operate.md#pinning-eviction-and-autoscaling) has how to
+  pin or unpin one that is serving.
 - **Read the output.** A deploy that fails prints `✗ <model_key>: <reason>` and
   exits non-zero. `ndif evict` and `ndif restart` that match nothing print a
   `✗` line and exit 0.
@@ -156,7 +161,10 @@ ndif kill <request_id>                         # cancel a queued or a running re
   only the model keys in `NDIF_DEPLOYMENTS` are loaded, pinned, at boot.
 
 `curl localhost:8001/status` returns the same JSON as `ndif status
---json-output`. Scaling, restarting, `models.yaml`, loading at boot, the
+--json-output`: `{"cluster": ..., "deployments": {...}}`. `deployments` is an
+object, not a list, with one entry per HOT or WARM replica keyed `<replica
+id>:ModelActor:<model key>`, and one per COLD checkpoint keyed by repo id that
+has only `repo_id` and `deployment_level`. Scaling, restarting, `models.yaml`, loading at boot, the
 dashboard, quantized and tensor-parallel deployments:
 [operate](references/operate.md).
 
@@ -168,7 +176,8 @@ ledger said yes and the card disagreed.
 
 ```text
 reserved = ceil(base * (1 + padding_factor) + padding_bias)
-base     = parameter count * bytes per element (2 for bfloat16, the default dtype)
+base     = parameter count * bytes per element of the dtype:
+           2 bfloat16 (the default), float16 | 4 float32 | 1 int8, 8bit, fp8 | 0.5 nf4, int4, 4bit, fp4
 defaults : padding_factor 0.15, padding_bias 524288000 (500 MiB)
 cards    = ceil(reserved / bytes per card), each charged reserved / cards
 ```
@@ -176,7 +185,7 @@ cards    = ceil(reserved / bytes per card), each charged reserved / cards
 The count is the one the Hub publishes:
 `curl -s https://huggingface.co/api/models/meta-llama/Llama-3.1-8B | jq .safetensors.total`
 prints `8030261248`. So Llama-3.1-8B has a base of 16.06 GB and reserves
-18,993,889,871 bytes (18.99 GB). A 70.6 B-parameter model reserves 162.8 GB:
+18,993,888,871 bytes (18.99 GB). A 70.6 B-parameter model reserves 162.8 GB:
 on 48 GB cards, which report 50.9 GB to torch, that is `ceil(162.8 / 50.9)` =
 4 cards at 40.7 GB each.
 
@@ -213,10 +222,10 @@ The logs are in two places, and the second is the one people miss.
 |---|---|
 | `docker run` exits with `could not select device driver "" with capabilities: [[gpu]]` | The NVIDIA Container Toolkit is missing or Docker was not restarted after installing it: `sudo nvidia-ctk runtime configure --runtime=docker`, restart Docker |
 | 503 `compute backend is reconnecting`, or `/connected` not 200 two minutes after start | The dispatcher has no Ray connection. Read the ray log from its first error after `Starting Ray head node`; the api log repeats `Error connecting to Ray` |
-| `cuda_memory_bytes: 0` in the ray log, `Nodes: 0` in `ndif status`, a deploy fails `No GPU nodes available.` | torch sees no GPU. `ndif doctor`: no `--gpus`, or an image whose CUDA line is newer than the driver |
+| `cuda_memory_bytes: 0` in the ray log, `Nodes: 0` in `ndif status`, a deploy fails `No GPU nodes available.` | torch sees no GPU, and `ndif doctor` says which way. `nvidia-smi not found`: no `--gpus`. `torch cannot use the GPU (driver CUDA 12.5, torch built for CUDA 13.0)`: the image's CUDA line is newer than the driver. The same line with matching majors (12.5 and 12.6): `CUDA_VISIBLE_DEVICES` in the container names a card this host does not have, whatever doctor's hint says |
 | A request stays in `PROVISIONING` or `DEPLOYING` | Weights are downloading or loading and there is no timeout. `ndif status` shows `DEPLOYING`; the controller log shows a failed load |
 | A request stays in `QUEUED` | `ndif queue`: what the replica is running and for how long. `ndif kill <id>` stops it |
-| A request stays in `RECEIVED` and `ndif queue` prints `No response from the dispatcher` | The dispatcher process is gone though `/connected` still says connected. Restart the api |
+| A request stays in `RECEIVED` and `ndif queue` prints `No response from the dispatcher` | The dispatcher process is gone though `/connected` still says connected. Restart the api: [troubleshoot](references/troubleshoot.md#a-dead-dispatcher) has the command per route |
 | `Could not deploy this model. CANT_ACCOMMODATE...`, or `Error starting model.` | The ledger is full, or the load failed. The controller log has `Analyzing deployment ... with size <bytes>` and `failed during create` |
 | `CUDA out of memory ... MiB allowed` inside a block | The replica's own cap, above. Not a full card |
 | `COMPLETED`, then the client cannot download the result | `NDIF_OBJECT_STORE_PUBLIC_URL` is not an address the client reaches, or port 9000 is not published |

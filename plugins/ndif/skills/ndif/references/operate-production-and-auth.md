@@ -21,9 +21,13 @@ before anyone else can reach the API.
 The controller reads `NDIF_MODEL_IMPORT_PATH`, then
 `NDIF_DEFAULT_MODEL_ACTOR_CLASS` (the name compose sets), then falls back to
 the base `ModelActor`. `NDIF_TP_MODEL_ACTOR_CLASS` is separate and replaces the
-class for a tensor-parallel replica. A per-deployment `--actor-class` overrides
-both, so check every replica: `ndif status --json-output | jq -r
-'.deployments[] | select(.model_key) | .actor_class'`.
+class for a tensor-parallel replica. A replica keeps the class it was created with. The default changes only with
+a new controller, which means recreating `ray` (`just up ray`), and that
+removes every replica, so none carries the old class over. A mix can come only
+from a per-deployment `--actor-class`, which overrides both variables, and from
+`ndif scale`, which copies a running replica's class. Check every replica:
+`ndif status --json-output | jq -r '.deployments[] | select(.model_key) |
+.actor_class'`.
 
 ## Turning both on
 
@@ -38,7 +42,7 @@ docker run -d --name ndif-pg --network ndif-net \
     -v ndif-pgdata:/var/lib/postgresql/data \
     -v "$PWD/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro" \
     postgres:16-alpine
-docker run -d --name ndif --network ndif-net --gpus all --shm-size 4g \
+docker run -d --name ndif --network ndif-net --gpus all --shm-size 10g \
     -p 127.0.0.1:8001:8001 -p 127.0.0.1:9000:9000 \
     -e NDIF_POSTGRES_URL=postgresql://ndifapi:admin@ndif-pg:5432/ndif \
     -e NDIF_MODEL_IMPORT_PATH=ndif.services.ray.sandbox.model.SandboxModelActor \

@@ -111,10 +111,12 @@ autoscaler is not.
   `--pinned`, or evict the occupant yourself.
 - **An evicted replica goes WARM** when host RAM allows, keeping its replica id,
   and comes back from RAM on the next deploy, scale or request for its key.
-- **To pin a replica that is already serving**: `ndif evict <checkpoint>
-  --replica <id>`, then `ndif scale <checkpoint> --pinned`, which promotes the
-  same replica back, pinned. `ndif deploy <checkpoint> --pinned` instead adds a
-  second, pinned replica beside the first.
+- **To pin or unpin a replica that is already serving**: `ndif evict
+  <checkpoint> --replica <id>`, then `ndif scale <checkpoint> --pinned` to pin
+  or `ndif scale <checkpoint>` to unpin. The same replica comes back from RAM
+  with the new flag, and that is how a model pinned at boot is unpinned without
+  a restart. Nothing changes the flag in place: `deploy` and `scale` only add
+  replicas, and `--sync` compares replica counts, not flags.
 - **Pinning does not survive a restart of `ray`**, stop `ndif evict`, or
   reserve room for more replicas.
 - **Autoscaling** adds a replica to a model whose oldest queued request has
