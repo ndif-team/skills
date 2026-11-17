@@ -16,7 +16,8 @@ per-head weights, `value_weight`, `output_weight`, `attention_input_gain` and
 `attention_output_gain`, are read off the modules ([below](#the-weights-per-head)).
 
 They are source-located: nnterp reaches them through nnsight `.source` at
-transformers' shared eager attention call (`attention_interface_1`), or at the
+transformers' shared attention interface call (`attention_interface_1`; under eager,
+the modeling file's own `eager_attention_forward`), or at the
 family's own operations where it does its own arithmetic (GPT-J, GPT-Neo,
 CodeGen, GPT-NeoX-Japanese, XGLM, BLOOM, MPT, Falcon), and presents one layout on
 every family.

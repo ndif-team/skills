@@ -78,7 +78,7 @@ class Layer(Layer):
     """<Family>'s decoder block; returns a bare tensor, so the base holds."""   # returns_tuple = True otherwise
 
 class Attention(Attention):
-    """<Family>'s attention; the shared eager forward and the residual added in the block, so the base holds."""
+    """<Family>'s attention; the shared attention interface and the residual added in the block, so the base holds."""
 
 class Mlp(Mlp):
     """<Family>'s MLP; the residual is added in the block, so the base holds."""

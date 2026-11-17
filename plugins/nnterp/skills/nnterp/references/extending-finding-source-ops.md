@@ -120,7 +120,10 @@ reads its `dropout_add_0` call's `input`.
 
 ## Drill inside a trace
 
-`attention_interface_1` calls a function, transformers' `eager_attention_forward`. Its
+`attention_interface_1` calls a function: under eager, the modeling file's own
+`eager_attention_forward`. Each file defines one, with the same names for the operations
+the base `Attention` reads, so one path serves every family on the interface; a family
+whose copy differs redefines the value (GPT-OSS, below). Its
 operations exist only under `attention_interface_1.source`, and that drill works only
 inside a trace: the callee is a local variable bound at run time, so nnsight resolves it
 from the live call (a served read of the call's `.fn`) the first time someone drills into
