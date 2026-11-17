@@ -165,7 +165,7 @@ written against the unquantized tree runs against a quantized deployment as is.
 
 | Symptom | Cause |
 |---|---|
-| `TypeError: ... got an unexpected keyword argument 'load_in_4bit'`, at the end of a `ValueError: Could not load model` | `load_in_4bit=` and `load_in_8bit=` are not accepted. Write `dtype="nf4"` or `dtype="int8"` |
+| `TypeError: ... got an unexpected keyword argument 'load_in_4bit'`, inside a `ValueError: Could not load model` | `load_in_4bit=` and `load_in_8bit=` are not accepted. Write `dtype="nf4"` or `dtype="int8"` |
 | `AttributeError: module 'torch' has no attribute 'nf8'` | A misspelled format name reaches torch as a dtype. Check it against the table |
 | `dtype="int3"` gave a model twice the bfloat16 size | `torch.int1` to `torch.int7` exist, so the name is not rejected. transformers logs `Falling back to torch.float32` and loads float32 |
 | `MatMul8bitLt: inputs will be cast from torch.bfloat16 to float16`, once per matmul | `int8` with a `compute_dtype` other than float16 |

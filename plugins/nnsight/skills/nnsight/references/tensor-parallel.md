@@ -74,8 +74,8 @@ message lists the degrees that would work.
 
 | Value | Arrives | To edit it |
 |---|---|---|
-| the output of a sharded module (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`, `lm_head`, `embed_tokens`), the input of `o_proj` and `down_proj`, `mlp.output`, the tensor in `self_attn.output` | whole | clone, edit, assign back (rule 3) |
-| `layers[i].input` and `.output`, `mlp.input`, `norm.output` | whole | in place, as on one GPU |
+| the output of a sharded module (`q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`, `lm_head`, `embed_tokens`), the input of `o_proj` and `down_proj`, `mlp.output`, the tensor in `self_attn.output`, and `layers[0].input`, which is the embedding's output | whole | clone, edit, assign back (rule 3) |
+| `layers[i].output`, `mlp.input`, `norm.output` | whole | in place, as on one GPU |
 | the input of `q_proj`, `k_proj`, `v_proj`, `gate_proj`, `up_proj`, `lm_head` | whole, as a `DTensor` | edit the same value where it is a plain tensor: `mlp.input`, a norm's `.output` |
 | a value *between* two sharded modules: `mlp.act_fn.output`, `mlp.source.self_gate_proj_0.output`, attention's `query_states_0` | this rank's slice, `1/tp_size` wide on one axis | [gather, edit, shard](#a-value-between-two-sharded-modules) |
 | every parameter, and a `.source` value *inside* a sharded module | a [`DTensor`](#parameters-and-other-dtensors): `.shape` is the whole, the data is this rank's | a weight: through `.to_local()` |
@@ -221,6 +221,9 @@ Plans that use `megamoe_router`, `megamoe_experts`, `moe_identity_expert` or
 MLA's split kv projection (`mla_kv_a_proj`) are refused: `max_tp_size` returns
 `None` and the load raises `UnshardableCheckpoint`. DeepSeek-V2-Lite is the
 common case: no tensor parallelism, while expert parallelism is open to it.
+
+A PEFT adapter is refused on a tensor-parallel load, by `peft=` and by
+`model.load_adapter(...)` alike, with a `ValueError`.
 
 ## Diagnosing
 
