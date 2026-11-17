@@ -150,8 +150,8 @@ assert abs(results["LEACE, fitted in sequence"][1]) < 0.1 * results["random rank
 retrained probe at sites [8, 9, 10, 11], plural-minus-singular gap, agreement accuracy
 no erasure                   probe [1.0, 0.99, 1.0, 1.0]   gap +6.33   agreement 0.99
 LEACE at site 8 only         probe [0.55, 0.73, 0.91, 0.92]   gap +2.28   agreement 0.73
-LEACE, fitted independently  probe [0.55, 0.77, 0.91, 0.89]   gap -0.01   agreement 0.45
-LEACE, fitted in sequence    probe [0.55, 0.5, 0.56, 0.52]   gap -0.45   agreement 0.42
+LEACE, fitted independently  probe [0.55, 0.76, 0.91, 0.89]   gap -0.01   agreement 0.45
+LEACE, fitted in sequence    probe [0.55, 0.49, 0.56, 0.48]   gap -0.45   agreement 0.42
 random rank-1                probe [1.0, 0.99, 1.0, 1.0]   gap +6.31   agreement 0.99
 ```
 
@@ -168,7 +168,7 @@ Test rows are the eight held-out subject nouns; 0.5 is chance in both columns.
   different distribution once an earlier site is erased, and leaves the concept
   decodable. Fit site 8, collect site 9 with site 8 erased, fit site 9, and so on.
 - **The behavior is not the judge.** Independently fitted erasers already bring
-  the logit gap to zero while a probe still reads the concept at 0.77 to 0.91.
+  the logit gap to zero while a probe still reads the concept at 0.76 to 0.91.
 - **Report the spread over splits.** What is left after sequential erasure is
   noise: over five draws of the held-out nouns the gap lands between -0.45 and
   +0.53 and the probe between 0.48 and 0.57.

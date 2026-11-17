@@ -13,8 +13,9 @@ is what `as tracer:` binds.
 | `VLLM` | `from nnsight.modeling.vllm import VLLM` | the vLLM engine, `mode="sync"` or `"async"` |
 
 `TransformersModel(repo_id, *, task=None, tokenizer=None, processor=None,
-image_processor=None, feature_extractor=None, peft=None, revision=None,
-dispatch=False, rename=None, envoys=None, **hf_kwargs)`. `hf_kwargs` carries
+image_processor=None, feature_extractor=None, peft=None,
+autocast_adapter_dtype=True, revision=None, dispatch=False, rename=None,
+envoys=None, **hf_kwargs)`. `hf_kwargs` carries
 `device`, `device_map`, `dtype`, `attn_implementation`, `trust_remote_code` and
 anything else transformers accepts.
 
@@ -75,6 +76,7 @@ anything else transformers accepts.
 | `model.config`, `.repo_id`, `.revision`, `.task`, `.dispatched` | `TransformersModel` | metadata |
 | `model.generator.streamer.output` | `TransformersModel` | this step's tokens during `generate` |
 | `model.load_adapter(peft_id)` | `TransformersModel` | attach or swap a PEFT adapter; `None` removes it |
+| `model.disable_adapters()`, `model.enable_adapters()`, `model.adapters_enabled` | `TransformersModel` | switch an attached adapter off and on; the base model's forward while off |
 | `model.to_model_key()` | remote-capable models | the identity a remote request carries: repo id, revision, task |
 | `model.logits`, `model.samples` | `VLLM` | this step's pre-sampling logits and sampled ids |
 

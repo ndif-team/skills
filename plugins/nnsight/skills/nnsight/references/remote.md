@@ -32,6 +32,10 @@ prompt = "The Eiffel Tower is in the city of"
 - Without `dispatch=True` the model is built on the `meta` device: every module
   path exists and no weights are loaded, so a laptop can write a trace for a 70B
   model.
+- A request carries the model's `attn_implementation` and, for a model built
+  with `peft=`, the adapter id and whether it is switched off. So load with
+  `attn_implementation="eager"` to read attention probabilities remotely, and
+  name an adapter by a Hub id the server can read.
 - `python scripts/check_env.py --remote` prints key, host, deployed models and
   the local-versus-server package diff in one go.
 - **A model that is not RUNNING queues until it is loaded.** Check

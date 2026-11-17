@@ -47,7 +47,7 @@ Run the inspector. It builds the model without weights and prints the layer
 list, each block child in forward-pass order, and each output's type:
 
 ```
-python scripts/inspect_model.py HuggingFaceTB/SmolLM2-135M-Instruct --task text-generation --prompt "Hi"
+python scripts/inspect_model.py HuggingFaceTB/SmolLM2-135M-Instruct --task text-generation --prompt "The capital of France is"
 
 layers        model.model.layers[i]          (30 blocks)
 embeddings    model.model.embed_tokens
