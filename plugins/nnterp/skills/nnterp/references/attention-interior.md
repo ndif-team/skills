@@ -16,7 +16,8 @@ per-head weights, `value_weight`, `output_weight`, `attention_input_gain` and
 `attention_output_gain`, are read off the modules ([below](#the-weights-per-head)).
 
 They are source-located: nnterp reaches them through nnsight `.source` at
-transformers' shared eager attention call (`attention_interface_1`), or at the
+transformers' shared attention interface call (`attention_interface_1`; under eager,
+the modeling file's own `eager_attention_forward`), or at the
 family's own operations where it does its own arithmetic (GPT-J, GPT-Neo,
 CodeGen, GPT-NeoX-Japanese, XGLM, BLOOM, MPT, Falcon), and presents one layout on
 every family.
@@ -95,7 +96,7 @@ family. In-place edits reach the model; assignment flattens the heads back.
 
 ```python
 fast = StandardizedTransformer("openai-community/gpt2", device="cpu", dispatch=True)     # sdpa, transformers' default
-assert fast.support(layer=5)["self_attn.attention_head_outputs"] is not None           # inside the eager forward
+assert fast.support(layer=5)["self_attn.attention_head_outputs"] is not None           # the eager forward's return
 assert fast.layers[5].self_attn.o_proj.path.endswith("h.5.attn.c_proj")
 
 with model.trace(prompt):
@@ -253,9 +254,9 @@ write is rotated for the position it lands at, as here. Three things differ:
   range(tokens))` is the `attention_queries` vLLM's attention layer receives, bit for bit, and
   outside a trace it raises `RuntimeError`. `positions` is `[tokens]`; on the M-RoPE rotary
   of the Qwen-VL text families a position is a text token's, the same on all three rows.
-- **Not served on vLLM's transformers backend** (OLMo, OLMo 2, SmolLM3, StarCoder2): the
-  rotary is a call inside a forward the backend rewrites at load, which nnsight cannot
-  instrument.
+- **Not served on the families vLLM runs through its transformers backend** (OLMo 2 and 3
+  and Pythia among them; `support()` gives this reason): the rotary is a call inside a
+  forward the backend rewrites at load, which nnsight cannot instrument.
 - **Not served under latent attention** (DeepSeek-V2/V3, Kimi-K2, GLM-4.7-Flash): vLLM
   rotates only each query head's rope slice and the shared rope key, inside its
   latent-attention layer, where `StandardizedTransformer` serves whole-head queries.
@@ -286,13 +287,15 @@ print(tuple(q_src.shape), torch.equal(moved[:, :, -1:], expected))
 # (1, 9, 6, 64) True
 ```
 
-HunYuan's and Llama 4's attention norm the queries and keys after the rotary on this engine
-too, so `attention_queries` is the norm of `rotate(...)` there; on Llama 4 both values, and
-`rotate`'s input and output, are in transformers' channel order.
+Llama 4's attention norms the queries and keys after the rotary on this engine too, so
+`attention_queries` is the norm of `rotate(...)` there, and both values, and `rotate`'s
+input and output, are in transformers' channel order.
 
 ## Requirement: eager attention
 
-All six live inside the eager attention forward. A model loaded with `sdpa` or
+The scores and the pattern are read inside the eager attention forward; the queries,
+keys and values are the arguments of the module's call to it, and the head outputs its
+first return. A model loaded with `sdpa` or
 `flash_attention_2` never runs it, and each value reports
 `read inside the eager attention forward, but this model runs 'sdpa'; load with
 attn_implementation='eager'` in `support()`; reading one raises
@@ -525,13 +528,14 @@ keys (CodeGen); `Conv1D` columns and rows (GPT-2). MiMo-V2-Flash's `value_weight
 On a BitNet load (transformers' `AutoBitLinear` or `BitLinear`) both raise `Unavailable`:
 those layers apply a function of the weight they store.
 
-Under a PEFT adapter the weight is the one the LoRA layer applies, computed as `merge()`
-computes it, in the base weight's dtype: the base plus each active adapter's delta; the base
-alone once an adapter is merged (the forward then runs the base layer only); the base without
-a merged adapter when the adapters are disabled (the forward unmerges first). That is a new
-tensor; otherwise the result is a view of the parameter. A DoRA or aLoRA adapter, or another
-tuner, raises `NotImplementedError`. An undispatched model's weights (meta) and a quantized
-model's (codes) raise `Unavailable`.
+Under a PEFT adapter (PEFT 0.19 or later) the weight is the one the adapted layer's next forward applies, in the
+base weight's dtype: the base layer's weight plus each active adapter's delta while the layer
+is enabled and unmerged, the base layer's weight alone once it is merged or disabled (a layer
+left merged with its adapters disabled is unmerged by the read, as its forward would do
+first). The sum is a new tensor; otherwise the result is a view of the parameter. An active,
+unmerged adapter that is no delta on the base weight (DoRA, OFT, IA3) raises
+`NotImplementedError`. On an undispatched model (meta weights) the weights and both gains
+raise `Unavailable`; on a quantized one (codes) the weights do.
 
 The gains are measured by calling the norm on `+-256` in alternating channels, which any
 RMS norm or LayerNorm normalizes to `+-1`: exact on a norm without a bias, to rounding with
@@ -618,8 +622,8 @@ On Llama the queries, keys and values also take in-place edits.
 ### Falcon: two branches, picked by `config.alibi`
 
 Falcon's attention does its own arithmetic, and `config.alibi` picks one of two
-branches with different operations; the family names every interior value's
-operation by that flag, so all six are available under eager on both. Without
+branches with different operations; the family names each branch's operations,
+so all six are available under eager on both. Without
 alibi the queries and keys are the two returns of the rotary embedding, and the
 values are bound *before* it, so in one trace the values must be read before
 the queries or keys:

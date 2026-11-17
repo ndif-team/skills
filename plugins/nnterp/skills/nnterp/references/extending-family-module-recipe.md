@@ -132,7 +132,7 @@ class Layer(Layer):
 
 
 class Attention(Attention):
-    """Llama's attention; the shared eager forward and the residual added in the block, so the base holds."""
+    """Llama's attention; the shared attention interface and the residual added in the block, so the base holds."""
 
 
 class Mlp(Mlp):
@@ -161,8 +161,8 @@ not ``model.model.layers``. ``wpe`` (learned absolute positions) and ``drop``
 have no standard name; they stay reachable under their own.
 
 A checkpoint with ``reorder_and_upcast_attn`` set takes GPT-2's own
-``_upcast_and_reordered_attn`` path instead of the shared eager forward, so
-``attention_probabilities`` is unavailable there.
+``_upcast_and_reordered_attn`` path instead of the shared attention interface, so
+none of the attention's interior values is available there.
 """
 
 from typing import TYPE_CHECKING
@@ -193,7 +193,7 @@ class Layer(Layer):
 
 
 class Attention(Attention):
-    """GPT-2's attention; the shared eager forward and the residual added in the block, so the base holds.
+    """GPT-2's attention; the shared attention interface and the residual added in the block, so the base holds.
 
     A checkpoint with ``reorder_and_upcast_attn`` takes GPT-2's own upcast
     path instead, where nothing on the interface is reachable.
@@ -359,10 +359,12 @@ def project_on_vocab(model: "StandardizedTransformer", hidden: torch.Tensor) -> 
 The others: Cohere-2 (imports Cohere's), Granite
 (`/ logits_scaling`; GraniteMoE, GraniteMoE-Shared, GraniteMoE-Hybrid, Granite-SWA,
 GraniteMoE-SWA import it), Falcon-H1 (`* lm_head_multiplier`), HyperCLOVA X
-(`* logits_scaling`), Gemma-2 and Gemma-3 (the cap only on the causal-LM class), Mamba,
-Falcon-Mamba, Mamba-2 and Nemotron-H (the head in its own dtype, float32 logits), ZAYA (the
-float32 stream cast to the final norm's dtype first), OPT (`project_out` where the decoder
-has it), DeepSeek-V4 (collapses its parallel streams with `hc_head` first).
+(`* logits_scaling`), Gemma-2 (the cap where the loaded class's forward applies it, read
+off that forward's source, so PaliGemma 2's wrapper is followed too), Gemma-3 (the cap only
+on the causal-LM class), Mamba, Falcon-Mamba, Mamba-2 and Nemotron-H (the head in its own
+dtype, float32 logits), ZAYA (the float32 stream cast to the final norm's dtype first), OPT
+(`project_out` where the decoder has it), DeepSeek-V4 (collapses its parallel streams with
+`hc_head` first).
 Each block's own sizes are not module functions but properties on the family's envoy
 subclasses ([extending-descriptors.md](extending-descriptors.md)).
 
@@ -412,7 +414,7 @@ class Layer(Layer):
 
 
 class Attention(Attention):
-    """Gemma-2's attention: the shared eager forward, but what reaches the residual stream is the post-attention norm's output."""
+    """Gemma-2's attention: the shared attention interface, but what reaches the residual stream is the post-attention norm's output."""
 
     @EProperty(
         "../post_attention_layernorm.output",
@@ -824,10 +826,10 @@ What each part answers:
 - **Clone plus transform.** A plain `mlp_output` would be a live tensor the block later
   mutates, so a saved read would silently become `mlp + attn`. The preprocess returns a
   clone; a clone is invisible to the model, so `@mlp_output.transform` hands the edited
-  copy back to be swapped in after the read. `transform(self, value, raw)` receives the
-  raw served value so a tuple-returning module could rebuild its container
-  (`(edited.clone(), *raw[1:])`). A transform is needed only when the preprocess returns
-  something other than the served object and in-place edits must still reach the
+  copy back to be swapped in after the read. `transform(self, value, raw)` returns the
+  location's whole value: `raw` is that value as served, which a tuple-returning module
+  rebuilds around the edited copy (`(value.clone(), *raw[1:])`). A transform is needed
+  only when the preprocess returns a copy and in-place edits must still reach the
   model; GPT-2's MLP output is never mutated later, so the base holds there. Its two
   Falcon tests: `mlp.output == mlp_output + attention_output`, and `mlp_output[:] = 0`
   moves the logits while the saved copy stays zero.

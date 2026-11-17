@@ -26,10 +26,10 @@ transformers dispatches each mixer to a compiled kernel when one is installed
 source, so nothing inside them is readable, and `mamba_ssm`'s do not run on CPU
 at all: an unrouted Mamba-1 model on CPU crashes with `Expected u.is_cuda()` even
 for a `layer_output` read. Without the package, transformers binds the kernel names to
-its dispatcher, which calls the pure-torch functions: Mamba-2 reads through it and needs
-no routing, while Mamba-1's `attention_head_outputs`, `state_output` and per-token state
-are read inside the kernels' own bodies and need routing on every machine (`support()`
-says so). `route_kernels(family, "torch")` binds the family's
+its dispatcher, which calls the pure-torch functions: Mamba-1 and Mamba-2 read their
+kernel values through it and need no routing, while Mamba-1's per-token state (`state`,
+`states`) is read inside the kernels' own bodies and needs routing on every machine
+(`support()` says so). `route_kernels(family, "torch")` binds the family's
 kernel names to transformers' pure-torch functions, **process-wide**; call it
 before the layer's first trace (a forward already instrumented keeps its
 kernel), with the family module before loading or `model.family` after.
@@ -62,7 +62,7 @@ False)` undoes it) to make every token a chunk boundary.
 
 | value | DeltaNet (`LinearAttention`) | Mamba-1 (`SelectiveScan`) | Mamba-2 (`StateSpace`) |
 |---|---|---|---|
-| `attention_queries` | `q` after conv, activation, repeat to the value heads; **before** the kernel's l2norm and scale | `C`, `[batch, seq, 1, state_dim]` | `C` per group of heads |
+| `attention_queries` | `q` as the delta-rule call receives it: after conv and activation, **before** the kernel's l2norm and scale | `C`, `[batch, seq, 1, state_dim]` | `C` per group of heads |
 | `attention_keys` | `k`, likewise before the l2norm | `B` | `B` per group |
 | `attention_values` | `v`, `[batch, seq, heads, value_dim]` | `x` per channel, `[batch, seq, channels]` | `x` per head, `[batch, seq, heads, head_dim]` |
 | `betas` | write strength in `(0, 1)`, per head; assignable | `softplus(dt + dt_bias)` per channel; read-only | `softplus(dt + dt_bias)` per head; assignable, written back into `dt` |
@@ -73,11 +73,16 @@ False)` undoes it) to make every token a chunk boundary.
 | `states`, `state_after(t)` | after `route_kernels` | after `route_kernels` | after `chunk_per_token(model)`; a read-only copy |
 | `set_state_after(t, v)` | yes | yes | unavailable: assign `state_input` |
 | `state_input` on a prompt | `None` | `None`; assigning raises `ValueError` | `None` |
-| in-place edit of q/k/v | lands | a view: assign, or edit under `torch.no_grad()` | a view: assign, or edit under `torch.no_grad()` |
+| in-place edit of q/k/v | a view: assign, or edit under `torch.no_grad()` | a view: assign, or edit under `torch.no_grad()` | a view: assign, or edit under `torch.no_grad()` |
 
 A hand recurrence must apply what the kernel does after the read: DeltaNet's
 kernel l2-normalizes `q` and `k` and scales `q` itself (skip it and the recurrence
-is off by ~70%); Mamba-1's and Mamba-2's add the `D` skip.
+is off by ~70%); Mamba-1's and Mamba-2's add the `D` skip. On a DeltaNet with fewer
+query/key heads than value heads (Qwen3.5 from 4B up, Qwen3-Next) `q` and `k` have one
+head per query/key head where the kernel repeats them to the value heads itself, so compare
+`q.shape[2]` with `v.shape[2]`: head `h` then serves the `r = num_v_heads // num_k_heads`
+consecutive value heads from `h * r`, an edit to it reaches all of them, and
+`q.repeat_interleave(r, dim=2)` lines it up with per-value-head tensors.
 
 ## Reading the values
 
@@ -207,8 +212,9 @@ back by inverting them, so they are one argument:
   and Mamba-2 / Nemotron-H return float32 logits.
 - **A Mamba-1 checkpoint with `use_mambapy`** (and `mambapy` installed) runs a
   parallel scan with no per-token binding: `state` / `states` say so.
-- **A prompt run with `use_cache=False`** returns no final state on Mamba-2:
-  `state_output` raises `Unavailable`.
+- **Leave `use_cache` on (the default) for anything inside a mixer.** Without a cache a
+  read inside the mixer ends with `OutOfOrderError`; on an older transformers only a
+  prompt's `state_output` is lost.
 
 The nnterp repo pages behind this file: `docs/usage/delta-net.md`,
 `docs/usage/selective-scan.md`, `docs/usage/state-space.md`,
