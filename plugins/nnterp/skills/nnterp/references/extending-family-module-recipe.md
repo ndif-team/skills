@@ -364,7 +364,7 @@ Falcon-Mamba, Mamba-2 and Nemotron-H (the head in its own dtype, float32 logits)
 float32 stream cast to the final norm's dtype first), OPT (`project_out` where the decoder
 has it), DeepSeek-V4 (collapses its parallel streams with `hc_head` first).
 Each block's own sizes are not module functions but properties on the family's envoy
-subclasses ([descriptors.md](extending-descriptors.md)).
+subclasses ([extending-descriptors.md](extending-descriptors.md)).
 
 ## Override 1: a sandwich block (gemma2.py)
 
@@ -441,7 +441,7 @@ Every read, write and in-place edit of `layers[i].self_attn.attention_output` no
 `layers[i].post_attention_layernorm.output`, and the contribution identity the suite
 checks holds. `../` steps to the parent by name arithmetic, so the rest of the key is
 native names; it works here because Gemma-2's native name is the standard one (on GPT-2
-the same key fails, [descriptors.md](extending-descriptors.md)). The override
+the same key fails, [extending-descriptors.md](extending-descriptors.md)). The override
 annotates `-> Residual`, the same named layout as the
 base value (`Residual` comes in the same `from ..components import ...` line as the
 envoys), so `layout` and `dims` stay the base's rather than a retyped copy.
@@ -870,7 +870,7 @@ the experts module takes `(hidden, top_k_index, top_k_weights)` under transforme
 `@use_experts_implementation`, and the shared expert's output is what the mixture adds;
 `RENAME` aliases the router `router` (`"gate": "router"`) and the shared expert
 `shared_experts`. Otherwise redefine the value as a `TokenEProperty` with the base's
-layout (Hunyuan's `"router.wg.output"`, [descriptors.md](extending-descriptors.md)), or
+layout (Hunyuan's `"router.wg.output"`, [extending-descriptors.md](extending-descriptors.md)), or
 `unavailable(...)` where no tensor holds it (DBRX's `expert_outputs`). The nnterp repo's
 `docs/usage/mixture-of-experts.md` is the user side.
 
@@ -888,7 +888,7 @@ ENVOYS = {Qwen3NextDecoderLayer: Layer, Qwen3NextAttention: Attention, Qwen3Next
 
 A mixer with other kernels is a new `RecurrentMixer` subclass that sets `CHUNK_KERNEL`,
 `RECURRENT_KERNEL` and `STATE_OP` and declares its values at `kernel("inputs")`
-([descriptors.md](extending-descriptors.md), and the nnterp repo's
+([extending-descriptors.md](extending-descriptors.md), and the nnterp repo's
 `docs/developing/recurrent-mixer-internals.md` for the occurrence arithmetic). Keep it
 keyed in `ENVOYS`: `route_kernels(model.family, ...)` finds the mixer class there.
 
@@ -1081,7 +1081,7 @@ class Vision(Vision):
 `image_token_mask` (`ImageTokenMask`, `[batch, seq]`) and `image_features` (`ImageFeatures`,
 `[image_tokens, hidden]`) are `EProperty`s on `Vision`, and neither is read inside the
 tower: each key is anchored at the model root with a leading `/`
-([descriptors.md](extending-descriptors.md#the-path)).
+([extending-descriptors.md](extending-descriptors.md#the-path)).
 
 - `image_token_mask` is keyed `"/inputs"`: `input_ids == image_token_id` (`image_token_id`,
   else `image_token_index`, off the wrapper's config). Assigning raises.
@@ -1439,7 +1439,7 @@ HunYuan's and Llama 4's post-rotary norms, JetMoE's tiling of the keys).
 Run it from the nnterp repo root (`git rev-parse --show-toplevel` must print the nnterp
 checkout): `HF_HUB_OFFLINE=1 pytest tests/families/test_<model_type>.py`. A failure in
 `test_every_source_value_resolves_on_every_layer` names the operation the forward does
-not have; [finding-source-ops.md](extending-finding-source-ops.md) is how to find the one it does.
+not have; [extending-finding-source-ops.md](extending-finding-source-ops.md) is how to find the one it does.
 
 The template above, written as a standalone module for `gpt2` and passed to
 `nnterp.families.register(module, "gpt2")` at the top of a test file that subclasses `FamilySuite`
@@ -1468,11 +1468,11 @@ with GPT-2's `NATIVE`, `REFUSES_IN_PLACE_QKV` and `EXPECTED_UNAVAILABLE`, passes
   message's list.
 - **No version conditionals in a family module.** One module targets the transformers
   nnterp is developed on; a release that moves an op is handled by updating the string
-  (the procedure is in [finding-source-ops.md](extending-finding-source-ops.md)).
+  (the procedure is in [extending-finding-source-ops.md](extending-finding-source-ops.md)).
 
 ## Related
 
-- [descriptors.md](extending-descriptors.md): what each descriptor in these modules takes.
-- [finding-source-ops.md](extending-finding-source-ops.md): where the operation names come from.
+- [extending-descriptors.md](extending-descriptors.md): what each descriptor in these modules takes.
+- [extending-finding-source-ops.md](extending-finding-source-ops.md): where the operation names come from.
 - nnterp repo: `docs/extending/adding-a-family.md`, `docs/developing/testing.md`,
   `docs/reference/families.md` (every shipped family's overrides in one table).

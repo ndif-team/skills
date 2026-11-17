@@ -148,13 +148,12 @@ the rotary, it is rotated for the position it lands at, so the move is one assig
 an edit that must happen before the rotation (a direction found on the unrotated queries or
 keys), and to recompute attention with keys from elsewhere (`rotate` the source keys at the
 destination positions, outside the trace, and run the block's attention on them with
-[`interface`](#calling-the-attention-function-again-interface)). [SKILL.md](../SKILL.md)'s "Before the rotary
-embedding" runs the transplant. Use them instead of `self_attn.q_proj.output` too: nnterp
+[`interface`](#calling-the-attention-function-again-interface)). Use them instead of `self_attn.q_proj.output` too: nnterp
 promises nothing about a projection's layout (Phi-3 and GPT-NeoX fuse the queries, keys and
 values into one projection, Phi-3 has no `q_proj`), and on Qwen3, OLMo-2/3 and Gemma a norm
 sits between the projection and the rotary, which a hand-rotated `k_proj.output` misses.
 
-GPT-2 has no rotary embedding, so the check runs on SmolLM2:
+GPT-2 has no rotary embedding, so the check and the transplant run on SmolLM2:
 
 ```python
 llama = StandardizedTransformer("HuggingFaceTB/SmolLM2-135M-Instruct", device="cpu", dispatch=True, attn_implementation="eager")
@@ -168,6 +167,12 @@ with llama.trace("The Eiffel Tower is in Paris"):
 
 assert q_src.shape == (1, 9, 7, 64) and k_src.shape == (1, 3, 7, 64)
 assert torch.equal(lattn.rotate(k_src, range(k_src.shape[2])), k)   # the block's own rotation, outside the trace
+
+with llama.trace("My favourite city in the whole world is Rome"):
+    lattn.attention_queries_prerope[:, :, -1] = q_src[:, :, -1]   # the source's last query, rotated for the target's last position
+    moved = lattn.attention_queries.save()
+
+assert torch.equal(moved[:, :, -1:], lattn.rotate(q_src[:, :, -1:], [moved.shape[2] - 1]))
 ```
 
 On a block without a rotary embedding both values are `Unavailable` and `rotate` raises
@@ -215,7 +220,7 @@ too: they are served on the text model's blocks. `support()` names the reason pe
 
 Assignment reaches the model on every family. An in-place edit does too, except where the
 value is a split view of one fused tensor and torch refuses it as it does GPT-2's queries
-(`RuntimeError: Output 0 of Select is a view and is being modified inplace`): DBRX's and
+(`RuntimeError: ... is a view and is being modified inplace`): DBRX's and
 GPT-NeoX's queries and keys, JetMoE's keys, and latent attention's shared rope key. Assign
 there, or edit under `torch.no_grad()`.
 
@@ -475,7 +480,7 @@ assert OWN_ARITHMETIC.startswith("the queries, keys and values are not the argum
 
 The head-selective recipe (chosen heads reading another run's keys and values over a span,
 on the prompt and on every `generate` step) is the [patterns guide](patterns.md)'s
-`references/patching-and-attention.md`, "Head-selective K/V patching".
+[patterns-patching-and-attention.md](patterns-patching-and-attention.md), "Head-selective K/V patching".
 
 ## The weights per head
 
@@ -537,7 +542,24 @@ post-attention norm), ones where the block adds the attention's output as it is,
 `attention_output`'s reason where that is unavailable. On a block that does nothing else to
 either, head `j`'s map of a stream direction `h` into the stream is
 `attention_output_gain * (output_weight(j) @ value_weight(kv) @ (attention_input_gain * h))`,
-up to the positive per-token scale each norm divides by.
+up to the positive per-token scale each norm divides by. Query head `j` reads key/value head
+`j // (num_heads // num_kv_heads)`. On SmolLM2 (`llama`, above), what head 4 writes per unit
+of attention on " Paris":
+
+```python
+layer = llama.layers[14]
+group = layer.self_attn.num_heads // layer.self_attn.num_kv_heads   # 3 on SmolLM2
+h = llama.embed_tokens.weight[llama.tokenizer(" Paris", add_special_tokens=False).input_ids[0]].float()
+h = h / h.pow(2).mean().sqrt()                                      # unit RMS, as the block's norm leaves the stream
+W_V, W_O = layer.self_attn.value_weight(4 // group).float(), layer.self_attn.output_weight(4).float()
+ov = layer.attention_output_gain * (W_O @ W_V @ (layer.attention_input_gain * h))
+assert ov.shape == (576,)
+```
+
+The weights carry no bias. Where the value projection has one, every value, and so every
+head output (a pattern row sums to one), carries it, and
+`attention_values[:, kv] - self_attn.input @ value_weight(kv).T`, from one eager trace, is
+that bias at every position, whatever the family's layout.
 
 `value_weight` alone is refused on latent attention, Gemma-4 (`v_norm`) and ZAYA (its second
 value head holds the previous token's values); `output_weight` is served there.
@@ -555,7 +577,7 @@ GPT-2's `c_attn` produces one tensor that `split` divides into q, k, v; MPT's
 ```python
 with model.trace(prompt):
     attn.attention_queries[:, 0] = 0
-    # RuntimeError: Output 0 of Select is a view and is being modified inplace ...
+    # RuntimeError: ... is a view and is being modified inplace ...
 ```
 
 Assign instead (`attn.attention_queries = attn.attention_queries * 0`), or edit

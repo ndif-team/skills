@@ -236,7 +236,7 @@ share of `attention_output` is its slice times `self_attn.output_weight(h)`, the
 projection's columns for that head, `[hidden, head_dim]`. The projection is
 `self_attn.o_proj` on every family (aliased from `c_proj`, `dense`, `out_proj`), and
 `output_weight` reads its layout for you (GPT-2's `Conv1D` stores `[in, out]`) and, under
-a PEFT adapter, the weight the adapter applies ([SKILL.md](../SKILL.md), "The weights per head").
+a PEFT adapter, the weight the adapter applies (the [attention-interior.md](attention-interior.md), "The weights per head").
 
 ```python
 LAYER = model.num_layers // 2
@@ -276,7 +276,7 @@ before it and does not.
   every scalar from `i` on), Doge and ZAYA rescale the stream per channel, and
   DeepSeek-V4's stream is `[batch, seq, streams, hidden]`, mixed per block. Naive DLA
   there ranks the wrong terms (by ~7,700% on gemma-4-E2B). The weighted sums, verified
-  exact: the `references/values.md`, "Blocks that are not a plain sum".
+  exact: the [values.md](values.md), "Blocks that are not a plain sum".
   The logit lens itself is unaffected (the final norm removes a scale;
   `project_on_vocab` handles the streams).
 - **Post-norm families** (Gemma-2/3/4, OLMo-2/3, EXAONE-4, FlexOlmo, GLM-4, AFMoE).

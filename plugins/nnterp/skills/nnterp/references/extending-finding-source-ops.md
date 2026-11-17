@@ -401,7 +401,7 @@ a trace can. Do not add version conditionals to a family module.
 
 ## Related
 
-- [descriptors.md](extending-descriptors.md): the `EProperty` key these names go into.
-- [family-module-recipe.md](extending-family-module-recipe.md): the suite test that guards every name.
+- [extending-descriptors.md](extending-descriptors.md): the `EProperty` key these names go into.
+- [extending-family-module-recipe.md](extending-family-module-recipe.md): the suite test that guards every name.
 - The `nnsight` skill's `source-tracing.md` reference: iteration, dispatchers, the full limits table.
 - The `nnsight` skill's debugging guide: `OutOfOrderError` and a trace that ends early.

@@ -203,8 +203,8 @@ key is patched before the rotary, at `self_attn.attention_queries_prerope` /
 `attention_keys_prerope` (any attention implementation): the block rotates what you
 write for the position it lands at, so a query from another prompt or position is one
 assignment, where a rotated `attention_queries` written there keeps the position it ran
-at. GPT-2 has no rotary; [SKILL.md](../SKILL.md)'s "Before the rotary embedding" runs it on
-SmolLM2. Noising swaps the roles; the code is symmetric.
+at. GPT-2 has no rotary; the [attention-interior.md](attention-interior.md), "Before the
+rotary embedding", runs it on SmolLM2. Noising swaps the roles; the code is symmetric.
 
 ### Interpretation
 
@@ -347,8 +347,7 @@ it, at the head outputs.
 - **Other positions.** The keys are served after the rotary embedding, rotated for the
   positions they were computed at; a span written at other positions in the target needs
   keys rotated for those positions: read `attention_keys_prerope` in the source run and
-  pass `hattn.rotate(k_prerope, positions)` ([SKILL.md](../SKILL.md), "Before the rotary
-  embedding").
+  pass `hattn.rotate(k_prerope, positions)` (the [attention-interior.md](attention-interior.md), "Before the rotary embedding").
 
 ### Gotchas
 
@@ -357,7 +356,8 @@ it, at the head outputs.
 - **Read `interface` with the queries and call it before the head outputs.** The call
   takes the function as the forward runs it, so it comes before any read of the scores,
   the pattern or the head outputs; to call it twice, read `hattn.interface` once and call
-  the result twice ([SKILL.md](../SKILL.md), trap 17).
+  the result twice (the [attention-interior.md](attention-interior.md), "Calling the
+  attention function again").
 - **Pass whole tensors.** The call takes the live call's query and key lengths (its mask
   has them): patch inside `k2` and `v2`, pass all of `q`, and slice the result.
 - **Eager only, and not everywhere.** `support()` reports `self_attn.interface` unavailable

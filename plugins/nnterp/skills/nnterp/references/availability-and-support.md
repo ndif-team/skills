@@ -82,6 +82,11 @@ support = hybrid.support()
 A pure state-space model (Mamba-130m) repeats one reason per block, hundreds of
 lines; read `support(layer=i)` there.
 
+`self_attn.value_weight` and `output_weight` are methods, with no row in any of the three
+forms: call them. On a model without weights they raise `Unavailable` with "... on the meta
+device: the model is not dispatched" wherever a loaded model would serve them; any other
+reason (latent attention's on DeepSeek-V3) is the real answer.
+
 ## Reading an unavailable value
 
 Reading or writing one raises `nnterp.Unavailable` (a `RuntimeError`) with the
@@ -323,6 +328,12 @@ of the checkpoint, for the values the engine serves; a value the engine lacks ra
 ```python
 plain.rank("self_attn.attention_probabilities", 0)      # sdpa: the reason is support()'s
 ```
+
+One `OutOfOrderError` is not about the order `rank` gives. A child module's value
+(`self_attn.q_proj.output`) then an interior value of that attention (`attention_queries`)
+fails in the first such trace on a model whose `self_attn.source` nothing has touched yet;
+once the model is dispatched (`dispatch=True`, or after its first trace), touch
+`model.layers[i].self_attn.source` outside the trace.
 
 ## Gotchas
 

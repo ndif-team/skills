@@ -77,7 +77,7 @@ Dotted segments ending in `output`, `input` or `inputs`:
   instrumenting it for this run. A `source` after an operation drills into that call's
   callee: `"source.attention_interface_1.source.nn_functional_softmax_0.output"`. After
   `../` it is the parent's forward: `"../source.hidden_states_view_0.output"`.
-  [finding-source-ops.md](extending-finding-source-ops.md) is how to read an op's name.
+  [extending-finding-source-ops.md](extending-finding-source-ops.md) is how to read an op's name.
 - **A function of the host** returning such a path, run once per access inside the
   trace, for a forward that branches (Falcon's `by_alibi`, a `RecurrentMixer`'s
   `kernel("inputs")`; below).
@@ -150,7 +150,7 @@ output last_position ('batch', 'hidden')
   once on the model side after the read and splices its result in like a swap; `raw` is
   the value as served, so a module returning a tuple can be rebuilt around the edited
   element. It works at every path, a `source` one included. Falcon's `mlp_output` is
-  the shipped use ([family-module-recipe.md](extending-family-module-recipe.md)).
+  the shipped use ([extending-family-module-recipe.md](extending-family-module-recipe.md)).
 
 ## `unavailable(...)` and `unavailable=`
 
@@ -284,7 +284,7 @@ class Attention(Attention):
 ```
 
 A family whose values before the rotary sit at another operation redefines them on it with
-`unavailable=rotary_reason`; [finding-source-ops.md](extending-finding-source-ops.md#picking-the-operation)
+`unavailable=rotary_reason`; [extending-finding-source-ops.md](extending-finding-source-ops.md#picking-the-operation)
 says which operation.
 
 ## Inside the forward: a `source` segment
@@ -562,7 +562,7 @@ Forward order still applies with the flag: `hidden_states_1` binds before the ML
 so reading `stream_in` after `mlp_output` in one trace is `OutOfOrderError` too.
 `hidden_states_3` is the same binding on the cross-attention branch this config never
 takes; asking for it is the ordering error as well
-([finding-source-ops.md](extending-finding-source-ops.md), dead branches).
+([extending-finding-source-ops.md](extending-finding-source-ops.md), dead branches).
 
 ## Introspection
 
@@ -783,7 +783,7 @@ config that has none) is rewritten by `Envoy.__getattr__` into "no attribute", s
 registered variant that spreads a shipped module's `RENAME` and `ENVOYS` carries its
 size and `project_on_vocab` functions too. Which shipped families define which:
 `docs/reference/families.md`, "Logits, scales and sizes";
-[family-module-recipe.md](extending-family-module-recipe.md) quotes gpt2's, falcon's and cohere's.
+[extending-family-module-recipe.md](extending-family-module-recipe.md) quotes gpt2's, falcon's and cohere's.
 
 ## The helpers
 
@@ -839,6 +839,6 @@ print(NOT_ON_INTERFACE)
 
 ## Related
 
-- [family-module-recipe.md](extending-family-module-recipe.md): the shipped modules these descriptors are used in.
-- [finding-source-ops.md](extending-finding-source-ops.md): the op names a `source` segment takes.
+- [extending-family-module-recipe.md](extending-family-module-recipe.md): the shipped modules these descriptors are used in.
+- [extending-finding-source-ops.md](extending-finding-source-ops.md): the op names a `source` segment takes.
 - The `nnsight` skill's `modules-and-architectures.md` reference: `eproperty` and `envoys=` without nnterp.
