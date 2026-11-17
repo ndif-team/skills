@@ -1,288 +1,289 @@
-# Operating an NDIF
+# Running models on a server
 
-Two facts shape everything an operator does here.
+`SKILL.md` has the everyday commands, the three levels, and the rules that
+deploy is additive and that a model key is the identity. This page is the rest
+of the operator's surface. `ndif <command> --help` lists every flag.
 
-1. **You usually do not have to deploy anything.** The queue is lazy: the first
-   request for a model with no HOT replica provisions one on the spot. Explicit
-   deploys exist so a model is *already warm* when the first user arrives, and so
-   it can be pinned.
-2. **Deploy is additive.** Every call places `--replicas` **new** replicas
-   regardless of what is running, so `ndif deploy gpt2` twice gives you two. The
-   only ways to shrink are `ndif evict` and `ndif deploy -f models.yaml --sync`.
-
-Run these anywhere that can reach `NDIF_RAY_ADDRESS`: under compose,
-`docker compose -f docker/docker-compose.yml exec ray ndif ...`.
-
-## The model key is the identity
-
-A model key is `"<nnsight wrapper class path>:<JSON>"`, the JSON carrying the
-canonical repo id, the revision, the pipeline task and, when set,
-`trust_remote_code`:
+## The model key
 
 ```text
 nnsight.modeling.transformers.TransformersModel:{"repo_id": "openai-community/gpt2", "revision": null, "task": "text-generation"}
-nnsight.modeling.transformers.TransformersModel:{"repo_id": "x/custom", "revision": null, "task": "text-generation", "trust_remote_code": true}
 ```
 
-Every part is identity:
+The nnsight wrapper class, then JSON with the Hub's canonical repo id
+(`gpt2` becomes `openai-community/gpt2`), the revision, the pipeline task, and
+`"trust_remote_code": true` when set. Each part makes a different deployment.
 
-- The repo id is **canonicalized through the Hub** (`gpt2` →
-  `openai-community/gpt2`), so deploying needs Hub access, plus `HF_TOKEN` for a
-  gated repo.
-- The **revision**, the **task** and **`trust_remote_code`** change the key: two
-  revisions, two tasks, or the same checkpoint with and without its own code are
-  independent deployments. Left unset, the CLI infers the task exactly as an
-  nnsight client with no `task=` does, so the two agree. A model deployed with a
-  non-default `--task` or with `--trust-remote-code` needs the same flags on
-  every later `scale`, `evict` and `restart`.
-- The client sends the key it computed and the server never guesses. "Model not
-  deployed" is almost always a key mismatch — compare
-  `ndif status --json-output` against what nnsight computed locally.
+- **Every model command resolves a checkpoint to a key through the Hub**, so it
+  needs network where it runs, and `HF_TOKEN` for a gated repo that is not in
+  the cache yet. Left unset, the task is inferred exactly as an nnsight client
+  with no `task=` infers it, so the two agree.
+- **`dtype`, GPU count and padding are not in the key.** Two replicas of one
+  key deployed differently answer under the same name.
+- **"Model not deployed" on the client is almost always a key mismatch.**
+  Compare the key the client computed (`model.to_model_key()`) with
+  `ndif status --json-output | jq -r '.deployments[] | select(.model_key) | .model_key'`.
 
-## The commands you will actually use
+## Deploy, scale, restart, evict, export
 
 ```bash
-ndif status                      # HOT/WARM/COLD by level, plus cluster GPU totals
-ndif status --json-output        # the raw controller payload — model keys live here
-ndif deploy openai-community/gpt2 --pinned
-ndif deploy meta-llama/Llama-3.1-8B --dtype nf4 --gpus 1
-ndif deploy -f models.yaml --sync   # the only reconciling form
-ndif scale meta-llama/Llama-3.1-8B -n 2
-ndif evict openai-community/gpt2               # every HOT and WARM replica
-ndif evict openai-community/gpt2 --replica a1b2c
-ndif evict --all                               # every HOT deployment, pinned included
-ndif restart openai-community/gpt2 --replica a1b2c
-ndif export --stdout > models.yaml   # snapshot the current HOT set
-ndif queue                       # per-model processors, depth, in-flight requests
-ndif kill <request_id>           # see "Killing a request" below
-ndif env                         # the cluster's python + packages (vs `--local`)
+ndif deploy meta-llama/Llama-3.1-8B --pinned --gpus 1    # one more replica, placed as you say
+ndif scale meta-llama/Llama-3.1-8B -n 2                  # two more, copied from a running replica
+ndif restart openai-community/gpt2 --replica a1b2c       # kill the actor, wait for it to reload in place
+ndif evict openai-community/gpt2 --replica a1b2c         # one replica: demoted to WARM
+ndif evict --all                                         # every HOT model, pinned included
+ndif export --stdout > models.yaml                       # the HOT set as a file for `deploy -f`
 ```
 
-`ndif queue` lists a model once a request has created its processor, and the
-processor stays listed when idle; its `Replicas: N` can lag an eviction until
-the next dispatch. `ndif status` is the readiness surface. A deploy prints one
-line per model, `✓ <model_key> [b7f60]: ready`. Every flag:
-[operate-cli-commands.md](operate-cli-commands.md), `docs/operating/cli.md`.
+- **`deploy`** waits for each new replica with no deadline, since a download
+  has no sensible upper bound. It prints `✓ <model_key> [a1b2c]: ready` (the
+  bracket is the replica id) or `✗ ... initialization failed - <the load
+  error>`, then any replicas the controller evicted to make room. Placement
+  flags (`--dtype`, `--gpus`, `--size-bytes`, `--padding-factor`,
+  `--padding-bias`, `--max-tp`) are in
+  [sizing and placement](operate-sizing-and-placement.md).
+- **`scale`** differs from `deploy --replicas` only in where unset options
+  come from: `deploy` takes the controller's defaults, `scale` copies the actor
+  class, dtype, GPU count and timeout of a replica already running. Use it to
+  grow a model that was deployed with non-default settings. A WARM replica of
+  the key is promoted under its old id instead of loading a new one.
+- **`restart`** reloads the weights on the same GPUs. A request dispatched to
+  the replica meanwhile is re-queued or fails with
+  `Error submitting request to model deployment.`
+- **`evict`** without `--replica` removes every HOT and WARM replica of the
+  key. With `--replica` a HOT replica is demoted to WARM when the node's
+  host-RAM budget has room, and removed otherwise. `--all` reads the HOT set,
+  so a model that is only WARM has to be named.
+- **`status`** lists COLD models by name with `--show-cold`, and `--watch` on
+  `status` or `queue` refreshes every two seconds.
+- **`export` is not a full snapshot.** It writes one entry per key with
+  `model_key`, `dtype` and `actor_class`, plus `pinned`, `replicas`, `gpus` and
+  the timeout where they are not the default. Padding, `size_bytes` and
+  `max_tp` are not stored on a deployment and are lost, and replicas of one key
+  that differ are merged. Keep `ndif status --json-output` beside the file.
 
-**`deploy` vs `scale`.** Both are additive; `deploy` takes unspecified settings
-from the controller's defaults, `scale` copies a live replica — so `scale` a
-tensor-parallel or non-default-dtype model, or `deploy` adds a replica that
-answers differently under the same key.
-
-**Check output, not exit codes.** `✗ <model_key>: nothing to evict` and
-`✗ <model_key>: no HOT replicas to restart` exit 0.
-
-## Getting models deployed
-
-| Surface | `pinned` | `trust_remote_code` |
-|---|---|---|
-| `ndif deploy <checkpoint>` | `False`; `--pinned` sets it | `False`; `--trust-remote-code` puts it in the minted key |
-| `ndif deploy -f models.yaml` (`--sync`) | per entry | per entry, default `False`; goes into the key |
-| `NDIF_DEPLOYMENTS` at controller boot | **`True`**, hard-coded | whatever each key says (entries are raw keys) |
-| Dashboard Deploy / Add Replica | per request | per request, default `False` — a checkbox in the Deploy modal |
-| Dashboard schedule reconcile cron | **`True`**, hard-coded | per event, default `False`; written into the event's key |
-| The queue's autoscaler | `False` | whatever the key says |
-| Implicit, on the first request for an undeployed model | `False` | whatever the key says; **gated by the API key's tag** |
-
-`trust_remote_code` is a field of the model key, not of the deployment: a
-client's own `trust_remote_code=True` mints it too, keys that differ in it are
-two deployments, and the implicit path deploys a key carrying it only when a
-queued request's API key has the `trust_remote_code` or `trusted` tag
-(`docs/concepts/auth-and-limits.md`). A running model serves every caller.
-
-`NDIF_DEPLOYMENTS` is a pipe-separated list of **model keys**, used verbatim.
-Each entry must be the exact current key, task included: a bare repo id fails to
-evaluate, and a key without the task deploys a model no client's key will ever
-match. Copy them from
-`ndif status --json-output | jq -r '.deployments[] | select(.model_key) | .model_key'`
-(on the host — `jq` is not in the image).
-
-### models.yaml
+## models.yaml
 
 ```yaml
 models:
   - openai-community/gpt2
-  - checkpoint: meta-llama/Llama-3.1-8B
-    task: text-generation    # part of the key; inferred when unset
+  - checkpoint: Qwen/Qwen2.5-0.5B
     pinned: true
-    replicas: 2
+    replicas: 1
     dtype: bfloat16
-    gpus: 4
-    size_bytes: 6425499648
-    execution_timeout_seconds: 3600
-    # actor_class: omit for the cluster default; never the base ModelActor
-    # on a cluster that takes untrusted traffic
+    padding_factor: 0.3
+    execution_timeout_seconds: 600
 ```
 
-Other fields: `revision`, `trust_remote_code` (default `false`; part of the
-key), `padding_factor`, `padding_bias`, `max_tp`, `envoy_class`, `model_key`;
-unknown keys are silently dropped. `--sync` evicts
-every HOT key not in the file, trims surplus replicas, and deploys the shortfall.
+Other fields: `revision`, `task`, `trust_remote_code`, `gpus`, `size_bytes`,
+`padding_bias`, `max_tp`, `actor_class`, `envoy_class` (the nnsight wrapper
+class, `TransformersModel` by default), `model_key`. An unknown field is
+dropped without a word. `ndif deploy -f models.yaml` adds what the
+file lists. `--sync` makes the cluster match it: every HOT key not in the file
+is evicted, pinned or not, surplus replicas are trimmed, and only the shortfall
+is deployed.
 
-**`ndif export` is not a full snapshot.** It always writes `dtype` and
-`actor_class` but other fields only where non-default, drops `padding_factor`,
-`padding_bias`, `size_bytes` and `max_tp` (never stored on the deployment, so a
-restore is re-sized from cluster defaults), and merges replicas of one key that
-differ — one pinned replica makes the whole entry `pinned: true`. Save
-`ndif status --json-output` first.
+## Loading at boot
 
-## Sizing in one paragraph
+`NDIF_DEPLOYMENTS` on the `ray` service is a `|`-separated list of model keys
+that the controller deploys, pinned, when it starts:
 
-**NDIF's GPU accounting is a ledger, not a measurement.** The controller reserves
-`ceil(base + base × padding_factor + padding_bias)` per replica (defaults 0.15,
-500 MiB) from a pre-load estimate and never reads real free memory: a deploy is
-refused when the ledger says no and OOMs when the card disagrees. The padding is
-the whole budget for activations, KV cache and the CUDA context, enforced per card
-on the replica's share, `ceil(padded / gpus)`. Overrides: `size_bytes`,
-`padding_factor`, `padding_bias`, `gpus`, `max_tp`, `dtype`. Everything else —
-[operate-sizing-and-placement.md](operate-sizing-and-placement.md),
-`docs/runbooks/model-oom-on-deploy.md`, `docs/concepts/deployments-and-eviction.md`.
+```bash
+-e 'NDIF_DEPLOYMENTS=nnsight.modeling.transformers.TransformersModel:{"repo_id": "openai-community/gpt2", "revision": null, "task": "text-generation"}'
+```
 
-## dtype, quantization, tensor parallelism
+Each entry is used verbatim. A bare repo id deploys nothing and leaves
+`Model openai-community/gpt2 failed to evaluate` in the controller log; a key
+without the task deploys a model no client's key matches. Copy keys from the
+`jq` line above.
 
-**Quantization is a dtype name** (`--dtype nf4`, `int4`, `fp4`, `int8`, `fp8`,
-...); client code is unaffected and cannot ask for it — it is not in the model
-key. The **size estimate runs low by more than padding covers** (Llama-3.2-1B
-`nf4`: 0.62 GB estimated, 1.07 GB allocated), so give it a measured `size_bytes`.
+## Pinning, eviction and autoscaling
 
-**Tensor parallelism is off unless `NDIF_TP_MODEL_ACTOR_CLASS` is set** on the
-`ray` service; unset, `max_tp` is inert and `--gpus N` spreads whole layers over
-N cards with accelerate. Use `ndif.services.ray.tp.model.SandboxedTPModelActor`
-on a cluster that takes untrusted traffic — a TP placement replaces the actor
-class, and the plain `TPModelActor` runs untrusted code in-process. It needs
-transformers >= 5.15, and **a TP replica can never be cached** (HOT→WARM is
-impossible, so the controller evicts it outright). Pin one you want to keep.
+Who is pinned: `ndif deploy --pinned`, every `NDIF_DEPLOYMENTS` key and every
+dashboard schedule entry. A model loaded by a first request or by the
+autoscaler is not.
 
-**PEFT adapters are per request** (`TransformersModel(repo, peft="<hub id>")`):
-one deployment serves every LoRA over its base, though not a tensor-parallel
-replica; a local adapter directory is invisible to the server.
+- **The controller evicts only to place something else**, and only replicas
+  that are unpinned and older than `NDIF_MINIMUM_DEPLOYMENT_TIME_SECONDS`
+  (3600). When the incoming model is pinned the age rule is waived. Among
+  candidates it takes the smallest first. So a deploy on a full node fails
+  `CANT_ACCOMMODATE` because the occupant arrived 40 minutes ago: deploy
+  `--pinned`, or evict the occupant yourself.
+- **An evicted replica goes WARM** when host RAM allows, keeping its replica id,
+  and comes back from RAM on the next deploy, scale or request for its key.
+- **To pin or unpin a replica that is already serving**: `ndif evict
+  <checkpoint> --replica <id>`, then `ndif scale <checkpoint> --pinned` to pin
+  or `ndif scale <checkpoint>` to unpin. The same replica comes back from RAM
+  with the new flag, and that is how a model pinned at boot is unpinned without
+  a restart. Nothing changes the flag in place: `deploy` and `scale` only add
+  replicas, and `--sync` compares replica counts, not flags.
+- **Pinning does not survive a restart of `ray`**, stop `ndif evict`, or
+  reserve room for more replicas.
+- **Autoscaling** adds a replica to a model whose oldest queued request has
+  waited more than `NDIF_AUTOSCALING_WAIT_THRESHOLD_S` (30 s), up to
+  `NDIF_AUTOSCALING_MAX_REPLICAS` (3), then waits `NDIF_AUTOSCALING_BACKOFF_S`
+  (120 s). It never removes one: evict the extras yourself.
 
-## Levels, pinning, and eviction
+## The queue, and killing a request
 
-**HOT** = on GPU, serving. **WARM** = in host RAM, actor alive, raising
-`CachedActorError` if run. **COLD** = only in the node's HF cache. Only HOT
-replicas reach the queue, so a WARM-only model looks undeployed.
+`ndif queue` asks the dispatcher. A model appears once a request has arrived
+for it and stays listed when idle. Its `Replicas:` count can lag an eviction,
+because a replica that is gone is dropped on the next dispatch to it.
 
-The controller evicts on its own only what is **not pinned** and older than
-`NDIF_MINIMUM_DEPLOYMENT_TIME_SECONDS` (3600; waived when the incoming model is
-pinned). `ndif evict`, `--all` included, removes pinned replicas too. The age rule
-makes a deploy on a full cluster come back `CANT_ACCOMMODATE` because the occupant
-landed 40 minutes ago — deploy the incoming model `--pinned`, evict the occupant,
-or lower the variable.
+```text
+  openai-community/gpt2 (text-generation)
+    Status: READY
+    Replicas: 1
+    Queue depth: 2
+    ⚙ [05052] executing e41f2efa7200498190e2026fcbf63027 (for 0:00:06)
+    Queued: f49be56aea54492ea43442ad50efd406, c4f3f5eb0ff545be8620bdbb973a2782
+```
 
-**Pinning a model already deployed.** `pinned` is set only when a replica is
-created, and deploy is additive: `ndif deploy <ckpt> --pinned` adds a second,
-pinned replica beside the old one. To pin in place, deploy `--pinned`, then
-`ndif evict <ckpt> --replica <old id>`. `ndif scale` will not do it — it
-re-promotes an existing WARM replica under its old id and settings, and
-`pinned` is not copied (it defaults to false on that path).
+`ndif kill <request_id>` takes one id.
 
-**Changing a controller variable** (that one, the padding defaults, the actor
-class) means editing the `ray` service's `environment:` and `just up ray` — not
-`just restart ray` (old environment), not `just ta ray` (whole stack down). It is
-an outage, and the first request afterwards errors `Error starting model.`; the
-sizing reference has the rest.
+- **Queued**: removed. The client gets `ERROR` `Request cancelled by operator.`
+- **Running**: the client gets the same error at once and the actor is told to
+  stop the block. The replica stays in service and the next request runs
+  normally. A non-blocking request's stored status ends as `ERROR` `Your job
+  was cancelled or preempted by the server.`
+- **The stop lands at the next Python instruction.** A block inside one long
+  native call (a single huge CUDA kernel) finishes that call first, on a thread
+  the replica has already abandoned. On a sandbox actor the runner process is
+  terminated, which is immediate.
+- **An unknown id** exits non-zero. `No response from the dispatcher` means the
+  API is down or its dispatcher has died.
 
-Autoscaling adds up to `NDIF_AUTOSCALING_MAX_REPLICAS` (3) replicas per model
-when the *head of the queue* has waited past `NDIF_AUTOSCALING_WAIT_THRESHOLD_S`
-(30 s), and **never scales back down**.
+A request holds its replica for as long as its block runs: there is no
+execution timeout unless `NDIF_DEFAULT_EXECUTION_TIMEOUT_SECONDS` or a
+per-model `execution_timeout_seconds` is set. With one, the client gets
+`Your job exceeded the execution timeout of 20.0s.` and the replica moves on.
 
-## Killing a request
+## dtype and quantization
 
-`ndif kill <id>` goes to the dispatcher over a Redis stream (5 s timeout, no
-HTTP). What it does depends on where the request is:
+`--dtype` takes a torch dtype (`bfloat16`, `float32`) or a quantization name
+(`nf4`, `int4`, `4bit`, `fp4`, `int8`, `8bit`, `fp8`). It decides both how the
+weights load and how the model is sized. Client code does not change and cannot
+ask for it.
 
-- **Queued** — removed; the client gets `ERROR` "Request cancelled by operator."
-- **Executing** — only the **dispatch** is cancelled. A blocking client gets one
-  `ERROR`, "Request cancelled by operator." with an empty description line; the
-  log shows one `ndif.request` ERROR plus a `ndif.queue.replica` WARNING
-  `request errored: cancelled mid-dispatch`. A non-blocking client raises
-  `Replica was evicted while processing your request.`, and its stored response
-  shows that until the actor's own final response overwrites it (often
-  `COMPLETED`). The actor is not interrupted: it runs the block to completion,
-  holding its GPU memory.
+- **Quantization needs `bitsandbytes` in the server's Python**, and the image
+  does not install it: the load fails with `ImportError: Using bitsandbytes
+  4-bit quantization requires bitsandbytes`. `docker exec ndif pip install
+  bitsandbytes` serves until the container is removed. A two-line Dockerfile
+  keeps it: `FROM ndif/ndif`, `RUN pip install bitsandbytes`.
+- **The estimate for a quantized model runs low.** It is parameters times the
+  nominal width, but embeddings, norms and the head stay 16-bit.
+  Llama-3.2-1B at `nf4` reserves 1,178 MiB and takes 1,385 MiB on the card.
+  Give it a measured `--size-bytes`.
 
-**Restart the replica only while the killed block is still running**:
-`ndif restart <checkpoint> --replica <id>` (the id is on the `⚙` line of
-`ndif queue`). Work dispatched to it meanwhile fails with
-`ValueError: Cannot switch to a different thread` or
-`ValueError: parent cannot be on a different thread`. Once the block finishes
-on its own — Loki `{service="model"} |= "<request id>"` shows
-`Your job has been completed.` — the next request is clean with no restart.
-Requests sent to a replica during its restart are re-queued or errored.
-`No response from the dispatcher` means the API is down — or restarted under
-five seconds ago.
+## Tensor parallelism
 
-**By exact key.** `evict`, `restart` and `scale` resolve a checkpoint to the key
-their flags mint (`--task`, `--trust-remote-code`). For any other key, pass the `model_key` from
-`ndif status --json-output` to `ndif.cli.lib.restart.restart` /
-`ndif.cli.lib.evict.evict`, or POST the dashboard's `/api/deployments/{evict,
-restart}` (`{model_key, replica}`) or `/api/deployments/deploy`
-(`{checkpoint, model_key?, trust_remote_code}`) — recipes in
-[operate-cli-commands.md](operate-cli-commands.md). An unknown replica
-still returns HTTP 200, with the `✗` line inside the response's `logs[]`: check
-the body, not the status code.
+Not run for this guide: it needs a model across two or more GPUs.
+
+Off unless `NDIF_TP_MODEL_ACTOR_CLASS` is set on the `ray` service, to
+`ndif.services.ray.tp.model.TPModelActor`, or
+`ndif.services.ray.tp.model.SandboxedTPModelActor` on a server that takes
+untrusted requests. Unset, a multi-GPU model is spread layer by layer with
+accelerate and `max_tp` does nothing.
+
+- **A replica is placed tensor-parallel** when it gets more than one GPU and
+  the model shards evenly into exactly that many. A model needing three cards
+  that shards eight ways is given four.
+- **`--gpus N` must divide the model's largest degree**, or the deploy is
+  refused: `asked for 3 GPUs, but this model shards at most 8 ways...`.
+  `--max-tp 0` keeps one model off tensor parallelism.
+- **A tensor-parallel replica cannot go WARM.** Eviction removes it outright,
+  so pin one you want to keep.
+- **It replaces the actor class**, sandbox included: the plain `TPModelActor`
+  runs every block in-process.
+- **`scale`, not `deploy`,** to add replicas, so they shard like the first.
+
+`docs/operating/models-and-deployment.md#tensor-parallelism`.
+
+## PEFT adapters
+
+Adapters are per request, not per deployment. A client that loads
+`TransformersModel("openai-community/gpt2", task="text-generation",
+peft="peft-internal-testing/gpt2-lora-random")` computes the same model key as
+the base model, and one deployment serves both; the actor swaps the adapter
+before the run. The server fetches the adapter from the Hub by id, so a local
+adapter directory on the client is invisible to it. The client needs `peft`
+installed too.
+
+## Packages a block may import
+
+A block that imports a package the server lacks fails with a traceback ending
+`ModuleNotFoundError: No module named '<package>'` at the user's import line,
+or with `Your request payload could not be read (ModuleNotFoundError: ...)`
+when an object the client shipped refers to it. The image installs `datasets`,
+`einops`, `pillow`, `diffusers`, `scipy` and `nnterp` for blocks to use (the
+package's `ext` extra). Add another the way `bitsandbytes` is added above;
+replicas loaded afterwards see it.
+
+## trust_remote_code
+
+It is a field of the model key, so it is decided where the key is made.
+
+- **Deploying a repository that ships its own modelling code needs
+  `--trust-remote-code`** (or `trust_remote_code: true` in the file, or the
+  checkbox in the dashboard). Without it the deploy fails before any GPU is
+  touched, with Hugging Face's "requires you to execute the code" error.
+- **A client that loads with `trust_remote_code=True` sends a key that carries
+  it.** If nothing is running under that key, the first request deploys it only
+  when its API key has the `trust_remote_code` or `trusted` tag; with auth off
+  every request is trusted. Otherwise every queued request for the key gets
+  `Could not deploy this model. This model runs code from its own repository
+  (trust_remote_code=True)...`
+- **A running model serves every caller.** Evict it if untagged keys should not
+  use it.
+
+## By exact key
+
+`evict`, `restart` and `scale` act on the key their flags produce. For any
+other key, take `model_key` and `replica_id` from `ndif status --json-output`
+and call the library the CLI wraps, where Ray is reachable:
+
+```bash
+docker exec -e MK="$MK" -e RID="$RID" ndif python -c "
+import os
+from ndif.cli.lib.restart import restart
+from ndif.cli.lib.evict import evict
+restart(model_key=os.environ['MK'], replica=os.environ['RID'], on_message=print)
+evict(model_keys=[os.environ['MK']], replica=os.environ['RID'], on_message=print)"
+```
+
+Both print the same `✗` line and return normally when nothing matches.
 
 ## The dashboard
 
-An optional admin web app on 8081: uptime/latency history, per-replica
-deploy/evict/restart buttons, and a calendar that keeps a set of models pinned
-over a time window. Every action goes through the same `cli/lib` functions the
-CLI uses.
+An optional admin web app on 8081: uptime history, deploy, evict and restart
+buttons per replica, and a calendar that keeps models pinned over a time
+window. It is in the compose stack, `NDIF_SERVICE="all dashboard"` in the
+image, and `ndif start dashboard` from source. With
+`NDIF_DASHBOARD_DEV_MODE=true`, the compose default, it has no login:
+[production and auth](operate-production-and-auth.md#the-dashboard-login).
 
-- **A dashboard deploy can mint a `trust_remote_code` key** (a checkbox in the
-  Deploy and Schedule modals, default off; the dashboard does not check who
-  asks), and **dev mode is no auth** — `NDIF_DASHBOARD_DEV_MODE=true`, the
-  compose default, exposes deploy and evict to anyone who can reach 8081.
-- Crons in the container: **monitor** every 10 min (a real remote trace per HOT
-  model every 2 h, needing `NDIF_API_KEY`), **reconcile** every 2 min (does
-  nothing if the controller is unreachable), **report** daily. The data dir must
-  be a volume, or a rebuild discards every schedule event.
+Every button is a JSON call that takes the model key verbatim:
 
-Detail: `docs/operating/dashboard.md`.
+```bash
+D=http://localhost:8081
+curl -s $D/api/status                                    # deployments grouped by model
+curl -s -H 'content-type: application/json' $D/api/deployments/deploy \
+     -d '{"checkpoint": "HuggingFaceTB/SmolLM2-135M-Instruct", "pinned": true}'
+curl -s -H 'content-type: application/json' $D/api/deployments/evict \
+     -d '{"model_key": "<model_key>", "replica": "<replica_id>"}'
+```
 
-## Observability at a glance
+`/api/deployments/restart` takes the same body as evict. With a login on, post
+`{"username", "password"}` to `/api/auth/login` first and send the cookie.
+**Check the body, not the status code**: a deploy that could not be placed, or
+an evict that matched nothing, still answers 200, with `"status": "not_found"`
+and the `✗` line inside `logs`.
 
-Loki (:3100) holds every log record as JSON; InfluxDB (:8086) the request
-metrics (`execution_time`, `status_time`, `gpu_mem`, ...); Prometheus (:9090)
-Ray's own metrics; Grafana (:3000) queries them all. Both telemetry providers are
-**fail-open** and off until given `NDIF_LOKI_URL` / `NDIF_INFLUX_URL`. **Model
-actor logs are `service="model"`, not `service="ray"`** — filter on `logger` when
-in doubt. `docs/operating/observability.md`; LogQL in the [troubleshoot guide](troubleshoot.md).
-
-## Adding a GPU node
-
-Same image, `NDIF_RAY_HEAD_ADDRESS=<head>:6385` (or `ndif start
---ray-head-address`), with 6385, 8076 and 52366 open to the head. It shows in
-`ndif status` within 30 s; `Nodes` up but not `Total GPUs` means it reported no
-GPU. `docs/runbooks/add-a-gpu-node.md`.
-
-## Before anyone else can reach it
-
-Auth (`NDIF_POSTGRES_URL`) decides which tags a request carries — with it unset,
-every request that does not say otherwise is `trusted`; **the actor class
-decides whether that changes anything.** An untrusted request is isolated in a
-runner process only on `SandboxModelActor` — set by `NDIF_MODEL_IMPORT_PATH`
-(legacy fallback `NDIF_DEFAULT_MODEL_ACTOR_CLASS`), plus `SandboxedTPModelActor`
-if TP is on. Only the compose file sets it; the published image and a source
-install run untrusted code in-process even with auth on. Once it is set, untagged
-keys lose weight reads, weight edits, gradients and training, and cannot be the
-first to deploy a model whose key carries `trust_remote_code`. Grant the `trusted`
-tag only to keys you would hand your own shell to; `trust_remote_code` is the
-narrower grant — deploy such a model, nothing more.
-
-Keys live in Postgres's anonymous volume: they survive a container recreate and
-are **lost on `just down` / `just ta`** (existing keys then 403 until
-re-inserted). Environment edits take `just up <svc>`, never `just restart`. NDIF
-provides **no TLS, no rate limiting, no multi-tenancy, no secret management**;
-never expose 8001 directly. The untagged-key limits, how to verify which path a
-request took, and the pre-flight list:
-[operate-production-and-auth.md](operate-production-and-auth.md),
-`docs/runbooks/enable-auth.md`, `docs/operating/production.md`.
-
-## Related guides
-
-- [selfhost](selfhost.md) — getting a server up in the first place.
-- [troubleshoot](troubleshoot.md) — when a deploy fails or a request hangs.
-- [develop](develop.md) — changing placement, the queue, or the actor.
-- the `nnsight` skill's remote guide — the client side of what these deployments serve.
+Three crons run in the dashboard container. **reconcile**, every 2 minutes,
+deploys what the calendar says should be loaded, always pinned, and evicts what
+it pinned earlier; it does nothing when it cannot reach the controller.
+**monitor**, every 10 minutes, probes `/connected` and `/status` and, every two
+hours, runs a real remote trace against each HOT model, for which it needs
+`NDIF_API_KEY` when auth is on. **report** writes a daily digest. Its data
+directory (`NDIF_DASHBOARD_DATA_DIR`) holds the calendar, so it must be a
+volume. `docs/operating/dashboard.md`.

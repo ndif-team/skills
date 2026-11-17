@@ -1,280 +1,122 @@
-# Reading the logs, and the two end-to-end procedures
+# Reading the logs and the metrics
 
-Source of record: `docs/operating/observability.md`,
-`docs/runbooks/debug-a-stuck-request.md`,
-`docs/runbooks/trace-a-users-failed-job.md`.
+`SKILL.md` has where each route keeps its logs. The split to remember: the API
+container's output has the API, dispatcher and queue; the controller and the
+model actors write to Ray's worker logs,
+`/tmp/ray/session_latest/logs/worker-*.out` where ray runs.
 
-## Where the logs actually are
-
-| Route | Command |
-|---|---|
-| Compose | `just logs api` / `ray` / `dashboard`, or `docker compose -f docker/docker-compose.yml logs --tail=50 api` |
-| Published image | `docker logs ndif` (one container runs everything) |
-| From source | `ndif logs api -f` — tails `$NDIF_HOME/logs/<service>.log`; only **detached** services have a log file, a `--foreground` one writes to the terminal |
-| Model actors | the Ray dashboard (`http://<head>:8265` → Actors), or Loki `{service="model"}` |
-| The controller | **not** in `just logs ray` — it is a Ray actor, so its output goes to Ray's own session logs |
-
-The controller one catches everyone:
-
-```bash
-docker compose -f docker/docker-compose.yml exec ray \
-  bash -c "grep -hE 'Analyzing deployment|cannot be deployed|Deploying .* on ' \
-           /tmp/ray/session_latest/logs/worker-*.out"
-```
-
-That is where the padded byte count for a `CANT_ACCOMMODATE` lives.
-
-## The logger tree
-
-Every module logs under `ndif.<component>`, and the sub-name becomes a Loki
-stream label — a query dimension, not decoration.
+## Who logs what
 
 | Logger | Process | Tells you |
 |---|---|---|
-| `ndif.api` | API workers | rejections (`api request rejected: 403`), unhandled 500s |
-| `ndif.request` | everywhere the request travels | one record per status transition, with `stage`, `prev_stage`, `prev_stage_ms` |
-| `ndif.queue.dispatcher` | API master | Ray connect/reconnect, dispatch failures |
-| `ndif.queue.processor` | API master | `request enqueued` (with `queue_size`), autoscaling, provisioning errors |
-| `ndif.queue.replica` | API master | `DISPATCHED`, eviction and re-queue, `request errored during execution` |
-| `ndif.controller` | Ray head | node updates, placement decisions, `CANT_ACCOMMODATE`, evictions |
-| `ndif.modeling` | model actor | model load, `model execution timed out` / `cancelled` / `errored` |
+| `ndif.api` | API workers | refusals (`api request rejected: 403 path=/request ...`) and unhandled 500s |
+| `ndif.request` | wherever the request is | one record per status change, with `stage`, `prev_stage`, `prev_stage_ms` |
+| `ndif.queue.dispatcher` | dispatcher | `Error connecting to Ray`, `Connected to Ray`, reconnects |
+| `ndif.queue.processor` | dispatcher | `request enqueued` with `queue_size` and `replicas`, autoscaling, provisioning errors |
+| `ndif.queue.replica` | dispatcher | evictions and re-queues, `request errored during execution` |
+| `ndif.controller` | Ray head | `Analyzing deployment ... with size`, `Deploying ... on <node> because FREE`, `Evicting`, `failed during create` |
+| `ndif.modeling` | model actor | `GPU 0: limited to N bytes`, `Loaded ... onto GPUs [0]`, `model execution timed out` / `cancelled` / `errored` |
 
-**Loki stream labels are deliberately few**: `service`, `environment`, `logger`,
-`severity`, and `model_key`. Everything else — `request_id`, `session_id`,
-`replica_id`, `email`, `api_key`, `stage`, `exec_ms`, `host`, `pid` — lives in
-the JSON line and needs `| json`. They are unbounded, and label cardinality is
-what kills Loki.
-
-**There are four `service` values but only three appear in any config file.**
-`api`, `ray` and `dashboard` are in the compose file; **`model` is not** — the
-controller injects `NDIF_SERVICE=model` into each model actor's Ray runtime env
-so a replica's logs attribute to the model rather than to the controller that
-spawned it. `{service="ray"}` carries only the Ray node's own output.
-
-```logql
-{environment=~".+"} | json | request_id=`3f9c1e2b...`   # one job across every service
-{service="model"} | json | model_key=`<key>`           # one model's replicas
-{logger="ndif.controller"} |= "Evicting"               # eviction history
-{environment=~".+", severity=~"error|warning"} | json
-{service="api"} | json | status_code >= 500
-```
-
-Without Loki, the identical records go to each process's console in one-line
-form with the fields appended as `key=value`, so `just logs api` and the Ray
-dashboard's per-actor log view carry the same information.
-
-Grafana's Loki datasource adds derived fields: `request_id`, `email` and `host`
-in any log line render as links, `request_id` to every log for that request
-across all services.
-
-## The metrics
-
-Six InfluxDB measurements, all tagged `service` / `environment` / `model_key` /
-`api_key` / `email` plus a metric-specific dimension, with `request_id` as a
-**field** rather than a tag:
-
-| Measurement | Records | Key fields |
-|---|---|---|
-| `request_size` | payload size at ingress | `payload_bytes`, `ip_address`, `user_agent` |
-| `response_size` | result blob staged | `response_bytes`, `compressed` |
-| `execution_time` | time on the model actor, by phase | `deserialize_ms`, `exec_ms`, `upload_ms` |
-| `status_time` | time in each lifecycle status | `duration_ms`, tagged by the status it *left* |
-| `gpu_mem` | extra GPU a request drove past the weights | `baseline_bytes`, `peak_bytes`, `extra_bytes` |
-| `model_load_time` | weights onto GPU | `duration_ms`, `num_gpus`, tagged `load_type` |
-
-`status_time` is the one people miss: every transition emits a point for the
-phase just left, so end-to-end latency is attributable with no extra
-instrumentation. A big `status_time{queued}` with a successful run means the user
-experienced "hung", not "failed"; a big `execution_time.deserialize_ms` means a
-large serialized block; a big `upload_ms` means a large result.
-
-Absence of metrics is **not** evidence of absence of requests — Influx is off
-until `NDIF_INFLUX_URL` is set, and fail-open.
-
-## Procedure: a stuck request
-
-**Step 0 — get the id.** The client's status line prints it dimmed in brackets:
-`[3f9c...] QUEUED  Added to Queue at position 2.` Without one, `ndif queue` lists
-every in-flight and queued id.
-
-**Step 1 — is the backend up?** `curl /ping`, then `/connected`. If
-`ray:connected` is missing, the dispatcher is looping in `connect()` and has
-already **purged every Processor** — every queued request was answered with
-`ERROR`. A user still waiting at that point has a client that is not receiving.
-
-**Step 2 — stuck at ingress?** `redis-cli llen queue` should be 0 or a small
-transient number. Persistently growing means the dispatcher is not popping.
-Nothing else in Redis tracks an individual request — there is no `request:<id>`
-key to `GET`. Status is either published to a pub/sub channel named after the
-client's `session_id` (blocking; nothing is persisted) or written to
-`responses/{request_id}.json` in the object store (non-blocking; latest only).
-
-**Step 3 — ask the dispatcher.** `ndif queue`.
-
-- *No processor for the model* — the request never got there: still on the
-  ingress list, rejected at the API, or you are inspecting a different NDIF.
-- *`uninitialized` with requests queued* — provisioning failed and `purge` reset
-  it. Look for `Error provisioning model` / `Error starting model` in the API log.
-- *`provisioning` / `deploying` for a long time* — the controller is placing, or
-  the Processor is waiting on `__ray_ready__` **with no timeout**. Go to step 4.
-- *`ready`, id in `Queued:`* — behind other work; check depth and `Replicas:`, and
-  look for `autoscale_trigger` / `Autoscaling ... failed to add replica`.
-- *`ready`, id on an `executing` line* — note the duration, go to step 5.
-
-**Step 4 — is there a live HOT replica?**
-
-```bash
-ndif status --json-output | jq '.deployments[] |
-  select(.repo_id=="openai-community/gpt2") |
-  {level: .deployment_level, state: .application_state, replica: .replica_id, pinned}'
-```
-
-| level | state | Meaning |
-|---|---|---|
-| HOT | RUNNING | Healthy — the request is stuck *inside* the actor |
-| HOT | DEPLOYING | Weights still loading; big models legitimately take minutes |
-| HOT | UNHEALTHY | The actor died; Ray restarts it. Repeatedly ⇒ a load-time OOM |
-| WARM | — | The weights are on CPU. `run()` raises `CachedActorError`, the queue treats it as an eviction and re-queues. A model flapping HOT↔WARM makes requests loop without ever finishing |
-| absent | — | Only HOT replicas are returned to the queue, so a WARM-only model looks undeployed |
-
-Deployments are plain detached Ray actors named
-`{replica_id}:ModelActor:{model_key}` in the `NDIF` namespace — there is no Ray
-Serve here and no `serve status` to run. Find them in the Ray dashboard's Actors
-view, which also gives you the node, the pid, and the logs.
-
-**Step 5 — where is it executing?** Two things decide it: `request.trusted`
-(from the key with auth on; `True` by default with auth off) **and** the actor
-class. Only an untrusted request on `SandboxModelActor` (or
-`SandboxedTPModelActor`) runs in a runner subprocess, with the actor driving the
-forward pass over a Unix socket — a hang can be on either side. Everything else
-runs in-process in the model actor, one thread, no socket, and a hang is user code
-or the forward pass itself. The actor class comes from `NDIF_MODEL_IMPORT_PATH`
-(legacy fallback `NDIF_DEFAULT_MODEL_ACTOR_CLASS`); only the compose file sets it,
-so the published image and a source install run in-process even with auth on.
-Check the replica's `actor_class` in `ndif status --json-output`.
-
-No log record carries `trusted`. The only way to tell which path one request took
-is the runner pids: runners are children of the model actor
-(`ndif.services.ray.sandbox.runner`), **pooled**, and replaced after each
-untrusted request — so their presence proves nothing; compare pids before and
-after the request (the `/proc` walk is in the [operate guide](operate.md)'s production
-reference and `docs/runbooks/enable-auth.md`).
-
-Two signals: user `print()` output arrives as `LOG` responses, so a console still
-printing means the block is running, not blocked; and `ndif.modeling` shows
-whether `run` ever got past `Your job has started running.`
-
-**Step 6 — the timeouts.**
-
-| Boundary | Limit | Default |
-|---|---|---|
-| Ingress HTTP POST | `NDIF_API_TIMEOUT` (gunicorn worker) | 120 s |
-| Ingress queue wait | none | — |
-| Per-model queue wait | none | — (autoscaling is the only relief) |
-| Waiting for a replica to be ready | none — `Replica.wait` polls forever | — |
-| **Execution** | `NDIF_DEFAULT_EXECUTION_TIMEOUT_SECONDS`, or a per-deployment `execution_timeout_seconds` | **unset — no cap at all** |
-| `ndif queue` / `ndif kill` round trip | event round-trip | 5 s (and `No response from the dispatcher` for ~5 s after an API restart) |
-
-The execution timeout is enforced by injecting an exception into the execution
-thread, which CPython delivers only at a bytecode boundary — it **cannot
-interrupt a native call already in flight**, so a single enormous CUDA kernel
-runs to completion first. On the sandboxed path the interrupt also stops the
-runner process, which is a real stop.
-
-**Step 7 — unstick it.** Queued: `ndif kill <id>` removes it and the user gets
-`ERROR` "Request cancelled by operator." Executing: `ndif kill <id>` errors the
-request and cancels only the dispatch — the actor keeps running the block to
-completion. **While that block is still running**, new work dispatched to the
-replica fails with `ValueError: Cannot switch to a different thread` or
-`ValueError: parent cannot be on a different thread`, so restart it:
-`ndif restart <checkpoint> --replica <id>` (the id from the `⚙` line of
-`ndif queue`). Once the block finishes on its own —
-`{service="model"} |= "<request id>"` shows `Your job has been completed.` — the
-next request is clean with no restart. Requests sent to the replica during a
-restart are re-queued or errored. A wedged replica with
-no single culprit gets the same restart; if `ndif restart` cannot get the actor
-handle, the actor is dead for good. Exact-key variants: the [operate guide](operate.md)'s CLI
-reference, and `docs/runbooks/debug-a-stuck-request.md` step 8.
-
-## Procedure: reconstructing a failed job
-
-One asymmetry governs what evidence still exists:
-
-| | Blocking (default) | Non-blocking |
-|---|---|---|
-| How statuses reach the client | Redis pub/sub → the `/subscribe` websocket | written to `responses/{id}.json` in the object store |
-| What survives | **nothing** — pub/sub is fire-and-forget | the **latest** response only |
-| The user's `print()` | `LOG` responses, streamed live | dropped |
-
-So for a blocking job — what almost everyone runs — the only durable record is
-the logs and metrics. Get the user's console output if you can.
-
-**Find the id.** Best case they have it. Otherwise search by identity and time:
-
-```logql
-{environment=~".+"} | json | email=`researcher@example.edu` | stage=`error`
-{environment=~".+", model_key=~".*Llama-3.1-8B.*"} | json | stage=`error`
-```
-
-(With auth off there is no `email` — per-user attribution is a reason to turn
-auth on.)
-
-**Read the lifecycle timeline.** `ndif.request` logs exactly one record per
-transition:
-
-```logql
-{environment=~".+", logger="ndif.request"} | json | request_id=`3f9c1e2b...`
-```
+A console record is one line with its fields appended as `key=value`:
 
 ```text
-stage=received                        prev_stage=null
-stage=queued      prev_stage=received     prev_stage_ms=4.1
-stage=dispatched  prev_stage=queued       prev_stage_ms=812.6
-stage=running     prev_stage=dispatched   prev_stage_ms=6.2
-stage=error       prev_stage=running      prev_stage_ms=48213.9
+2026-11-17 01:48:39 INFO    [ndif.request] Added to Queue at position 1. model_key=... request_id=eb2280a6d7fe4dea82f4575889dcfcc6 api_key=local stage=queued prev_stage=received prev_stage_ms=1.76 (request.py:177)
 ```
 
-The **last stage reached** localizes the failure:
+The Ray dashboard on 8265 (Actors) shows each model actor with its node, pid
+and log. Actors are named `<replica id>:ModelActor:<model key>` in the `NDIF`
+namespace. NDIF does not use Ray Serve, so there is no `serve status`.
+
+## One request, end to end
+
+The client prints the request id in brackets on every status line; `ndif
+queue` lists the ids that are queued or running. Then grep both places:
+
+```bash
+docker logs ndif 2>&1 | grep <request id>
+docker exec ndif bash -c "grep -h <request id> /tmp/ray/session_latest/logs/worker-*.out"
+```
+
+`ndif.request` gives the timeline. A cold request, from the telemetry tier:
+
+```text
+service  stage         prev_stage    prev_stage_ms
+api      received
+api      provisioning  received      192.58
+api      deploying     provisioning  1102.72
+api      queued        deploying     9601.21
+api      dispatched    queued        5.14
+model    running       dispatched    16.47
+model    completed     running       412.91
+```
+
+The last stage reached says who owns the failure:
 
 | Last stage | Owner |
 |---|---|
-| nothing at all | rejected at ingress before a request object existed — look for `api request rejected` under `ndif.api` |
-| `received` | never enqueued — the API errored between accepting and `lpush` |
-| `queued` / `provisioning` / `deploying` | provisioning failed; the user got a canned "Error starting/provisioning model" |
-| `dispatched` | the handoff to the actor failed, or the replica was evicted mid-flight |
-| `running` | execution failed — the interesting case |
+| none | Refused at the door: look for `api request rejected` under `ndif.api` |
+| `received` | Never taken off the Redis list: the dispatcher |
+| `provisioning`, `deploying` | Placing or loading the model failed: the controller log |
+| `queued` | Waiting behind other work, or purged with its queue |
+| `dispatched` | The call to the actor failed, or the replica was evicted under it |
+| `running` | The block failed, timed out or was killed: `ndif.modeling` has the record and, for an error, the traceback |
 
-**Decide whose fault it is.** *A traceback ending in their lines means their
-code; one of a handful of fixed English sentences, a traceback whose last frames
-are NDIF paths, or the message `ValueError: Cannot switch to a different thread` /
-`ValueError: parent cannot be on a different thread` means ours.* The
-cross-thread messages are the tell — their last frames are ordinary
-torch/transformers lines. The runner (or the
-actor) formats the traceback where it is live — tracebacks do not survive
-cloudpickle — and ships the text. On the trusted path `format_error` strips only
-nnsight's frames and those of its own file, so asyncio, Ray, other NDIF wrapper
-frames and torch/transformers frames still come before the user's lines: **read
-it from the bottom**.
+What is left to look at afterwards depends on how the job was submitted:
 
-**A killed job** keeps running in the actor. For a blocking client the log shows
-one `ndif.request` ERROR (`Request cancelled by operator.`; the client's
-description line is empty) plus a `ndif.queue.replica` WARNING
-`request errored: cancelled mid-dispatch` — the eviction sentence is not a second
-status. A non-blocking client raises `Replica was evicted while processing your
-request.`, and its `responses/{id}.json` shows that until the actor's own final
-response overwrites it — often `COMPLETED`, so a killed job can later read
-`COMPLETED`.
+| | Blocking (the default) | Non-blocking |
+|---|---|---|
+| Statuses reach the client | over Redis pub/sub to its websocket | by polling `GET /response/{id}` |
+| Kept on the server | nothing | the latest status, as `responses/<id>.json` in the object store |
+| The user's `print()` | streamed as `LOG` statuses | dropped |
+| The result | `<id>.pt` only when it was too large to send inline | `<id>.pt`, only on success |
 
-**A preempted job** (demoted HOT→WARM mid-run) records `execution_time` with the
-status tag `preempted` and re-runs; the user saw a second `QUEUED`, not an error.
+So for a blocking job the logs and metrics are the only record. Without auth
+there is no `email` on any of them; per-user attribution is a reason to turn
+auth on.
 
-**Where the result would have gone.** Two objects in the same bucket:
-`{request_id}.pt` written **only on success**, and `responses/{request_id}.json`
-written for every non-LOG status of a non-blocking job. So a failed job has no
-`.pt`, but a failed *non-blocking* job still has its last response:
+## Loki
 
-```bash
-curl -s localhost:8001/response/3f9c1e2b... | jq .
+With `NDIF_LOKI_URL` set (compose sets it), every record is also shipped as
+JSON. The stream labels are few on purpose: `service` (`api`, `ray`, `model`),
+`environment`, `logger`, `severity`, `model_key`. Everything else
+(`request_id`, `replica_id`, `email`, `api_key`, `stage`, `exec_ms`, `host`,
+`pid`) is in the JSON line and needs `| json`.
+
+```logql
+{service="model"} | json                                                    # every model actor
+{environment=~".+", logger="ndif.request"} | json | request_id=`<id>`       # one request's timeline, across services
+{logger="ndif.request"} | json | stage=`error`                              # every failed request
 ```
 
-For a blocking job that is always 404 — nothing was ever written.
+`service="model"` appears in no configuration file: the controller sets it on
+each actor it creates. `{service="ray"}` has the controller and the Ray node
+only. In Grafana (3000 on compose) `request_id` in a log line is a link to
+every record for that request.
+
+## Metrics
+
+With `NDIF_INFLUX_URL` set, six InfluxDB measurements, all tagged `service`,
+`environment` and `model_key`, the per-request ones also `api_key` and `email`,
+with `request_id` as a field:
+
+| Measurement | Records | Fields |
+|---|---|---|
+| `request_size` | the payload at the door | `payload_bytes`, `ip_address`, `user_agent` |
+| `status_time` | time spent in each status, tagged by the status left | `duration_ms` |
+| `execution_time` | time on the model actor, tagged `status` (`completed`, `error`, `timeout`, `cancelled`, `preempted`) | `deserialize_ms`, `exec_ms`, `upload_ms` |
+| `gpu_mem` | GPU memory a request used above the resident weights, per `gpu_index` | `baseline_bytes`, `peak_bytes`, `extra_bytes` |
+| `response_size` | the result blob | `response_bytes`, `compressed` |
+| `model_load_time` | weights onto the GPU, tagged `load_type` (`initial`, `from_cache`) | `duration_ms`, `num_gpus` |
+
+- A large `status_time` for `QUEUED` beside a successful run is a user who saw
+  "hung", not "failed".
+- A large `deserialize_ms` is a large serialized block; a large `upload_ms` a
+  large result.
+- `gpu_mem.extra_bytes` is what to compare with a model's padding.
+- No metrics is not evidence of no requests: the writer is off without the URL
+  and fails open with it.
+
+The compose Grafana ships nine dashboards over these (overview, requests,
+latency, errors, GPU and model load, sizes, users, Ray). Prometheus holds only
+Ray's own metrics. `docs/operating/observability.md` has the panels and more
+queries.

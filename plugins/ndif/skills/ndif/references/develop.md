@@ -1,289 +1,197 @@
-# Developing NDIF
+# Changing the server's code
 
-Read `docs/concepts/request-lifecycle.md` once. It is the keystone: every other
-page in the repo's docs is a zoom into one of its hops, and this guide assumes
-it. `docs/developing/architecture-overview.md` is the same system cut the other
-way, by process.
+You have the repository open, and `docs/developing/` in it is the reference.
+This page is a map of it and the rules that are easy to get wrong. Read
+`docs/concepts/request-lifecycle.md` once: every other page zooms into one of
+its hops. The repository's `CLAUDE.md` has its own rules: branch off `dev`,
+change the docs in the same PR as the code, cite code by path and symbol.
 
-## Four facts that frame the codebase
-
-1. **One image, one service per container.** Every service is the same Docker
-   image, whose `ENTRYPOINT` is the `ndif` CLI and whose default command is
-   `start --foreground`. `NDIF_SERVICE` — one name, a space/comma list, or the
-   image default `all` (redis, rustfs, ray, api) — selects what that container
-   runs. There is no per-service build.
-2. **The API process cannot talk to Ray.** Only the **dispatcher** — a separate
-   process spawned by gunicorn's `on_starting` hook — holds a Ray client. Every
-   endpoint that appears to know about the cluster is reading a Redis-backed
-   cache the dispatcher refreshes.
-3. **Execution forks on two things: `request.trusted` and the actor class.** A
-   sandbox actor runs an untrusted request's block in a separate runner process
-   driven over a Unix socket; the base `ModelActor` runs every request in-process
-   whatever `trusted` says. `request.trusted` reads the request's `tags`; with
-   auth off client-supplied `tags` are honored and unspecified ones default to
-   `{"trusted"}`.
-4. **Redis is the only durable handoff.** Once a request leaves the Redis list it
-   is a Python object in the dispatcher's memory until it reaches a terminal
-   response. Nothing in between survives a restart.
-
-## The process map
+## Where a request goes
 
 ```text
-api container (NDIF_SERVICE=api)
-  gunicorn master ── on_starting ─> dispatcher process (one asyncio loop, owns THE Ray client)
-                  └─ uvicorn workers × NDIF_API_WORKERS  (FastAPI routes only, never import Ray)
-
-ray container (NDIF_SERVICE=ray, GPU)
-  ray head ── Controller actor      (pinned to the head by a head=10 custom resource)
-           └─ ModelActor replicas   (detached, namespace NDIF, "{replica_id}:ModelActor:{model_key}")
-                 └─ runner subprocess, fresh per untrusted request (sandbox actors only)
-
-dashboard container (NDIF_SERVICE=dashboard)
-  uvicorn + Vue SPA, plus monitor/reconcile/report crons — all going through cli/lib
-
-Redis   queue · caches · pub/sub · streams
-Object store   result blobs
+client ── websocket /subscribe, then POST /request
+api worker        services/api/app.py create_request: checks the Ray flag, the API key
+                  (auth.py validate_request stamps email and tags), client versions;
+                  LPUSH to the Redis list `queue`; answers RECEIVED
+dispatcher        services/api/queue/dispatcher.py: one process, the only Ray client;
+                  BRPOP, route by model_key to a Processor
+Processor         queue/processor.py: the model's RequestQueue, provisioning
+                  (PROVISIONING, DEPLOYING), autoscaling
+controller        services/ray/deployments/controller/: sizes the model (evaluator.py),
+                  picks node and GPUs and evictions (cluster.py, node.py), creates a
+                  detached actor "<replica id>:ModelActor:<model key>" (deployment.py)
+Replica           queue/replica.py dispatch: DISPATCHED, then the Ray call run(request)
+model actor       services/ray/deployments/modeling/base.py run: RUNNING, runs the block
+                  on a worker thread against a timeout and a cancel, sends the result
+                  inline through Redis or uploads it; exactly one COMPLETED or ERROR
+client            collects from the websocket, or from the presigned URL
 ```
 
-Several concurrency mechanisms are in play at once, which is the single most
-confusing thing about the codebase:
+Statuses after `RECEIVED` are published on a Redis channel named by the
+client's session id, which `/subscribe` forwards; a non-blocking request has no
+session and its statuses are stored in the object store instead.
 
-| Code | Runs in | Mechanism |
+**A new HTTP endpoint** lives in `services/api/app.py`. An API worker cannot
+ask Ray anything: what an endpoint needs from the cluster it gets through
+Redis, the way `/status` and `/env` do (a cached key, a trigger stream, a
+worker in the dispatcher that refreshes it) or the way `ndif queue` does (the
+events stream). `docs/developing/api-service.md`,
+`docs/developing/redis-layer.md`.
+
+## Where things live
+
+| To change | Open | Docs page |
 |---|---|---|
-| FastAPI routes | uvicorn worker processes | asyncio |
-| Dispatcher, Processor, Replica | one spawned child process | one asyncio loop |
-| Controller | a Ray actor on the head | Ray actor calls |
-| `run()` orchestration | model actor, main thread | thread + timeout race |
-| `execute()` — the forward pass | model actor, worker thread | blocking Python/CUDA |
-| A trusted user block | model actor, same worker thread | greenlets, interleaved with the forward |
-| An untrusted user block | a separate runner process | greenlets, driven over a Unix socket |
+| ingress, auth, version gating | `services/api/{app,auth,versioning}.py` | `api-service.md` |
+| queueing, priorities, autoscaling, kill | `services/api/queue/{dispatcher,processor,replica,request_queue,config}.py` | `queue-internals.md` |
+| placement, eviction, GPU accounting | `services/ray/deployments/controller/cluster/{cluster,node,evaluator}.py` | `controller-internals.md` |
+| loading, running a block, results | `services/ray/deployments/modeling/{base,util,nns}.py` | `model-actor.md` |
+| the runner process and its protocol | `services/ray/sandbox/` | `sandbox-internals.md` |
+| tensor-parallel replicas | `services/ray/tp/` | `src/ndif/services/ray/tp/ARCHITECTURE.md` |
+| a connection to Redis, Ray, S3, Postgres, Loki, InfluxDB | `common/providers/` | `providers.md` |
+| the request and response models | `common/schema/` | `docs/reference/schemas.md` |
+| a CLI verb | `cli/commands/` (click only) and `cli/lib/` (the logic) | `cli-internals.md` |
+| the dashboard | `services/dashboard/{backend,jobs,frontend}` | `dashboard-internals.md` |
 
-The greenlet model is nnsight's, not NDIF's — NDIF reuses it verbatim and, for
-untrusted requests, splits it across a process boundary.
+Paths are under `src/ndif/`, pages under `docs/developing/`.
+`docs/developing/repo-layout.md` has the full table.
 
-## Repo layout
+## Rules that are easy to break
 
-```text
-src/ndif/
-├── cli/            the `ndif` command; commands/ is click decoration, lib/ is the logic
-├── common/         shared by every service — may NOT import from services/
-│   ├── providers/  one module per external system (Redis, Ray, S3, Postgres, Loki, Influx)
-│   ├── redis/      key/channel/stream names only
-│   ├── schema/     BackendRequestModel / BackendResponseModel — subclasses of nnsight's
-│   ├── metrics.py  one class per InfluxDB measurement
-│   └── telemetry.py  event(logger, msg, **fields)
-└── services/
-    ├── api/        start.sh, gunicorn_conf.py, app.py, auth.py, versioning.py, queue/
-    ├── ray/        start.sh, resources.py, deployments/{controller,modeling}, sandbox/, tp/
-    └── dashboard/  backend/, jobs/, frontend/ (dist/ is committed)
-```
+- **Never import Ray in an API worker.** The dispatcher, spawned once by
+  gunicorn's `on_starting`, owns the only client.
+- **Exactly one dispatcher.** The queue assumes one consumer of the Redis
+  list, and one event loop serves every model, so a blocking call in the queue
+  code stalls all of them.
+- **Redis is the only durable handoff.** A request the dispatcher has popped
+  is a Python object in its memory until a terminal response.
+- **An actor's exception arrives wrapped in `RayTaskError`.** Over Ray Client a
+  bare `isinstance` against the original type matches nothing: read `.cause`.
+- **`common/` never imports from `services/`**, and CLI logic goes in
+  `cli/lib/`, which the dashboard backend imports directly. Import Ray, nnsight
+  and redis inside the functions there, so `ndif --help` stays fast.
+- **Telemetry providers connect at import and own threads**, which do not
+  survive a fork. Connect them after forking: `post_fork` for gunicorn workers,
+  a spawned process for the dispatcher, `__init__` for a Ray actor.
+- **Never import `services/ray/sandbox/nns.py` on the host.** It patches
+  nnsight process-wide for the runner's side of the socket.
+- **`Status` is nnsight's enum.** A new status has to ship in nnsight and reach
+  users first. Say something new in `description`, or in a `LOG`.
+- **NDIF does not use Ray Serve.** Deployments are detached actors; ignore
+  every Serve page a search returns.
+- **The image installs the package with `--no-deps`.** A new dependency goes in
+  `requirements.txt` as well as `pyproject.toml`, and a new non-Python file
+  (a `start.sh`) needs a `[tool.setuptools.package-data]` entry or it is missing
+  from every installed copy, the compose image included.
+- **A new environment variable gets a row in `docs/reference/env-vars.md`.**
+  `pytest tests/test_docs.py` checks that the paths, symbols and links the docs
+  cite exist.
 
-`docs/developing/repo-layout.md` carries the full "I want to change X, open Y"
-table. The two entries people reach for most: queue behaviour and autoscaling are
-`services/api/queue/{dispatcher,processor,replica,config}.py`; placement,
-eviction and GPU accounting are
-`services/ray/deployments/controller/cluster/{cluster,node,evaluator}.py`.
+## Trusted and untrusted execution
 
-## The request, in ten hops
+Two things decide where a block runs: `request.trusted`, read from the tags
+stamped at ingress, and the actor class. `SandboxModelDeployment.execute` runs a
+trusted request through the base class, in-process, and anything else in a
+runner. In the runner each `tracer.invoke` is a greenlet that parks when it
+needs a value, and the host drives the real forward pass and sends values over
+a Unix socket. The runner holds a weightless model, so everything a block
+touches must pickle both ways. The invariant is that both paths return the same
+bytes for the same request (`tests/test_sandbox_conformance.py`).
 
-Each hop in full, with its code: `docs/concepts/request-lifecycle.md`.
+A normal compose stack never runs a line of this: with auth off a request with
+no tags is trusted. Client-supplied tags are honoured while auth is off, so
+sending `"tags": []` reaches the runner without Postgres; the test plugin below
+does that.
 
-1. **Client serializes** the block — source plus referenced globals,
-   cloudpickled and zstd-compressed — under a small JSON envelope.
-2. **Subscribe, then POST**, so no update is published before anyone listens.
-3. **API ingress** runs `require_ray_connection`, `validate_request` and
-   `validate_client_versions`, `LPUSH`es the request, returns `RECEIVED`.
-4. **Dispatcher pops** (`BRPOP` plus a non-blocking drain) and routes by
-   `model_key` to a lazily created `Processor`.
-5. **Processor queues and provisions.** With a replica serving the reply is
-   `QUEUED`; on a cold start it is `PROVISIONING`, then `DEPLOYING`, then
-   `QUEUED` ("Moved to position N") once the replica is ready. A cold request's
-   full sequence is `RECEIVED` → `PROVISIONING` → `DEPLOYING` → `QUEUED` →
-   `DISPATCHED` → `RUNNING` → `COMPLETED`.
-6. **Controller places a replica** — size on meta, pick node and GPUs, evict if
-   it must, create a detached Ray actor.
-7. **Replica dispatches**: wait on `__ray_ready__`, publish `DISPATCHED`, make
-   the Ray call with the whole pickled request.
-8. **The actor runs the block**: `run()` publishes `RUNNING`, applies
-   `request.env`, and races `execute()` against the timeout and a cancel event.
-   `print()` becomes `LOG` responses.
-9. **Result back.** A blocking request's blob at or under
-   `RedisProvider.max_publish_bytes` — `min(soft, hard // 2)` of Redis's pubsub
-   output-buffer limits, 8 MiB on stock Redis — rides on the `COMPLETED`
-   response; anything larger, and every non-blocking result, is PUT at
-   `{request.id}.pt` and presigned for an hour.
-10. **Client collects** off the frame or the URL and pushes the values into the
-    caller's frame.
+## Extending
 
-To watch the statuses from a client, set `nnsight.CONFIG.APP.DEBUG = True`
-(each status on its own line instead of one overwritten line); for a
-non-blocking job, poll `curl localhost:8001/response/<id>`, which returns only
-the latest status.
+- **A model actor**: subclass `BaseModelDeployment` and wrap it in
+  `@ray.remote(num_cpus=1, max_restarts=-1)`. `run()` is a template; override
+  its hooks (`execute`, `execution_scope`, `interrupt`, `format_error`,
+  `error_name`, `cleanup`, and `commit`, `restart` where needed) and inherit the
+  rest. What a replacement `execute` must keep: return `(blob,
+  deserialize_ms)`; set `self.execution_ident` on the worker thread before
+  anything can block, or a cancel is silently dropped; be interruptible; raise
+  `CachedActorError` when WARM so the queue re-queues; leave no request state
+  behind. `cancel(KILL_REASON_PREEMPTED)` re-queues the request at the front;
+  use it for a deliberate cancel and the request runs again for ever. Select it with `--actor-class`, `NDIF_MODEL_IMPORT_PATH`, or
+  `NDIF_TP_MODEL_ACTOR_CLASS` for tensor-parallel replicas; the path is imported
+  inside the Ray worker. A constructor argument of your own has no route from
+  the controller: read it from the environment.
+  `docs/developing/adding-a-model-actor.md`; copy `SandboxModelDeployment`.
+- **A provider**: a class-level singleton with a `CONFIG` of `attr: (ENV_VAR,
+  default, cast)`. An optional system defaults to an empty URL and is silently
+  off. Postgres is the deliberate exception: a URL without `asyncpg` raises,
+  because auth that is silently off is a hole. Add a pyproject extra.
+  `docs/developing/providers.md#writing-a-new-provider`.
+- **A service**: a `start.sh` in its package, a `Service` entry in
+  `cli/service.py` (`SERVICES` start by default, `OPTIONAL_SERVICES` by name),
+  the package-data entry, and a compose block.
+  `docs/developing/adding-a-service.md`.
+- **A CLI command**: `cli/commands/<verb>.py` with one click command,
+  registered in `cli/main.py`, logic in `cli/lib/` taking an `on_message`
+  callback. `docs/developing/cli-internals.md#adding-a-command`.
 
-What breaks at each hop, the queue objects and the `run()` contract:
-[develop-request-lifecycle.md](develop-request-lifecycle.md).
-
-## The trusted/untrusted fork
-
-In a sandbox actor the fork is three lines of `SandboxModelDeployment.execute`:
-
-```python
-if request.trusted:
-    return super().execute(request)
-return self.run_in_runner(request, None)
-```
-
-Untrusted, each `tracer.invoke(...)` becomes a **greenlet worker** in the runner
-that **parks** whenever it needs a value from the model; a proxy inside the real
-interleaver sends the value across when the forward reaches it. It is nnsight's
-local behaviour with a socket round trip where a greenlet switch would be. The
-runner holds only a *meta* model, so latency is per-*interaction* and everything
-a block touches must pickle both ways. The invariant: **both paths produce
-identical bytes for the same request** (`tests/test_sandbox_conformance.py`).
-`docs/developing/sandbox-internals.md`.
-
-**The runner's environment is an allowlist** (`RUNNER_ENV` in
-`sandbox/host.py`): `HF_TOKEN`, `NDIF_POSTGRES_URL` and object-store credentials
-are not inherited, and the torch.distributed rank variables are dropped. **That
-is process separation, not a security boundary** — same user, filesystem,
-network and GPUs; no namespaces, seccomp or rlimits.
-
-## Boundaries not to cross
-
-- **Never import Ray in an API worker.** The dispatcher owns the only client.
-- **Never import `sandbox/nns.py` on the host.** It installs process-wide nnsight
-  patches that would redirect the *real* model's `interleave` to a socket.
-- **Connect telemetry providers after forking.** They connect at import and own
-  threads that do not survive `fork()`.
-- **Do not assume more than one dispatcher.** The queue design assumes exactly one
-  consumer of the Redis list.
-- **`common/` never imports from `services/`.**
-- **NDIF does not use Ray Serve.** Deployments are detached Ray actors; ignore
-  every Serve page a search hands you.
-
-## Extending it
-
-The shape every recipe shares: **prefer subclassing an existing seam to adding a
-branch.**
-
-- **A model actor** — `run()` is a template; a subclass overrides its six hooks
-  (`execute`, `execution_scope`, `interrupt`, `format_error`, `error_name`,
-  `cleanup`), plus `commit()` and `restart()` where needed, and inherits
-  everything else. `docs/developing/adding-a-model-actor.md`.
-- **A provider** — a classmethod singleton over an external system, with a
-  `CONFIG` spec of `attr: (ENV_VAR, default, cast)` tuples and deliberate
-  fail-open behaviour. `docs/developing/providers.md#writing-a-new-provider`.
-- **A service** — `NDIF_SERVICE` + a `start.sh` + a `Service` in
-  `cli/service.py`, plus a `[tool.setuptools.package-data]` entry, which the
-  compose image needs too. `docs/developing/adding-a-service.md`.
-
-The contract a custom actor must uphold, actor selection, and the CLI-command
-recipe: [develop-extending.md](develop-extending.md).
-
-## Testing
-
-**No workflow runs the tests.** `docs/developing/testing.md`.
+## Run what you changed
 
 ```bash
-pip install -e ".[dev]"
-just up && just logs api ray      # let Ray settle — it needs a GPU and is slow
-pytest tests/                     # NOT a bare `pytest` — there is no testpaths
+just ta                       # down, build, up: the source is baked into the image
+just logs api                 # wait for "Connected to Ray"
+pip install -e ".[dev]"       # ruff, httpx, pytest, pytest-asyncio
+pytest tests/test_docs.py     # the docs gate; needs no server
+pytest tests/                 # NOT a bare `pytest`: there is no testpaths
 ```
 
-Three groups: **3 live** files (the real nnsight client against a running NDIF;
-they skip themselves if nothing answers), **5 model-only** (gpt2 on CPU and a
-spawned runner, no server) and **9 offline**. The suite uses gpt2 and the queue
-provisions it on demand. **A skipped suite is not a passing suite** — with no
-server, `pytest tests/` exits 0. The server address is `HOST` in
-`tests/conftest.py` (no env var; a tunnel's local port goes there), and the
-non-blocking tests need `NDIF_OBJECT_STORE_PUBLIC_URL` reachable from pytest.
+- **The live files talk to `http://localhost:8001`** (`HOST` in
+  `tests/conftest.py`; there is no variable for it) with gpt2, which the queue
+  loads on demand. With no server they skip: `pytest tests/test_nnsight_remote.py`
+  prints `65 skipped` and exits 0. A skipped suite is not a passing one.
+- **The non-blocking tests download from `NDIF_OBJECT_STORE_PUBLIC_URL`**, which
+  must be reachable from where pytest runs.
+- **Force the untrusted path** when you touched execution:
 
-### Forcing the untrusted path
+  ```bash
+  PYTHONPATH=tests pytest tests/test_nnsight_remote.py -p anyio -p conftest_untrusted
+  ```
 
-**A normal `just up` never runs a single line of sandbox code.** Two things must
-hold:
+  `conftest_untrusted` adds `"tags": []` to every request. `-p anyio` goes
+  first, because with the plugin loading nnsight before anyio, collection
+  fails with `TypeError: Attribute 'save' is missing its type annotation`. The
+  gradient tests fail on this path by design. Confirm the path by runner pids:
+  [production and auth](operate-production-and-auth.md#what-an-untagged-key-can-do).
+- **No workflow runs any of this**, or `ruff check src/`. They are yours to run.
 
-1. **The request must be untrusted.** Auth-off defaults *unspecified* `tags`
-   to `{"trusted"}`, but `validate_request` honors explicit ones, so
-   **sending `tags: []` forces the sandbox path with no Postgres**.
-   nnsight's request envelope has no `tags` field;
-   `tests/conftest_untrusted.py` injects `"tags": []`:
+## Against a local nnsight
 
-   ```bash
-   PYTHONPATH=tests pytest tests/test_nnsight_remote.py -p conftest_untrusted
-   ```
+Not run for this guide: it needs an nnsight checkout to mount.
 
-2. **The deployed actor class must be a sandbox one.** Compose sets it; a
-   hand-run `ndif start ray` needs `NDIF_MODEL_IMPORT_PATH` (or the legacy
-   `NDIF_DEFAULT_MODEL_ACTOR_CLASS`) set to
-   `ndif.services.ray.sandbox.model.SandboxModelActor`.
+nnsight is an ordinary dependency of the image. On compose, `just` bind-mounts
+an nnsight from the host over the image's copy in `api`, `ray` and
+`dashboard`, when `NNSIGHT_PATH` names its package directory
+(`<checkout>/src/nnsight`) or when `python -c "import nnsight"` in your shell
+finds an editable install.
 
-Confirm the path with `pgrep -af 'ndif.services.ray.sandbox.runner'` inside the
-`ray` container. The faithful alternative — a real key without the `trusted` tag —
-also exercises the 401/400/403/503 ladder, which nothing else does.
+- **`just nnsight` prints which applies.** `just --dry-run up` does not
+  evaluate the detection. `NNSIGHT_PATH= just up` forces the image's own copy.
+- **Carry `NNSIGHT_PATH` on every `just` call**, or the next `just up`
+  recreates the containers without the mount.
+- **A fresh checkout has no compiled extension**, and then every remote
+  `.save()` fails with `AttributeError: 'Tensor' object has no attribute
+  'save'`. Build it with the image's toolchain: `docker run --rm --entrypoint
+  python -v <checkout>:/src -w /src dev-ray setup.py build_ext --inplace`
+  (as root, so the build products are root-owned).
+- **`nnsight.__version__` in the container reports the image's version under
+  the mount.** `grep nnsight /proc/self/mountinfo` there shows whether it is
+  mounted.
+- **Outside Docker**, `pip install -e` nnsight before ndif.
 
-## How nnsight is wired in
-
-nnsight is an **ordinary pinned dependency** in `requirements.txt`. The coupling
-is deep: `BackendRequestModel` subclasses nnsight's `RequestModel`,
-`BackendResponseModel` its `ResponseModel`, and `Status` **is** nnsight's
-`Status` — so **you cannot add a status server-side.** A new member has to land
-in nnsight, ship, and be installed by the user first. To convey something new
-without a client release, put it in `description` on an existing status, or emit
-a `LOG`.
-
-**Against a local nnsight, compose first:**
-
-`NNSIGHT_PATH=<checkout>/src/nnsight` (the **package** dir) on **every** `just`
-call bind-mounts it over the image's copy. Auto-detection runs
-`python -c "import nnsight"` and needs an editable nnsight, so a host with only
-`python3` always detects nothing, silently; `just nnsight` is the only reliable
-pre-check (`just --dry-run up` always shows the overlay). A fresh checkout lacks
-the compiled `_c` extension, so every remote `.save()` fails with
-`AttributeError: 'Tensor' object has no attribute 'save'` until you run
-`docker run --rm --entrypoint python -v <checkout>:/src -w /src dev-ray setup.py build_ext --inplace`
-(as root — it leaves root-owned build artifacts in the checkout). Under the mount
-`nnsight.__version__` still reports the image's version — check
-`grep nnsight /proc/self/mountinfo` instead, where a mounted line reads
-`... 259:2 /u/me/nnsight/src/nnsight /usr/local/lib/python3.12/site-packages/nnsight ...`
-and the source column is relative to its filesystem's root, not the host path.
-Outside Docker, `pip install -e` nnsight **before** ndif. Procedure:
-`docs/developing/nnsight-integration.md#developing-against-a-local-nnsight`; what
-to check when the pin moves:
-`docs/developing/nnsight-integration.md#bumping-the-client`.
+`docs/developing/nnsight-integration.md#developing-against-a-local-nnsight`,
+and `#bumping-the-client` for what to check when the nnsight version moves.
 
 ## Releasing
 
-Three workflows, **all of which publish and none of which test**:
-
-| Workflow | Trigger | Publishes |
-|---|---|---|
-| `build_images.yml` | push to `main` | the hosted image |
-| `publish_docker.yml` | a `v*` tag | Docker Hub images (one per CUDA line) |
-| `publish.yml` | a published GitHub release | the PyPI wheel |
-
-**The version is the git tag** (setuptools-scm); there is nothing to bump in
-`pyproject.toml`. Creating a GitHub release pushes its tag, so **one release
-fires both publish workflows** — a `v*` tag is a release, not a checkpoint, and a
-green `publish_docker.yml` means the image built, not that the server works.
-`docs/developing/contributing.md`.
-
-Before a PR: bring a stack up and run `pytest tests/`; if you touched execution,
-run it again with `tags: []` forced; `ruff check src/`; and if you added an
-env var, add its row to `docs/reference/env-vars.md` — the most common drift in
-the repo. House style lives in `docs/developing/contributing.md`.
-
-## References
-
-- [develop-request-lifecycle.md](develop-request-lifecycle.md) — what
-  breaks at each hop, the queue objects, the `run()` contract, and where state
-  lives.
-- [develop-extending.md](develop-extending.md) — the model-actor contract
-  and selection, the provider pattern, adding a service, and adding a CLI
-  command.
-
-## Related guides
-
-- [selfhost](selfhost.md) — getting a dev stack up.
-- [troubleshoot](troubleshoot.md) — reading the logs a change produces.
-- [operate](operate.md) — the operator surface your change has to keep working.
+The version is the git tag (setuptools-scm); there is nothing to bump. One
+published GitHub release fires `publish.yml` (the wheel to PyPI) and
+`publish_docker.yml` (the `ndif/ndif` images to Docker Hub, one per CUDA line).
+`build_images.yml` is manual. None of the three runs a test, so a green
+workflow means it built. `docs/developing/contributing.md#ci-and-releases`.
