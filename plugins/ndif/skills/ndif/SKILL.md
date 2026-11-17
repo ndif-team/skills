@@ -56,7 +56,7 @@ All three need an NVIDIA GPU and driver, and the first two the NVIDIA Container
 Toolkit. None needs any configuration. The published image:
 
 ```bash
-docker run -d --name ndif --gpus all --shm-size 10g \
+docker run -d --name ndif --gpus all --shm-size 16g \
     -p 127.0.0.1:8001:8001 -p 127.0.0.1:9000:9000 \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     ndif/ndif
@@ -222,7 +222,7 @@ The logs are in two places, and the second is the one people miss.
 |---|---|
 | `docker run` exits with `could not select device driver "" with capabilities: [[gpu]]` | The NVIDIA Container Toolkit is missing or Docker was not restarted after installing it: `sudo nvidia-ctk runtime configure --runtime=docker`, restart Docker |
 | 503 `compute backend is reconnecting`, or `/connected` not 200 two minutes after start | The dispatcher has no Ray connection. Read the ray log from its first error after `Starting Ray head node`; the api log repeats `Error connecting to Ray` |
-| `cuda_memory_bytes: 0` in the ray log, `Nodes: 0` in `ndif status`, a deploy fails `No GPU nodes available.` | torch sees no GPU, and `ndif doctor` says which way. `nvidia-smi not found`: no `--gpus`. `torch cannot use the GPU (driver CUDA 12.5, torch built for CUDA 13.0)`: the image's CUDA line is newer than the driver. The same line with matching majors (12.5 and 12.6): `CUDA_VISIBLE_DEVICES` in the container names a card this host does not have, whatever doctor's hint says |
+| `cuda_memory_bytes: 0` in the ray log, `Nodes: 0` in `ndif status`, a deploy fails `No GPU nodes available.` | torch sees no GPU, and `ndif doctor` says which way. `nvidia-smi not found`: no `--gpus`. `torch cannot use the GPU (driver CUDA 12.5, torch built for CUDA 13.0)`: the image's CUDA line is newer than the driver. `torch sees no GPU: CUDA_VISIBLE_DEVICES='1' hides every device`: the variable in the container names a card this host does not have |
 | A request stays in `PROVISIONING` or `DEPLOYING` | Weights are downloading or loading and there is no timeout. `ndif status` shows `DEPLOYING`; the controller log shows a failed load |
 | A request stays in `QUEUED` | `ndif queue`: what the replica is running and for how long. `ndif kill <id>` stops it |
 | A request stays in `RECEIVED` and `ndif queue` prints `No response from the dispatcher` | The dispatcher process is gone though `/connected` still says connected. Restart the api: [troubleshoot](references/troubleshoot.md#a-dead-dispatcher) has the command per route |

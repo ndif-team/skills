@@ -70,11 +70,10 @@ docker exec ndif ndif doctor                             # the Compute section s
   --gpus` fails outright with `could not select device driver`).
 - `torch cannot use the GPU (driver CUDA 12.5, torch built for CUDA 13.0)`: the
   image's CUDA line is newer than the driver. Take the `-cu126` tag.
-- The same line with matching majors (`driver CUDA 12.5, torch built for CUDA
-  12.6`) is not a driver problem, though doctor's hint says so: every device is
-  hidden. `docker exec ndif env | grep CUDA_VISIBLE_DEVICES` shows an index
-  that `docker exec ndif nvidia-smi -L` does not list, usually carried over
-  from a bigger box. Remove the variable or give it indices that exist.
+- `torch sees no GPU: CUDA_VISIBLE_DEVICES='1' hides every device (nvidia-smi
+  lists 1)`: the variable names an index that `docker exec ndif nvidia-smi -L`
+  does not list, usually carried over from a bigger box. Remove it or give it
+  indices that exist.
 
 ## Ray is booting, or is not
 

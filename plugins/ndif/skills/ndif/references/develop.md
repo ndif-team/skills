@@ -151,13 +151,11 @@ pytest tests/                 # NOT a bare `pytest`: there is no testpaths
 - **Force the untrusted path** when you touched execution:
 
   ```bash
-  PYTHONPATH=tests pytest tests/test_nnsight_remote.py -p anyio -p conftest_untrusted
+  PYTHONPATH=tests pytest tests/test_nnsight_remote.py -p conftest_untrusted
   ```
 
-  `conftest_untrusted` adds `"tags": []` to every request. `-p anyio` goes
-  first, because with the plugin loading nnsight before anyio, collection
-  fails with `TypeError: Attribute 'save' is missing its type annotation`. The
-  gradient tests fail on this path by design. Confirm the path by runner pids:
+  `conftest_untrusted` adds `"tags": []` to every request. The gradient tests
+  fail on this path by design. Confirm the path by runner pids:
   [production and auth](operate-production-and-auth.md#what-an-untagged-key-can-do).
 - **No workflow runs any of this**, or `ruff check src/`. They are yours to run.
 

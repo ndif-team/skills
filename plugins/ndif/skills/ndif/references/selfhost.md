@@ -14,7 +14,7 @@ route: [production and auth](operate-production-and-auth.md).
 | ~8 GB under Docker's data root for the image, about as much again for a compose build | Check free space there, not only on the weights disk |
 | Disk for weights, and host RAM | Checkpoints download at first deploy. Evicted models wait in host RAM as WARM, up to `NDIF_MODEL_CACHE_PERCENTAGE` (0.7) of it |
 | Free space on the filesystem holding `NDIF_RAY_TEMP_DIR` (default `/tmp/ray`) | Ray stops scheduling when that filesystem is over 95 % full, and the only symptom is a server that never runs anything. `ndif doctor` does not check it |
-| `--shm-size` on the container that runs ray | Ray's object store lives in `/dev/shm` and wants the smaller of 10 GB and 30 % of RAM. With less (Docker's 64 MB default, and on a host with plenty of RAM also the `4g` the compose file sets) Ray puts it under its temp dir and logs `The object store is using /tmp/ray instead of /dev/shm ... This will harm performance!`; the server still works. `--shm-size 10g` is always enough, and it is a ceiling, not a reservation |
+| `--shm-size` on the container that runs ray | Ray's object store lives in `/dev/shm` and wants the smaller of 10 GB and 30 % of RAM. With less (Docker's default is 64 MB) Ray puts it under its temp dir and logs `The object store is using /tmp/ray instead of /dev/shm ... This will harm performance!`; the server still works. `--shm-size 10g` is always enough, and it is a ceiling, not a reservation |
 | Python 3.12 or 3.13 (from source) | The package requires `>=3.12,<3.14` |
 
 **Match the image to the driver.** Tags come one per CUDA line: `-cu126` runs on
@@ -188,7 +188,7 @@ names the head's Ray port, 6385, and the node then starts only Ray and joins:
 
 ```bash
 NDIF_RAY_HEAD_ADDRESS=10.0.0.5:6385 ndif start ray        # from source
-docker run -d --name ndif-worker --gpus all --shm-size 10g --network host \
+docker run -d --name ndif-worker --gpus all --shm-size 16g --network host \
     -e NDIF_SERVICE=ray -e NDIF_RAY_HEAD_ADDRESS=10.0.0.5:6385 -e HF_TOKEN \
     -v ~/.cache/huggingface:/root/.cache/huggingface ndif/ndif
 ```
