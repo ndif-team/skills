@@ -78,7 +78,7 @@ the **compressed blob** (a 7.5 MiB blob goes inline, a 9 MiB one by URL on the
 stock cap). The published frame is up to ~1.5x that blob, which sets how fast
 undrained results fill Redis's pubsub buffer toward the hard limit — not where
 the inline/URL boundary sits. The seven obligations a custom actor keeps are in
-[extending.md](develop-extending.md#the-contract).
+[develop-extending.md](develop-extending.md#the-contract).
 
 `cancel()`'s `reason` matters: unset means "genuinely cancelled" and the user is
 told. `KILL_REASON_PREEMPTED` raises `CachedActorError` so the queue re-queues it

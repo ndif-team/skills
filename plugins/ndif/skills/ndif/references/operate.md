@@ -62,7 +62,7 @@ ndif env                         # the cluster's python + packages (vs `--local`
 processor stays listed when idle; its `Replicas: N` can lag an eviction until
 the next dispatch. `ndif status` is the readiness surface. A deploy prints one
 line per model, `✓ <model_key> [b7f60]: ready`. Every flag:
-[references/cli-commands.md](operate-cli-commands.md), `docs/operating/cli.md`.
+[operate-cli-commands.md](operate-cli-commands.md), `docs/operating/cli.md`.
 
 **`deploy` vs `scale`.** Both are additive; `deploy` takes unspecified settings
 from the controller's defaults, `scale` copies a live replica — so `scale` a
@@ -135,7 +135,7 @@ refused when the ledger says no and OOMs when the card disagrees. The padding is
 the whole budget for activations, KV cache and the CUDA context, enforced per card
 on the replica's share, `ceil(padded / gpus)`. Overrides: `size_bytes`,
 `padding_factor`, `padding_bias`, `gpus`, `max_tp`, `dtype`. Everything else —
-[references/sizing-and-placement.md](operate-sizing-and-placement.md),
+[operate-sizing-and-placement.md](operate-sizing-and-placement.md),
 `docs/runbooks/model-oom-on-deploy.md`, `docs/concepts/deployments-and-eviction.md`.
 
 ## dtype, quantization, tensor parallelism
@@ -219,7 +219,7 @@ their flags mint (`--task`, `--trust-remote-code`). For any other key, pass the 
 `ndif.cli.lib.evict.evict`, or POST the dashboard's `/api/deployments/{evict,
 restart}` (`{model_key, replica}`) or `/api/deployments/deploy`
 (`{checkpoint, model_key?, trust_remote_code}`) — recipes in
-[references/cli-commands.md](operate-cli-commands.md). An unknown replica
+[operate-cli-commands.md](operate-cli-commands.md). An unknown replica
 still returns HTTP 200, with the `✗` line inside the response's `logs[]`: check
 the body, not the status code.
 
@@ -277,7 +277,7 @@ re-inserted). Environment edits take `just up <svc>`, never `just restart`. NDIF
 provides **no TLS, no rate limiting, no multi-tenancy, no secret management**;
 never expose 8001 directly. The untagged-key limits, how to verify which path a
 request took, and the pre-flight list:
-[references/production-and-auth.md](operate-production-and-auth.md),
+[operate-production-and-auth.md](operate-production-and-auth.md),
 `docs/runbooks/enable-auth.md`, `docs/operating/production.md`.
 
 ## Related guides

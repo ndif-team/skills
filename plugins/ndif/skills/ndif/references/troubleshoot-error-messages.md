@@ -90,7 +90,7 @@ container, does not.
 | What happens | Meaning |
 |---|---|
 | The status shows `QUEUED` a second time | An eviction — `CachedActorError` (demoted to WARM before or during the run), `ActorDiedError`, or an actor-lookup `ValueError`. The request goes back to the **front** of its queue and re-runs from the start. A demotion mid-run is a preemption: it logs `model execution preempted; requeued` and records `execution_time` with status tag `preempted` |
-| Sits on `RECEIVED`, `QUEUED`, `PROVISIONING` or `DEPLOYING` | The stuck-request procedure in [reading-logs.md](troubleshoot-reading-logs.md) |
+| Sits on `RECEIVED`, `QUEUED`, `PROVISIONING` or `DEPLOYING` | The stuck-request procedure in [troubleshoot-reading-logs.md](troubleshoot-reading-logs.md) |
 | `COMPLETED` with no saves, no error | Early stop (`tracer.stop()`) is normal; otherwise a client-side `.save()` question |
 | A warning that a `tracer.iter` loop outran the model | Not an error: the iterations reached are kept |
 

@@ -1,6 +1,6 @@
 ---
 name: nnsight
-description: "Read and edit the internals of any PyTorch model with nnsight: model.trace, .save(), interventions, batched invokes, gradients, .source, generation, and remote execution on NDIF (remote=True) for models too large to run locally. Load before writing, fixing or explaining any nnsight code, however short: idioms from before 0.8 (.value, LanguageModel, proxies) are widespread and silently wrong. Use for an nnsight error such as OutOfOrderError, a hang or a wrong result, porting old code, a model family nnterp does not support, arbitrary module or .source access, diffusion and vision-language models, vLLM, tensor parallelism and 4/8-bit loading, and wherever PyTorch forward hooks would otherwise be written. Bundles a guide per technique: logit lens, activation and attribution patching, causal tracing, ablation, attention analysis, circuit discovery, probing, SAEs, steering, editing and LoRA. The base layer under nnterp and nnspec: for a standard experiment on a supported transformer prefer nnspec, then nnterp."
+description: "Read and edit the internals of any PyTorch model with nnsight: model.trace, .save(), interventions, batched invokes, gradients, .source, generation, and remote execution on NDIF (remote=True) for models too large to run locally. Load whenever a request names nnsight, and before writing, fixing or explaining any nnsight code, however short: idioms from before 0.8 (.value, LanguageModel, proxies) are widespread and silently wrong. Use for an nnsight error such as OutOfOrderError, a hang or a wrong result, porting old code, a model family nnterp does not support, arbitrary module or .source access, diffusion and vision-language models, vLLM, tensor parallelism and 4/8-bit loading, and wherever PyTorch forward hooks would otherwise be written. Bundles a guide per technique: logit lens, patching, causal tracing, ablation, attention analysis, circuit discovery, probing, SAEs, steering, editing and LoRA. When no library is named, a standard experiment on a supported transformer goes to nnspec first, then nnterp."
 ---
 
 # nnsight
@@ -12,8 +12,9 @@ under [Guides](#guides): read the one that matches the task before writing code.
 
 ## Which library
 
-nnsight is the base of three libraries. When the user names a library, use it. Otherwise take the highest row that fits,
-and take a row only when its skill is available in this session:
+nnsight is the base of three libraries. **A request that names a library gets that library**, even when a higher row would fit, and a
+request for a Python script is not a request for an nnspec document. Otherwise take the highest row
+that fits, and take a row only when its skill is available in this session:
 
 | Use | When |
 |---|---|
