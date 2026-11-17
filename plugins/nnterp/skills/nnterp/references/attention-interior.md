@@ -531,8 +531,8 @@ is enabled and unmerged, the base layer's weight alone once it is merged or disa
 left merged with its adapters disabled is unmerged by the read, as its forward would do
 first). The sum is a new tensor; otherwise the result is a view of the parameter. An active,
 unmerged adapter that is no delta on the base weight (DoRA, OFT, IA3) raises
-`NotImplementedError`. An undispatched model's weights (meta) and a quantized model's
-(codes) raise `Unavailable`.
+`NotImplementedError`. On an undispatched model (meta weights) the weights and both gains
+raise `Unavailable`; on a quantized one (codes) the weights do.
 
 The gains are measured by calling the norm on `+-256` in alternating channels, which any
 RMS norm or LayerNorm normalizes to `+-1`: exact on a norm without a bias, to rounding with
