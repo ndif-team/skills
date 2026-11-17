@@ -96,7 +96,7 @@ family. In-place edits reach the model; assignment flattens the heads back.
 
 ```python
 fast = StandardizedTransformer("openai-community/gpt2", device="cpu", dispatch=True)     # sdpa, transformers' default
-assert fast.support(layer=5)["self_attn.attention_head_outputs"] is not None           # inside the eager forward
+assert fast.support(layer=5)["self_attn.attention_head_outputs"] is not None           # the eager forward's return
 assert fast.layers[5].self_attn.o_proj.path.endswith("h.5.attn.c_proj")
 
 with model.trace(prompt):
@@ -293,7 +293,9 @@ input and output, are in transformers' channel order.
 
 ## Requirement: eager attention
 
-All six live inside the eager attention forward. A model loaded with `sdpa` or
+The scores and the pattern are read inside the eager attention forward; the queries,
+keys and values are the arguments of the module's call to it, and the head outputs its
+first return. A model loaded with `sdpa` or
 `flash_attention_2` never runs it, and each value reports
 `read inside the eager attention forward, but this model runs 'sdpa'; load with
 attn_implementation='eager'` in `support()`; reading one raises
@@ -620,8 +622,8 @@ On Llama the queries, keys and values also take in-place edits.
 ### Falcon: two branches, picked by `config.alibi`
 
 Falcon's attention does its own arithmetic, and `config.alibi` picks one of two
-branches with different operations; the family names every interior value's
-operation by that flag, so all six are available under eager on both. Without
+branches with different operations; the family names each branch's operations,
+so all six are available under eager on both. Without
 alibi the queries and keys are the two returns of the rotary embedding, and the
 values are bound *before* it, so in one trace the values must be read before
 the queries or keys:

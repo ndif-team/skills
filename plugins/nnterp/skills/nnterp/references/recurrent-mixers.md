@@ -26,10 +26,10 @@ transformers dispatches each mixer to a compiled kernel when one is installed
 source, so nothing inside them is readable, and `mamba_ssm`'s do not run on CPU
 at all: an unrouted Mamba-1 model on CPU crashes with `Expected u.is_cuda()` even
 for a `layer_output` read. Without the package, transformers binds the kernel names to
-its dispatcher, which calls the pure-torch functions: Mamba-2 reads through it and needs
-no routing, while Mamba-1's `attention_head_outputs`, `state_output` and per-token state
-are read inside the kernels' own bodies and need routing on every machine (`support()`
-says so). `route_kernels(family, "torch")` binds the family's
+its dispatcher, which calls the pure-torch functions: Mamba-1 and Mamba-2 read their
+kernel values through it and need no routing, while Mamba-1's per-token state (`state`,
+`states`) is read inside the kernels' own bodies and needs routing on every machine
+(`support()` says so). `route_kernels(family, "torch")` binds the family's
 kernel names to transformers' pure-torch functions, **process-wide**; call it
 before the layer's first trace (a forward already instrumented keeps its
 kernel), with the family module before loading or `model.family` after.
@@ -212,8 +212,9 @@ back by inverting them, so they are one argument:
   and Mamba-2 / Nemotron-H return float32 logits.
 - **A Mamba-1 checkpoint with `use_mambapy`** (and `mambapy` installed) runs a
   parallel scan with no per-token binding: `state` / `states` say so.
-- **A prompt run with `use_cache=False`** returns no final state on Mamba-2:
-  `state_output` raises `Unavailable`.
+- **Leave `use_cache` on (the default) for anything inside a mixer.** Without a cache a
+  read inside the mixer ends with `OutOfOrderError`; on an older transformers only a
+  prompt's `state_output` is lost.
 
 The nnterp repo pages behind this file: `docs/usage/delta-net.md`,
 `docs/usage/selective-scan.md`, `docs/usage/state-space.md`,
