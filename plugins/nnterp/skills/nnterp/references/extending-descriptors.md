@@ -32,7 +32,7 @@ prompt = "The Eiffel Tower is in the city of"
 
 | The value is | Write | Location it serves | Writes |
 |---|---|---|---|
-| a view over the host's own boundary (`layer_output`, `mlp_output`, `logits`) | `EProperty("output")` | the same location as `.output` | `postprocess` then swap; `transform` for a reshaping preprocess |
+| a view over the host's own boundary (`layer_output`, `mlp_output`, `logits`) | `EProperty("output")` | the same location as `.output` | `postprocess` then swap; `transform` for a preprocess that copies |
 | an operation inside the host's forward (`attention_probabilities`) | `EProperty("source.<op>.output")`, `select=` for one element | `{path}.source.<op>.output` after a drill | `postprocess`, then the operation's own descriptor; `transform` available |
 | produced by another module (Gemma-2's `attention_output`, the root's `token_embeddings`) | `EProperty("../post_attention_layernorm.output")`, `EProperty("embed_tokens.output")` | that module's location | as `"output"` |
 | an operation inside the *parent's* forward (Llama 4's `mlp_output`) | `EProperty("../source.<op>.output")`, plus `sourced = True` on the parent's envoy class | `{parent}.source.<op>.output`; the parent's forward is instrumented at build | as above |
@@ -134,11 +134,12 @@ output last_position ('batch', 'hidden')
   checks every value's tensor against its annotation and axis sizes; without one
   `layout` is `None` and the suite skips it. A `State | None` annotation is accepted;
   the non-`None` member is the layout.
-- **A slice or a copy is a view the model does not see.** `last_position` above reads
-  fine; an in-place edit to it needs a `@last_position.transform` to land, and an
-  assignment needs a `@last_position.postprocess` that rebuilds the served shape. The
-  base boundary values pair `first_tensor` (preprocess) with `rewrap` (postprocess) so a
-  tuple module reads as a tensor and an assignment puts it back in its tuple.
+- **A slice is a view of the model's tensor; a copy is not.** An in-place edit to
+  `last_position` above lands, on the last position only; a preprocess that returns a copy
+  needs a `transform` for that. Either way an assignment needs a
+  `@last_position.postprocess` that rebuilds the served shape. The base boundary values
+  pair `first_tensor` (preprocess) with `rewrap` (postprocess) so a tuple module reads as
+  a tensor and an assignment puts it back in its tuple.
 - **`"inputs"` serves the raw `(args, kwargs)` pair; `"input"` the first argument.** The
   root's `input_ids` is `EProperty(key="inputs")` reading `value[1]["input_ids"]` and its
   postprocess repacks `(args, {**kwargs, "input_ids": value})`. Destructure on read,
@@ -146,11 +147,13 @@ output last_position ('batch', 'hidden')
 - **`__set_name__`** fills `name` and `key` from the class body when the descriptor is
   never called on a stub, which is how a bare `unavailable("...")` marker learns its
   name. A descriptor subclass that overrides `__set_name__` must keep that.
-- **`transform(self, value, raw)`** is the write-back of a reshaping preprocess: it fires
-  once on the model side after the read and splices its result in like a swap; `raw` is
-  the value as served, so a module returning a tuple can be rebuilt around the edited
-  element. It works at every path, a `source` one included. Falcon's `mlp_output` is
-  the shipped use ([extending-family-module-recipe.md](extending-family-module-recipe.md)).
+- **`transform(self, value, raw)`** is the write-back of a preprocess that copies: it fires
+  once on the model side after the read and splices its result in like a swap. It returns
+  the location's whole value, not the selected element: rebuild it around the edited copy
+  from `raw`, that value as served (the tuple a module returns; the `(args, kwargs)` pair
+  on an `input` or `inputs` key). `select` and `postprocess` apply to an assignment, not
+  to a transform. It works at every path, a `source` one included. Falcon's `mlp_output`
+  is the shipped use ([extending-family-module-recipe.md](extending-family-module-recipe.md)).
 
 ## `unavailable(...)` and `unavailable=`
 

@@ -826,10 +826,10 @@ What each part answers:
 - **Clone plus transform.** A plain `mlp_output` would be a live tensor the block later
   mutates, so a saved read would silently become `mlp + attn`. The preprocess returns a
   clone; a clone is invisible to the model, so `@mlp_output.transform` hands the edited
-  copy back to be swapped in after the read. `transform(self, value, raw)` receives the
-  raw served value so a tuple-returning module could rebuild its container
-  (`(edited.clone(), *raw[1:])`). A transform is needed only when the preprocess returns
-  something other than the served object and in-place edits must still reach the
+  copy back to be swapped in after the read. `transform(self, value, raw)` returns the
+  location's whole value: `raw` is that value as served, which a tuple-returning module
+  rebuilds around the edited copy (`(value.clone(), *raw[1:])`). A transform is needed
+  only when the preprocess returns a copy and in-place edits must still reach the
   model; GPT-2's MLP output is never mutated later, so the base holds there. Its two
   Falcon tests: `mlp.output == mlp_output + attention_output`, and `mlp_output[:] = 0`
   moves the logits while the saved copy stays zero.
