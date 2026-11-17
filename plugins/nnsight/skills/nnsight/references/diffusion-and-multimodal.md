@@ -135,7 +135,7 @@ assert answer(seeing) != answer(blind)
 
 ```
 clean   [('The', 0.61), ('This', 0.32), ('It', 0.06)]
-ablated [('The', 0.81), ('A', 0.03), ('This', 0.03)]
+ablated [('The', 0.79), ('A', 0.03), ('This', 0.03)]
 'The color of the image is not specified in the caption.' -> 'The color is this.'
 ```
 
