@@ -22,8 +22,9 @@ saved value keeps its autograd graph: `.detach()` what you keep (`float()` on it
 
 ## Which library
 
-nnterp sits between nnspec and nnsight. When the user names a library, use it. Otherwise take the highest row that fits,
-and take a row only when its skill is available in this session:
+nnterp sits between nnspec and nnsight. **A request that names a library gets that library**, even when a higher row would fit, and a
+request for a Python script is not a request for an nnspec document. Otherwise take the highest row
+that fits, and take a row only when its skill is available in this session:
 
 | Use | When |
 |---|---|

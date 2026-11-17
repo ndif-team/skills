@@ -121,7 +121,7 @@ non-blocking job, poll `curl localhost:8001/response/<id>`, which returns only
 the latest status.
 
 What breaks at each hop, the queue objects and the `run()` contract:
-[references/request-lifecycle.md](develop-request-lifecycle.md).
+[develop-request-lifecycle.md](develop-request-lifecycle.md).
 
 ## The trusted/untrusted fork
 
@@ -178,7 +178,7 @@ branch.**
   compose image needs too. `docs/developing/adding-a-service.md`.
 
 The contract a custom actor must uphold, actor selection, and the CLI-command
-recipe: [references/extending.md](develop-extending.md).
+recipe: [develop-extending.md](develop-extending.md).
 
 ## Testing
 
@@ -275,10 +275,10 @@ the repo. House style lives in `docs/developing/contributing.md`.
 
 ## References
 
-- [references/request-lifecycle.md](develop-request-lifecycle.md) — what
+- [develop-request-lifecycle.md](develop-request-lifecycle.md) — what
   breaks at each hop, the queue objects, the `run()` contract, and where state
   lives.
-- [references/extending.md](develop-extending.md) — the model-actor contract
+- [develop-extending.md](develop-extending.md) — the model-actor contract
   and selection, the provider pattern, adding a service, and adding a CLI
   command.
 

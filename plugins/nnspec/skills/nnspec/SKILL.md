@@ -1,6 +1,6 @@
 ---
 name: nnspec
-description: "Run an interpretability experiment on a transformer language model as one JSON document, with no intervention code to write. Load this first, before writing any code, whenever a request asks what a model's internals do and names no library: logit and tuned lens, activation, path and attribution patching, causal tracing, zero, mean and resample ablation, attention patterns and finding induction or other attention heads, steering vectors and scoring what a model generates, linear probes, SAEs, DAS, LoRA. Covers which layer, position, head or neuron carries a behaviour, what each layer predicts and what a direction does. Also for any nnspec task: writing a document (model, data, sites, steps, ops, sweeps, saves), nnspec compile, run and table, the nnterp, hooks, ndif and vllm engines, a refused document, or wrong numbers. When the experiment needs Python logic a document cannot express, use the nnterp skill; for a model family nnterp does not support, or raw module access, use the nnsight skill."
+description: "Run an interpretability experiment on a transformer language model as one JSON document, with no intervention code to write. Load this first, before writing any code, when a request asks what a model's internals do and does not name nnsight or nnterp or ask for a Python script: logit and tuned lens, activation, path and attribution patching, causal tracing, zero, mean and resample ablation, attention patterns and finding induction or other attention heads, steering vectors and scoring what a model generates, linear probes, SAEs, DAS, LoRA. Covers which layer, position, head or neuron carries a behaviour, what each layer predicts and what a direction does. Also for any nnspec task: writing a document (model, data, sites, steps, ops, sweeps, saves), nnspec compile, run and table, the nnterp, hooks, ndif and vllm engines, a refused document, or wrong numbers. A request that names nnsight or nnterp, or wants Python, goes to that skill instead, even for a standard experiment."
 ---
 
 # nnspec
@@ -15,8 +15,9 @@ the one that matches the task before writing a document.
 
 ## Which library
 
-nnspec is the top of three libraries. When the user names a library, use it. Otherwise take the highest row that fits,
-and take a row only when its skill is available in this session:
+nnspec is the top of three libraries. **A request that names a library gets that library**, even when a higher row would fit, and a
+request for a Python script is not a request for an nnspec document. Otherwise take the highest row
+that fits, and take a row only when its skill is available in this session:
 
 | Use | When |
 |---|---|

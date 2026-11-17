@@ -43,7 +43,8 @@ skill only for a new library.
   Keep the body under 500 lines.
 - **Which library.** The three interpretability skills carry the same
   `## Which library` table. The order is nnspec, then nnterp, then nnsight: take
-  the highest layer that fits the task, and a library the user names always wins.
+  the highest layer that fits the task. A library the request names always wins, and each
+  description says so, because an agent decides from the description before it reads the table.
   Change the table in all three files together.
 
 ## Guides

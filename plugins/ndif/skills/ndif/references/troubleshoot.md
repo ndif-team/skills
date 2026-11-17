@@ -33,7 +33,7 @@ page are a client and a server disagreeing about nnsight, transformers or torch.
 | `/ping` 200 but every request hangs; `redis-cli llen queue` growing | [Healthy API, dead dispatcher](#healthy-api-dead-dispatcher) |
 | A request sits in `QUEUED` / `PROVISIONING` / `DEPLOYING` for ages | [Stuck requests](#stuck-requests) |
 | Requests fail right after an `ndif kill` with `ValueError: Cannot switch to a different thread` or `ValueError: parent cannot be on a different thread` (last frames ordinary torch/transformers lines) | [Stuck requests](#stuck-requests) — restart the replica while the killed block still runs |
-| `RemoteError` whose traceback ends in **your own** line | User code raised there — reading a traceback from the bottom, in [references/error-messages.md](troubleshoot-error-messages.md#rules-that-do-most-of-the-triage) |
+| `RemoteError` whose traceback ends in **your own** line | User code raised there — reading a traceback from the bottom, in [troubleshoot-error-messages.md](troubleshoot-error-messages.md#rules-that-do-most-of-the-triage) |
 | `device-side assert triggered` / `an illegal memory access was encountered` | [The two fatal CUDA errors](troubleshoot-error-messages.md#the-two-fatal-cuda-errors) — the actor restarts itself, status stays HOT, the next request works |
 | `CANT_ACCOMMODATE`, `CUDA out of memory`, a replica cycling `RUNNING` → `UNHEALTHY` | [OOM on deploy vs OOM in a block](#oom-on-deploy-vs-oom-in-a-block) |
 | The first request after `just up ray` errors `Error starting model.` | [OOM on deploy vs OOM in a block](#oom-on-deploy-vs-oom-in-a-block) — not an OOM |
@@ -120,7 +120,7 @@ health check that detects this must watch the *queue*, not the API.
 | `QUEUED` twice with no error in between | A replica was evicted or demoted mid-flight and the request went back to the **front** of the queue. Expected |
 
 There is **no execution timeout by default**; the timeouts table is in
-[references/reading-logs.md](troubleshoot-reading-logs.md), with the full walk from
+[troubleshoot-reading-logs.md](troubleshoot-reading-logs.md), with the full walk from
 request id to root cause (`docs/runbooks/debug-a-stuck-request.md`).
 
 **Unsticking one is the [operate guide](operate.md)'s "Killing a request".** What bites here:
@@ -183,7 +183,7 @@ The client-side shapes: `ConnectError` or a hang (host unreachable from the
 client), `403 SignatureDoesNotMatch` (other credentials, or a proxy rewrote Host),
 **`404 NoSuchBucket`** (a *different* S3 answered at the public URL — wrong URL or
 a tunnel to another store), `403 Request has expired` (URLs last one hour). The
-full table is in [references/error-messages.md](troubleshoot-error-messages.md).
+full table is in [troubleshoot-error-messages.md](troubleshoot-error-messages.md).
 Reproduce it by `curl -I`-ing the `data` field of a completed non-blocking job's
 `GET /response/{id}` **from the client machine**.
 
@@ -251,9 +251,9 @@ the client library is missing (`metrics` extra). Prometheus scrapes only
 
 ## References
 
-- [references/reading-logs.md](troubleshoot-reading-logs.md) — where every log lives
+- [troubleshoot-reading-logs.md](troubleshoot-reading-logs.md) — where every log lives
   (the controller's included), LogQL, timeouts, the stuck/failed procedures.
-- [references/error-messages.md](troubleshoot-error-messages.md) — every message and
+- [troubleshoot-error-messages.md](troubleshoot-error-messages.md) — every message and
   server exception mapped to a cause, and which are fatal to a replica.
 
 ## Related guides

@@ -52,7 +52,7 @@ covers what turning them on changes.
 
 All three come up with **no configuration at all** — every service has a working
 single-host default. Full per-route detail: `docs/operating/quickstart.md` and
-[references/routes.md](selfhost-routes.md).
+[selfhost-routes.md](selfhost-routes.md).
 
 ## Prerequisites
 
@@ -186,7 +186,7 @@ just up
 - **`nnsight.__version__` reports the image's version under the mount.** Verify
   with `grep nnsight /proc/self/mountinfo` in the container; its source column is
   filesystem-relative, not the host path (example line in
-  [references/routes.md](selfhost-routes.md)).
+  [selfhost-routes.md](selfhost-routes.md)).
 
 Full procedure: `docs/developing/nnsight-integration.md#developing-against-a-local-nnsight`.
 
@@ -205,7 +205,7 @@ torch first: with no wheel present pip takes PyPI's default, the CUDA 13 build.
 Route-specific traps — the `rustfs` binary (a GitHub release, or lifted from the
 pinned image),
 a temp dir too long for AF_UNIX sockets, and what a ✓ from `ndif start` does not
-prove — are in [references/routes.md](selfhost-routes.md).
+prove — are in [selfhost-routes.md](selfhost-routes.md).
 
 ## Prove it works
 
@@ -279,7 +279,7 @@ configured by configuring the `ray` service.
 | `NDIF_SERVICE` | `all` in the image | You want one role per container, or `all dashboard`. |
 
 What must change off single-host and what survives a restart:
-[references/configuration.md](selfhost-configuration.md). Every variable:
+[selfhost-configuration.md](selfhost-configuration.md). Every variable:
 `docs/reference/env-vars.md`.
 
 ## Gotchas
@@ -312,9 +312,9 @@ What must change off single-host and what survives a restart:
 
 ## References
 
-- [references/routes.md](selfhost-routes.md) — the three routes in full:
+- [selfhost-routes.md](selfhost-routes.md) — the three routes in full:
   per-route commands, what each one installs, and each route's traps.
-- [references/configuration.md](selfhost-configuration.md) — the env-var model,
+- [selfhost-configuration.md](selfhost-configuration.md) — the env-var model,
   the variables that must change off single-host, and what survives a restart.
 
 ## Related guides
