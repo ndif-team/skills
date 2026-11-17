@@ -1,80 +1,113 @@
-# Distributed alignment search (learned subspaces)
+# Distributed alignment search
 
-Sometimes no single component patches cleanly because the variable is encoded in a
-**direction** spread across the residual stream. DAS learns that subspace: patch
-only the component of the activation along a learned direction, and optimize the
-direction to make the transfer work.
+When no single component patches cleanly, the variable may lie along a direction
+spread over the residual stream. Distributed alignment search (DAS) learns that
+direction: swap only the activation's component along a unit vector from the
+clean run into the corrupt run, and train the vector so the swap transfers the
+answer. It continues [activation-patching](activation-patching.md) and uses its
+pair and its metric.
 
 ```python
 import torch
 import nnsight
 from nnsight import TransformersModel
 
-model = TransformersModel("openai-community/gpt2", dispatch=True)
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
 
-clean = "The Eiffel Tower is in the city of"      # → " Paris"
-corrupt = "The Colosseum is in the city of"       # same token length
-paris = model.tokenizer.encode(" Paris")[0]
-rome = model.tokenizer.encode(" Rome")[0]
-SUBJECT = slice(1, 5)                             # the tokens that differ
-assert len(model.tokenizer(clean).input_ids) == len(model.tokenizer(corrupt).input_ids)
+clean = "The Eiffel Tower is in the city of"        # answer " Paris"
+corrupt = "The Colosseum is in the city of"         # answer " Rome", same token count
+paris, rome, tokyo = (model.tokenizer.encode(word, add_special_tokens=False)[0]
+                      for word in (" Paris", " Rome", " Tokyo"))
+SUBJECT = slice(1, 5)                               # the tokens that differ
+LAYER = 6
+
+with model.trace(clean):
+    donor = model.transformer.h[LAYER].output.detach().save()
+    logits = model.output.logits[0, -1]
+    clean_paris = (logits[paris] - logits[rome]).save()
+    clean_tokyo = (logits[tokyo] - logits[rome]).save()
 ```
 
-Train one direction at layer 6 so that swapping the subject's component along it,
-from the clean run into the corrupt one, raises the Paris − Rome logit difference:
+The direction is a leaf tensor you own. Each step is one trace on the corrupt
+prompt: the swap is ordinary tensor arithmetic, the empty backward block fills
+`direction.grad`, and the optimizer steps outside the trace
+([gradients](gradients.md)).
 
 ```python
-LAYER = 6
-with model.trace(clean):
-    donor_acts = model.transformer.h[LAYER].output.detach().save()
+def train(target, other, steps=20):
+    """Learn a direction whose swap at SUBJECT raises logit[target] - logit[other]."""
+    generator = torch.Generator().manual_seed(0)
+    direction = torch.nn.Parameter(torch.randn(768, generator=generator).to(model.device) * 0.02)
+    optimizer = torch.optim.Adam([direction], lr=0.05)
+    for step in range(steps):
+        with model.trace(corrupt):
+            unit = direction / direction.norm()
+            acts = model.transformer.h[LAYER].output
+            delta = donor[:, SUBJECT, :] - acts[:, SUBJECT, :]
+            acts[:, SUBJECT, :] = acts[:, SUBJECT, :] + (delta @ unit).unsqueeze(-1) * unit
+            logits = model.output.logits[0, -1]
+            loss = -(logits[target] - logits[other])
+            with loss.backward():
+                pass
+            diff = nnsight.save(-loss.item())
+        optimizer.step()
+        optimizer.zero_grad()
+    return direction.detach(), diff
 
-generator = torch.Generator().manual_seed(0)
-direction = torch.nn.Parameter(torch.randn(768, generator=generator).to(model.device) * 0.02)
-optimizer = torch.optim.Adam([direction], lr=0.05)
+direction, to_paris = train(paris, rome)
+_, to_tokyo = train(tokyo, rome)                    # an answer the donor prompt does not hold
 
-for step in range(20):
-    with model.trace(corrupt):
-        unit = direction / direction.norm()
-        acts = model.transformer.h[LAYER].output
-        delta = donor_acts[:, SUBJECT, :] - acts[:, SUBJECT, :]
-        acts[:, SUBJECT, :] = acts[:, SUBJECT, :] + (delta @ unit).unsqueeze(-1) * unit
-        logits = model.output.logits[0, -1]
-        loss = -(logits[paris] - logits[rome])
-        with loss.backward():
-            pass
-        tracked = nnsight.save(loss.item())
-    optimizer.step()
-    optimizer.zero_grad()
-    if step % 5 == 0:
-        print(f"step {step:2d}  logit diff {-tracked:+.3f}")
+print(f"swap trained toward ' Paris'  {to_paris:+.1f}   clean run {clean_paris.item():+.2f}")
+print(f"swap trained toward ' Tokyo'  {to_tokyo:+.1f}   clean run {clean_tokyo.item():+.2f}")
+assert to_paris > 10 * clean_paris.item() and to_tokyo > 10
 ```
 
 ```
-step  0  logit diff -1.491
-step  5  logit diff +31.455
-step 10  logit diff +53.149
-step 15  logit diff +62.827
+swap trained toward ' Paris'  +68.2   clean run +2.42
+swap trained toward ' Tokyo'  +48.6   clean run -1.15
 ```
 
-**Read that result skeptically — it is the standard criticism of DAS.** A learned
-direction drove the logit difference to +63 when the *real* clean run only
-achieves `+2.425`. The optimizer found a direction that pushes the output, not
-necessarily the one the model uses. Keep the intervention on the scale of the
-natural activation difference, prefer the smallest subspace that works, and run
-three nulls before claiming a subspace:
+**Neither number shows a representation.** A one-dimensional swap drives the
+logit difference to 28 times what the clean run reaches, and the same recipe
+makes the Eiffel Tower donor produce `' Tokyo'`. Given one pair and a free
+direction, the optimizer finds a direction that pushes the output, whether or not
+the model uses it. A DAS claim needs three nulls:
 
-- **held-out prompts** — report transfer on pairs the direction was not trained on
-- **a random direction** trained the same way — if it does nearly as well, the
-  subspace claim is empty. That is DAS with another seed, though, and it inherits
-  the optimizer's freedom. The cleaner null is untrained: shift the activation by
-  the *same per-pair magnitude* as the learned swap, `|delta @ unit|`, along a
-  random unit vector. On subject-number pairs that shift moved recovery by at most
-  0.08 at layers 7–11, where the real direction recovered 0.46–0.97 (the
-  [probing guide](probing.md)'s interchange runs it)
-- **an arbitrary target** — train the same subspace to emit an unrelated answer,
-  or from a donor prompt that does not contain the fact. A subspace that can be
-  pointed at any answer is not carrying this one
+- **An arbitrary target**, as above: train the same swap toward an answer the
+  donor does not hold. It must fail where the real target succeeds.
+- **Held-out pairs.** Train on a set of pairs (a list of corrupt prompts and a
+  donor with one row per prompt, all of one token count) and report the swap on
+  pairs the direction never saw.
+- **Untrained directions of the same size**: shift by the learned swap's
+  per-position magnitude along random unit vectors.
 
-Used with those controls, DAS answers questions single-component patching cannot:
-whether a variable exists as a linear feature at all, and how many dimensions it
-occupies.
+```python
+unit = direction / direction.norm()
+generator = torch.Generator().manual_seed(1)
+random_units = torch.nn.functional.normalize(torch.randn(5, 768, generator=generator), dim=-1).to(model.device)
+
+with torch.no_grad(), model.trace() as tracer:
+    untrained = nnsight.save({})
+    for index in range(5):
+        with tracer.invoke(corrupt):
+            acts = model.transformer.h[LAYER].output
+            size = (donor[:, SUBJECT, :] - acts[:, SUBJECT, :]) @ unit
+            acts[:, SUBJECT, :] = acts[:, SUBJECT, :] + size.unsqueeze(-1) * random_units[index]
+            logits = model.output.logits[0, -1]
+            untrained[index] = logits[paris] - logits[rome]
+
+print("random directions, same size: " + " ".join(f"{untrained[index].item():+.2f}" for index in range(5)))
+assert max(abs(untrained[index].item()) for index in range(5)) < 5
+```
+
+```
+random directions, same size: -2.23 -1.29 -0.79 -1.15 -1.22
+```
+
+The untrained shifts stay within one logit of the corrupt run's -1.49, so this
+null passes here while the arbitrary target fails. Each null catches a different
+failure, and one of them is not enough.
+
+For a subspace of `k` dimensions, make the parameter a `(768, k)` matrix,
+orthonormalize it inside the trace with `Q, _ = torch.linalg.qr(basis)`, and swap
+`(delta @ Q) @ Q.T`. Report the smallest `k` that passes the nulls.

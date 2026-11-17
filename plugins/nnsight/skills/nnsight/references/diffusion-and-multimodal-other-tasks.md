@@ -1,61 +1,165 @@
-# Other Tasks and Chunked Tasks
+# Other pipeline tasks: speech, vision encoders, classifiers
 
-Any task the `transformers` pipeline API supports works through
-`TransformersModel` with the right `task=`. This page covers which preprocessor
-each task brings, and the tasks that split one input into several forward rows.
-Module paths below were measured on transformers 5.17.
+`TransformersModel` loads any `transformers` pipeline task by its `task=` name,
+and reading, editing and gradients work as in [SKILL.md](../SKILL.md). What
+changes with the task is the input, the module paths, which run method gives the
+task's answer, and how many forward passes or batch rows one input becomes.
+Module paths are different for every model class on this page: `print(model)`
+before indexing.
 
-```python
-from nnsight import TransformersModel
-from PIL import Image
+## Which preprocessor a task has
 
-image = Image.new("RGB", (224, 224), (120, 30, 200))       # a solid purple square
-```
-
-## Which preprocessor is populated
-
-Which preprocessor is populated depends on the task, and the others are `None`:
+Only the preprocessors the task uses are populated. The others are `None`, which
+is where a `model.tokenizer.decode(...)` fails on a task with no text side.
 
 | task | populated |
 |---|---|
-| `image-text-to-text` | `processor`, `tokenizer` (from the processor) |
-| `image-classification`, `image-feature-extraction` | `image_processor` |
 | `automatic-speech-recognition` | `feature_extractor`, `tokenizer` |
 | `audio-classification` | `feature_extractor` |
-| `fill-mask`, `text-classification`, `token-classification` | `tokenizer` |
+| `image-classification`, `image-feature-extraction` | `image_processor` |
+| `image-text-to-text` | `processor`, with `tokenizer` and `image_processor` taken from it |
+| `fill-mask`, `text-classification`, `token-classification`, `zero-shot-classification` | `tokenizer` |
 
-`model.tokenizer` is populated on a VLM. It is `None` for the tasks with no text
-side, which is where a `tokenizer.decode` call falls over.
+## Whisper: speech recognition
+
+The input is a mono waveform as a 1-D float `numpy` array sampled at
+`whisper.feature_extractor.sampling_rate`, or `{"raw": array, "sampling_rate":
+rate}`. A float `torch.Tensor` is taken as log-mel features that were already
+extracted, not as audio.
 
 ```python
+import numpy as np
+import torch
+import nnsight
+from nnsight import TransformersModel
+
+whisper = TransformersModel("openai/whisper-tiny", task="automatic-speech-recognition", dispatch=True)
+encoder = whisper.model.encoder                    # 4 layers on whisper-tiny; whisper.model.decoder beside it
+
+rate = whisper.feature_extractor.sampling_rate     # 16000
+clip = (0.3 * np.sin(2 * np.pi * 440 * np.arange(3 * rate) / rate)).astype(np.float32)   # 3 s tone in place of speech
+
+settings = dict(language="en", max_new_tokens=12)  # language= makes the encoder run once
+
+with whisper.generate(clip, **settings) as tracer:
+    hidden = encoder.layers[2].output.save()       # an encoder layer's hidden state
+    ids = tracer.result.save()                     # the transcript's token ids
+
+with whisper.generate(clip, **settings) as tracer:
+    encoder.layers[3].output[:] = 0                # zero one encoder layer
+    ablated_ids = tracer.result.save()
+
+text = whisper.tokenizer.batch_decode(ids, skip_special_tokens=True)[0]
+ablated = whisper.tokenizer.batch_decode(ablated_ids, skip_special_tokens=True)[0]
+print(tuple(hidden.shape), repr(text), "->", repr(ablated))
+
+assert tuple(hidden.shape) == (1, whisper.feature_extractor.nb_max_frames // 2, 384)
+assert text != ablated
+```
+
+```
+(1, 1500, 384) ' You' -> ' abouts'
+```
+
+A tone has no words in it, so the transcript is a stock word. The edit changing
+it is the point. The encoder always returns 1500 positions, because the feature
+extractor pads or cuts every window to 30 s and one position covers 20 ms: the
+3 s clip is `hidden[0, :150]` and the rest encodes padding.
+
+| Run | What runs | `tracer.result` |
+|---|---|---|
+| `whisper.generate(clip, ...)` | the model's greedy decoding | transcript token ids, `(rows, new_tokens)` |
+| `whisper.pipe(clip, ...)` | the ASR pipeline, which decodes with 5 beams | `{"text": ...}` |
+| `whisper.trace(clip, decoder_input_ids=ids)` | one encoder pass and one decoder pass | the forward's output; read `whisper.output.logits` |
+
+`pipe` and `generate` decode differently (on this clip `pipe` returns
+`' Thank you very much.'`), so compare a clean and an edited run under the same
+method.
+
+**Without `language=` the encoder runs twice**: once to detect the language,
+then to transcribe. Both passes compute the same hidden states, so a read needs
+no care, but an edit written without a loop lands on the detection pass only.
+Zeroing layer 3 that way leaves the transcript unchanged, and zeroing layer 0
+changes the detected language (the transcript comes back in Japanese). Pass
+`language=`, or address the second pass:
+
+```python
+with whisper.generate(clip, max_new_tokens=12) as tracer:     # no language=
+    for step in tracer.iter[1]:                               # pass 0 detects, pass 1 transcribes
+        encoder.layers[3].output[:] = 0
+    second_pass = tracer.result.save()
+
+assert whisper.tokenizer.batch_decode(second_pass, skip_special_tokens=True)[0] == ablated
+```
+
+The decoder's first call belongs to the detection pass too, so with no
+`language=` decoding step *k* of a decoder module is `tracer.iter[k + 1]`.
+
+**One forward with logits and gradients** is `trace`, which needs the decoder's
+input. Without `decoder_input_ids=` it raises `ValueError: You cannot specify
+both decoder_input_ids and decoder_inputs_embeds at the same time`.
+
+```python
+whisper.tokenizer.set_prefix_tokens(language="en", task="transcribe")
+start = torch.tensor([whisper.tokenizer.prefix_tokens])   # <|startoftranscript|><|en|><|transcribe|><|notimestamps|>
+
+with whisper.trace(clip, decoder_input_ids=start):
+    clean = whisper.output.logits[0, -1].detach().save()  # logits for the first transcript token
+
+with whisper.trace(clip, decoder_input_ids=start):
+    encoder.layers[3].output[:] = 0
+    edited = whisper.output.logits[0, -1].detach().save()
+
+first = ids[0, 0]                                          # the token generate emitted first
+print(f"{float(clean.softmax(-1)[first]):.3f} -> {float(edited.softmax(-1)[first]):.3f}")
+assert clean.softmax(-1)[first] > 10 * edited.softmax(-1)[first]
+```
+
+```
+0.017 -> 0.000
+```
+
+These are raw logits. `generate` suppresses a list of tokens before it picks, so
+the argmax here (`' ('`) is not the token it emits (`' You'`).
+
+**A clip longer than 30 s** needs `chunk_length_s=30`; without it `generate`
+and `pipe` raise `ValueError: You have passed more than 3000 mel input
+features`. Under `generate` and `trace` the windows are rows of one forward: a
+70 s clip is `(3, 1500, 384)` at the encoder, and `trace` takes one row of
+`decoder_input_ids` per window. Under `pipe` each window is a forward of its
+own, so a block without a loop sees only the first; with `language=` set,
+window *k* is `tracer.iter[k]`.
+
+## A vision encoder
+
+Image tasks need Pillow installed. The image goes in as a `PIL.Image`, and the
+root envoy is the bare encoder:
+
+```python
+from PIL import Image
+
+image = Image.new("RGB", (224, 224), (120, 30, 200))
 vision = TransformersModel("google/vit-base-patch16-224",
                            task="image-feature-extraction", dispatch=True)
 
 with vision.trace(image):
     patches = vision.layers[6].output.save()
 
-print(patches.shape, "| tokenizer:", vision.tokenizer)
-assert patches.shape == (1, 197, 768)          # 196 patches + the CLS token
+assert tuple(patches.shape) == (1, 197, 768)       # 196 patches and the CLS token
 assert vision.tokenizer is None
 ```
 
-```
-torch.Size([1, 197, 768]) | tokenizer: None
-```
+## Classifiers and chunked tasks
 
-The root envoy here is the `ViTModel` itself, whose blocks are `layers`. A path
-copied from another vision family — `vision.encoder.layer[i]`, `vision.model...` —
-raises `AttributeError: 'TransformersModel' object (nor its module) has attribute
-'encoder'`. Print the model before indexing.
+An encoder classifier pads a batch on the **right**, so position 0 (`[CLS]`) is
+the same token on every row and `[:, -1]` is padding on every row but the
+longest.
 
-## Chunked tasks
-
-Some tasks split one input into several encodings and forward each separately:
-token windows past the model's length limit, one entailment pair per candidate
-label, a long recording's windows. Those become **rows of the trace's single
-forward**, in the order the task yields them, so a read inside the block sees one
-row per chunk. How many chunks there are is the task's preprocessing's decision,
-not something to compute from the text length — count them the way the task does:
+Some tasks split one input into several encodings: token windows past the
+model's length limit, one entailment pair per candidate label, the windows of a
+long recording. Those become **rows of the trace's single forward**, in the
+order the task yields them. Count them the way the task does, not from the text
+length:
 
 ```python
 ner = TransformersModel("hf-internal-testing/tiny-random-BertForTokenClassification",
@@ -66,51 +170,42 @@ with ner.trace("John lives in Paris"):
     short = ner.output.logits.save()
 
 with ner.trace(long_text, stride=16):
+    hidden = ner.bert.encoder.layer[0].output.save()
     windows = ner.output.logits.save()
 
-# the windows the task's tokenizer call makes, with the same stride
+with ner.trace(long_text):                        # no stride=
+    cut = ner.output.logits.save()
+
 chunks = ner.tokenizer(long_text, truncation=True, return_overflowing_tokens=True,
-                       stride=16)["input_ids"]
+                       stride=16)["input_ids"]    # the windows the task makes
 
-print(short.shape, windows.shape, len(chunks))
+assert ner.tokenizer.padding_side == "right"
 assert short.shape[0] == 1
-assert windows.shape[0] == len(chunks) > 1      # one row per window
+assert windows.shape[0] == hidden.shape[0] == len(chunks) == 7     # one row per window
+assert tuple(cut.shape) == (1, 512, 2)            # truncated to one window, nothing raised
 ```
-
-Six things to know about these tasks:
-
-- A chunked invoke is the whole batch. The row count belongs to the task, so
-  putting one next to another invoke is refused with `task=... splits this invoke
-  into N forward rows`.
-- `document-question-answering` and `zero-shot-object-detection` take the task's
-  own input dict (`{"image": ..., "question": ...}`), which goes through the
-  task's preprocessing rather than being read as a model encoding.
-- An encoder-decoder task needs the decoder's side of the forward:
-  `whisper` traces with `decoder_input_ids=` and gives one row per audio chunk
-  (70 s at `chunk_length_s=30` is 3 rows of `[1500, 384]` at the encoder).
-- **Whisper runs its encoder twice.** The first pass is language detection, the
-  second is the transcription. A block that does not loop binds to the *first*
-  one, so an edit written to change the transcript changes the language guess
-  instead and the text comes back unaltered. Wrap it: `for _ in tracer.iter[:2]:`,
-  and act on the second iteration.
-- `mask-generation` is refused. Its preprocessing runs the model to embed the
-  image before yielding one input per batch of candidate points, so there is no
-  single forward to assemble. Use `model.pipe(image)`, or build an encoding with
-  `model.image_processor` and pass the points as `input_points=`.
-- `keypoint-matching` is refused too, for a different reason: its unit input is
-  a *pair* of images, which a trace's list convention (one prompt per element)
-  would split. Use `model.pipe([image_a, image_b])`, or trace an encoding you
-  build with `model.image_processor(images=[image_a, image_b],
-  return_tensors='pt')`.
 
 ```python
 zero_shot = TransformersModel("hf-internal-testing/tiny-random-DistilBertForSequenceClassification",
                               task="zero-shot-classification", dispatch=True)
+labels = ["travel", "cooking", "dancing"]
 
-with zero_shot.trace("one day I will see the world",
-                     candidate_labels=["travel", "cooking", "dancing"]):
+with zero_shot.trace("one day I will see the world", candidate_labels=labels):
     per_label = zero_shot.output.logits.save()
 
-print(per_label.shape)         # one row per candidate label
-assert per_label.shape[0] == 3
+assert per_label.shape[0] == 3                    # one entailment row per candidate label
+print(zero_shot.pipe("one day I will see the world", candidate_labels=labels)["labels"])
 ```
+
+- **A chunked invoke is the whole batch.** Its row count belongs to the task, so
+  a second invoke beside it raises `NotImplementedError: task='zero-shot-classification'
+  splits this invoke into 3 forward rows ...`. Give each chunked input its own trace.
+- `model.pipe(...)` returns the task's records: `{"sequence", "labels", "scores"}`
+  here, `[{"label", "score"}]` for `text-classification`, one dict per token for
+  `token-classification`.
+- `document-question-answering` and `zero-shot-object-detection` take the task's
+  own dict (`{"image": ..., "question": ...}`), which goes through the task's
+  preprocessing in place of being read as model inputs.
+- `mask-generation` and `keypoint-matching` cannot be traced from an image. The
+  `NotImplementedError` names the two ways round: `model.pipe(...)`, or a trace
+  on an encoding you build with `model.image_processor`.

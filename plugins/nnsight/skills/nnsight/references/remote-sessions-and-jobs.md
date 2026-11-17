@@ -1,8 +1,12 @@
-# Sessions and Job Management
+# Remote Sessions and Jobs
 
-Patterns for structuring a remote experiment — chunking, loading data on the
-server, training in a session — and for running jobs without blocking. What a
-session is and why it matters is in [remote.md](remote.md).
+Structuring a larger remote experiment: chunked sweeps, data loaded on the
+server, training inside a session, and jobs you do not wait for. Read
+[remote](remote.md) first; its rules apply to everything here.
+
+The examples need an NDIF key and a deployed model. The session examples were
+run with `remote="local"`; the job examples were checked against the client's
+source and are not run here.
 
 ```python
 import time
@@ -10,21 +14,20 @@ import torch
 import nnsight
 from nnsight import TransformersModel
 
-model = TransformersModel("openai-community/gpt2")
+model = TransformersModel("openai-community/gpt2", task="text-generation")
 prompt = "The Eiffel Tower is in the city of"
 ```
 
-## Chunking a sweep
+## Chunk a sweep
 
-Each session is an independent job with its own time limit, and one failing trace
-aborts the whole session — so a failure costs one chunk rather than everything:
+Each session is one job with its own time limit, and one failing trace aborts
+the session. One session per chunk means a failure costs a chunk:
 
 ```python
 def sweep(layers):
-    """One session per chunk; inside it, one trace with an invoke per layer."""
     with model.session(remote=True):
         with model.trace() as tracer:
-            out = nnsight.save({})                    # keyed: invokes finish in model order
+            out = nnsight.save({})
             for layer in layers:
                 with tracer.invoke(prompt):
                     model.transformer.h[layer].output[:, -1, :] = 0
@@ -35,200 +38,150 @@ results = sweep(range(0, 6)) | sweep(range(6, 12))
 assert sorted(results) == list(range(12))
 ```
 
-Each chunk is one request *and* one forward pass: the session cuts queue and
-transport time, the invokes cut GPU time. A loop of single-prompt traces inside
-the session would still pay one forward pass per layer.
-
 ## Load the data on the server
 
-Upload the minimum. A HuggingFace `Dataset` is memory-mapped, so pickling one puts
-an arrow file **path** in the payload that only exists on your machine, and the
-worker fails with `FileNotFoundError`. Import `datasets` inside the session and the
-download happens server-side instead:
+A HuggingFace `Dataset` is memory-mapped: pickling one ships a file **path** that
+exists only on your machine, and the server raises `FileNotFoundError`. Import
+`datasets` inside the session and the download happens there. Slice in the split
+string so the server materializes only those rows:
 
 ```python
 with model.session(remote=True):
     from datasets import load_dataset
-
     rows = load_dataset("nyu-mll/glue", "sst2", split="train[:40]")
     tally = nnsight.save({"n": 0, "hits": 0})
-
     for start in range(0, len(rows), 10):
         batch = rows[start : start + 10]
         with model.trace(batch["sentence"]):
             top = model.output.logits[:, -1].argmax(-1)
         tally["n"] += len(top)
         tally["hits"] += int((top > 0).sum())
-
-print(tally)
 ```
 
-Slice in the split string (`train[:40]`) rather than after loading — it is the
-difference between the server materialising forty rows and the full 67k.
+## Train inside a session
 
-Download the minimum too: reduce inside the block and save the summary. A
-client-side tensor you fold in (a probe direction, a steering vector) arrives on
-the CPU in float32 — `vec.to(hidden.device, hidden.dtype)` inside the block.
-
-## Training inside a session
-
-The optimizer loop goes in the session too, so a 500-step run is one job rather
-than 500.
-
-A probe — its whole graph lives in your block:
+Put the optimizer loop in the session, so 500 steps are one job. Build the
+parameters **inside** the session, on the device and dtype of an activation; a
+client-side optimizer over shipped parameters trains nothing. Only tensors come
+back, so save the trained weights, not the object holding them.
 
 ```python
 labels = [1.0, 0.0, 1.0, 0.0]
+texts = ["a great film", "utter garbage", "i loved it", "awful, just awful"]
 
 with model.session(remote=True):
     rows = []
-    for text in ["a great film", "utter garbage", "i loved it", "awful, just awful"]:
+    for text in texts:
         with model.trace(text):
             hidden = model.transformer.h[6].output[0, -1].detach().float()
         rows.append(hidden)
-
     features = torch.stack(rows)
     target = torch.tensor(labels, device=features.device)
-    probe_w = torch.zeros(768, device=features.device, requires_grad=True)
-    optimizer = torch.optim.SGD([probe_w], lr=1e-3)
-
+    weight = torch.zeros(768, device=features.device, requires_grad=True)
+    optimizer = torch.optim.SGD([weight], lr=1e-3)
     for _ in range(20):
-        loss = torch.nn.functional.binary_cross_entropy_with_logits(features @ probe_w, target)
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(features @ weight, target)
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-
     final_loss = nnsight.save(loss.item())
-    trained_probe = probe_w.detach().cpu().save()
+    probe = weight.detach().cpu().save()
 
-print(round(final_loss, 3), trained_probe.shape)
+assert tuple(probe.shape) == (768,) and final_loss < 0.7
 ```
 
-A LoRA adapter — parameters have to be
-created on the device the activations live on — `torch.randn` gives CPU float32
-even when the code runs next to the weights — and only plain tensors can come
-back, so hand back the trained weights rather than the adapter that holds them.
+An adapter that writes into the model trains the same way, with a trace per step.
+Read the device from an activation, replace the output (a write into it breaks
+the graph), and step the optimizer between traces:
 
 ```python
 module = model.transformer.h[-1].mlp
+rome = model.tokenizer.encode(" Rome", add_special_tokens=False)[0]
 
 with model.session(remote=True):
     with model.trace(prompt):
         device = module.output.device
-
-    # Defined inside the block, so the class travels as source. Defined outside,
-    # it is pickled by reference and the server has to be able to import its
-    # module (see `nnsight.register`).
-    class LoRA(torch.nn.Module):
-        def __init__(self, module, dim, rank, device):
-            # Named, not bare: a shipped class is recompiled outside any class
-            # body, so `super()` has no __class__ cell to read.
-            super(LoRA, self).__init__()
-            self.module = module
-            self.WA = torch.nn.Parameter(torch.randn(dim, rank).to(device))
-            self.WB = torch.nn.Parameter(torch.zeros(rank, dim).to(device))
-
-        def __call__(self):
-            hidden = self.module.input
-            delta = torch.matmul(torch.matmul(hidden.to(self.WA.dtype), self.WA), self.WB)
-            self.module.output = delta.to(hidden.dtype) + self.module.output
-
-        def parameters(self):
-            return [self.WA, self.WB]
-
-    adapter = LoRA(module, 768, 4, device)
-    optimizer = torch.optim.AdamW(adapter.parameters(), lr=1e-3)
+    WA = torch.nn.Parameter(torch.randn(768, 4, device=device) * 0.01)
+    WB = torch.nn.Parameter(torch.zeros(4, 768, device=device))
+    optimizer = torch.optim.AdamW([WA, WB], lr=1e-2)
     losses = nnsight.save([])
-
     for _ in range(3):
         with model.trace(prompt):
-            adapter()
-            loss = -model.output.logits[0, -1].log_softmax(-1)[6342]
+            delta = module.input @ WA @ WB               # input before output
+            module.output = module.output + delta
+            loss = -model.output.logits[0, -1].log_softmax(-1)[rome]
             loss.backward()
         optimizer.step()
         optimizer.zero_grad()
         losses.append(loss.item())
+    trained_WA = WA.detach().cpu().save()
+    trained_WB = WB.detach().cpu().save()
 
-    trained_WA = adapter.WA.detach().cpu().save()
-    trained_WB = adapter.WB.detach().cpu().save()
-
-print([round(l, 3) for l in losses], trained_WA.shape, trained_WB.shape)
-assert losses[-1] != losses[0], "loss never moved"
+assert losses[-1] < losses[0] and tuple(trained_WA.shape) == (768, 4)
 ```
 
-Rebuild the adapter from those weights to use it later. Two things that look fine
-and aren't: `output[:] = ...` instead of `output = ...` breaks the autograd graph
-("one of the variables needed for gradient computation has been modified"), and
-`.save()` on `self.WA` inside `__init__` returns nothing, because saves come back
-keyed by *variable name* and an attribute has none.
+A save on an attribute (`self.WA.save()` inside a class) returns nothing: saves
+come back by variable name. Save the weights under names at the end.
 
-## Non-blocking jobs
+## Submit without waiting
 
-`blocking=False` submits and returns; the backend polls.
+`blocking=False` submits the job and returns. `tracer.backend` is the job: call
+it to poll. It returns `None` until the job has completed, then a dict of the
+saves **keyed by variable name**. Your local names are not filled in, because
+the `with` block exited long before the job finished.
 
 ```python
 with model.trace(prompt, remote=True, blocking=False) as tracer:
     top = model.output.logits[0, -1].argmax().cpu().save()
 
 backend = tracer.backend
-print("submitted", backend.job_id, backend.status)
+print(backend.job_id, backend.status)
 
-while True:
-    result = backend()               # None until COMPLETED
-    if result is not None:
-        break
-    time.sleep(0.5)
+while (result := backend()) is None:      # one HTTP request per call
+    time.sleep(1)
 
-print(result.keys(), model.tokenizer.decode(result["top"]))
+print(model.tokenizer.decode(result["top"]))
 ```
 
-The result is a dict keyed by the **variable names** you saved — with
-`blocking=False` the values are not pushed back into your locals, because the
-`with` block exited long before the job finished. Sessions accept `blocking=False`
-too. `backend()` raises `RemoteError` if the job errored, and returns `None` both
-while running and before the first status lands.
+- `backend()` raises `RemoteError` when the job failed. Status changes only when
+  you poll, and the block's `print()` output is not streamed.
+- A session takes `blocking=False` the same way.
+- To fetch a job from another process, keep `backend.job_id` and build
+  `RemoteBackend(model.to_model_key(), blocking=False, job_id=job_id)` from
+  `nnsight.intervention.backends.remote`; calling it polls. Fetch results
+  promptly, the server does not keep them forever.
 
-## Async jobs
+## Await jobs on an event loop
 
-To wait on an event loop instead of polling — or to run several jobs concurrently
-— use `AsyncRemoteBackend`. Submission is still synchronous; only the wait is
-async.
+`AsyncRemoteBackend` waits without blocking a thread, which lets several jobs
+run at once. Submission is still synchronous:
 
 ```python
 import asyncio
 from nnsight.intervention.backends.remote import AsyncRemoteBackend
 
-async def run(prompt):
+async def run(text):
     backend = AsyncRemoteBackend(model.to_model_key())
-    with model.trace(prompt, backend=backend):
+    with model.trace(text, backend=backend):
         out = model.output.logits[0, -1].argmax().cpu().save()
     result = await backend                       # the saves dict
     return model.tokenizer.decode(result["out"])
 
 async def main():
-    return await asyncio.gather(
-        run("The Eiffel Tower is in"),
-        run("The Colosseum is in"),
-    )
+    return await asyncio.gather(run("The Eiffel Tower is in"), run("The Colosseum is in"))
 
-asyncio.run(main())
+print(asyncio.run(main()))
 ```
 
-`async for update in backend` streams raw status updates instead, ending with the
-saves dict as the final item. That form does not raise on `ERROR` — an error
-update simply ends the stream, so inspect it yourself.
+`async for update in backend` yields the raw status updates and the saves dict
+last. That form does not raise on a failed job; the stream just ends.
 
 ## Choosing
 
 | Situation | Use |
 |---|---|
-| One trace | `model.trace(..., remote=True)` |
-| Several related traces | `model.session(remote=True)` |
-| Long job, want your process back | `blocking=False` + poll |
-| Many jobs at once, or async app | `AsyncRemoteBackend` |
-| Developing / testing the remote path | `remote="local"` |
-
-## Related
-
-- [setup-and-troubleshooting.md](remote-setup-and-troubleshooting.md)
-- the [batching.md](batching.md), for collapsing sweeps into one forward pass
+| one trace | `model.trace(..., remote=True)` |
+| several related traces, a loop, a training run | `model.session(remote=True)` |
+| a long job, and you want your process back | `blocking=False`, then poll |
+| many jobs at once, or an async application | `AsyncRemoteBackend` |
+| checking that the code survives the trip | `remote="local"` |

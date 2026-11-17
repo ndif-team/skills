@@ -1,116 +1,85 @@
-# Model Editing and LoRA
+# Model editing and LoRA
 
-Three levels of permanence, in increasing order of commitment:
+Three ways to make a change that outlasts one trace:
 
-| Level | What changes | Reversible | Use it to |
+| Change | Where it lives | Undo | Use it to |
 |---|---|---|---|
-| `model.edit()` | activations, replayed on every run | `model.clear_edits()` | test an intervention across many runs |
-| adapter / LoRA | added parameters routed into the forward | `disable_adapters()` / `load_adapter(None)` | change behavior across many inputs; study an existing fine-tune (`peft=`) |
-| weight edit | the model's own parameters | only if you saved a copy | overwrite one association at a layer a causal trace implicated; ship the change baked in |
+| activation edit (`model.edit`) | an intervention nnsight replays on every run | `model.clear_edits()` | hold an intervention across many runs |
+| adapter / LoRA | added parameters routed into the forward | stop routing it, or `model.disable_adapters()` for a PEFT adapter | change behavior across many inputs, or study an existing fine-tune |
+| weight edit | the model's own parameters | only from a copy you kept | overwrite one association and ship it in the weights |
+
+An activation edit is stored on one envoy and replayed only by runs through
+nnsight, so a direct call on the wrapped module (a `Trainer`, an eval harness
+holding `model._module`) runs the unedited model:
+[control-flow](control-flow.md). A weight edit and a PEFT adapter are in the
+module itself and reach those callers.
 
 ```python
 import torch
 import nnsight
 from nnsight import TransformersModel
 
-torch.manual_seed(0)
-model = TransformersModel("openai-community/gpt2", dispatch=True)
-
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
 prompt = "The Eiffel Tower is in the city of"
-rome = model.tokenizer.encode(" Rome")[0]
-
-with model.trace(prompt):
-    original = model.output.logits[0, -1].argmax().save()
-
-print(f"original prediction: {model.tokenizer.decode(original)!r}")
+rome = model.tokenizer.encode(" Rome", add_special_tokens=False)[0]
 ```
 
-## Persistent activation edits
+## Three tests for any edit
 
-Capture an intervention once and it replays on every future run; the weights
-never change.
+That the target prompt changed proves nothing. An edit is judged on three sets of
+prompts:
+
+- **Efficacy**: the target prompt gives the new answer.
+- **Generalization**: paraphrases follow. An edit that fires only on the exact
+  string is a lookup table.
+- **Specificity**: unrelated prompts keep their answers. It is the test the
+  edits below fail first.
 
 ```python
-with model.edit(inplace=True):
-    model.transformer.h[9].output[:, -1, :] = 0
+targets = [prompt, "The Eiffel Tower is located in the city of",
+           "You can visit the Eiffel Tower in"]
+others = ["The Statue of Liberty is in the city of", "The capital of Japan is",
+          "Barack Obama was born in", "The Colosseum is in the city of",
+          "Big Ben is in the city of"]
 
-with model.trace(prompt):
-    edited = model.output.logits[0, -1].argmax().save()
+def top(texts, route=None):
+    """Per text: (argmax token id, p(' Rome')) at the last position. One forward pass."""
+    with torch.no_grad(), model.trace() as tracer:
+        out = nnsight.save({})
+        for text in texts:
+            with tracer.invoke(text):
+                if route is not None:
+                    route()                          # an intervention under test
+                probs = model.output.logits[0, -1].softmax(-1)
+                out[text] = (probs.argmax().item(), probs[rome].item())
+    return out
 
-print(f"with edit: {model.tokenizer.decode(edited)!r}")
-assert int(edited) != int(original)
-model.clear_edits()
+def show(after):
+    for text in targets + others:
+        (b, p_before), (a, p_after) = before[text], after[text]
+        print(f"{text!r:<44} {model.tokenizer.decode(b)!r:>9} -> "
+              f"{model.tokenizer.decode(a)!r:<8} p(Rome) {p_before:.3f} -> {p_after:.3f}")
+
+before = top(targets + others)
 ```
 
-```
-original prediction: ' Paris'
-with edit: ' and'
-```
+## A rank-one weight edit
 
-Without `inplace=True`, `model.edit()` returns an edited *copy* sharing the same
-weights — the safe default when comparing against the original.
+Weights are ordinary parameters: edit them outside a trace with plain torch, and
+keep a copy, because nothing else undoes the edit. The ROME-style edit is a
+rank-one update to an MLP output projection `W`, built so that one key `k` maps
+to a new value: `ΔW = u·dvᵀ / (uᵀk)` gives `k @ ΔW == dv` exactly. Three choices
+decide whether it changes only the target:
 
-### Two boundaries an edit does not cross
-
-**An edit belongs to the envoy you stored it on.** A trace replays only the edits
-of the envoy it is rooted at, so an edit stored on a layer does nothing when you
-trace the model, and the model's `clear_edits()` does not remove it:
-
-```python
-with model.transformer.h[9].edit(inplace=True):
-    model.transformer.h[9].output[:] = 0
-
-with model.trace(prompt):
-    unaffected = model.output.logits[0, -1].argmax().save()
-
-print(f"root trace: {model.tokenizer.decode(unaffected)!r}")   # ' Paris'
-assert int(unaffected) == int(original)
-
-model.clear_edits()
-assert len(model.transformer.h[9]._edits) == 1                 # still there
-model.transformer.h[9].clear_edits()                           # this clears it
-```
-
-Store the edit on the model and write the layer's path inside it instead.
-
-**An edit applies through the interleaver, not to the module.** `model.trace(...)`,
-`model.generate(...)`, `model.pipe(...)` and `model.trace(**ids, trace=False)` all
-replay stored edits. A direct call on the wrapped `torch.nn.Module` does not:
-
-```python
-ids = model.tokenizer(prompt, return_tensors="pt").to(model.device)
-
-with model.edit(inplace=True):
-    model.transformer.h[9].output[:] = 0
-
-through_trace = int(model.trace(**ids, trace=False).logits[0, -1].argmax())
-direct_call = int(model(**ids).logits[0, -1].argmax())
-
-print(model.tokenizer.decode(through_trace), "|", model.tokenizer.decode(direct_call))
-assert through_trace != direct_call and direct_call == int(original)
-model.clear_edits()
-```
-
-So a HuggingFace `Trainer`, an eval harness, or anything else holding
-`model._module` runs the unedited model. Route those through `model.trace(...)`,
-or make the change in the weights.
-
-## Direct weight editing
-
-Weights are ordinary parameters; edit them outside a trace with plain torch. The
-ROME-style move is a **rank-one update** to an MLP output projection `W`, chosen so
-that one key `k` maps to a new value: `W += u·dvᵀ / (uᵀk)`, which gives
-`k @ ΔW == dv` exactly. Three choices decide whether it hits only the target:
-
-- **the key is the `c_proj` input at the subject's last token** (`' Tower'`), the
-  place the fact is looked up. A key taken at the prompt's last token turns the
-  update into "say Rome after any prompt like this". Measured on GPT-2 at layer 9,
-  every unrelated prompt flipped to `' Rome'` (Statue of Liberty p=0.999, capital
-  of Japan 0.743, Obama 0.457).
-- **`u` is the key whitened by a key covariance** (`u = C⁻¹k`, `C` from ~20 ordinary
-  sentences, regularized), so that keys unlike this one barely move.
-- **`dv` is optimized**, not guessed: the change to the MLP output at the subject
-  that makes the target likely, found through nnsight's backward.
+- **The key is the `c_proj` input at the subject's last token** (` Tower`). Taken
+  at the prompt's last token, the edit becomes "say Rome after `in the city of`":
+  the three unrelated prompts with that ending flip to ` Rome` (p 0.94 to 0.99),
+  and the paraphrase with another ending does not follow.
+- **`u` is the key whitened by a key covariance** (`u = C⁻¹k`, with `C` taken
+  over the tokens of ordinary text and regularized), so that other keys barely
+  move. With `u = k`, three of the five unrelated prompts flip.
+- **`dv` is optimized**: the change to the MLP output at the subject that makes
+  the target likely, found with a backward pass.
 
 ```python
 model.requires_grad_(False)          # only the edit's own tensors take gradients
@@ -172,150 +141,52 @@ def rank_one_edit(layer, target=rome, stop_at=0.9, lam=1e-2):
         optimizer.zero_grad()
 
     u = torch.linalg.solve(C, k)                   # the whitened key
-    return mlp.c_proj.weight, torch.outer(u, dv.detach()) / (u @ k)   # Conv1D: [in, out]
-```
+    # GPT-2's Conv1D weight is [in, out]. An nn.Linear weight is [out, in]: transpose the delta.
+    return mlp.c_proj.weight, torch.outer(u, dv.detach()) / (u @ k)
 
-Apply it, then run the specificity check from
-[Evaluating an edit](#evaluating-an-edit) before believing it:
-
-```python
-def top(texts):
-    """Per text: (argmax token, p(' Rome')) at the last position."""
-    with model.trace() as tracer:
-        out = nnsight.save({})
-        for text in texts:
-            with tracer.invoke(text):
-                probs = model.output.logits[0, -1].softmax(-1)
-                out[text] = (probs.argmax().item(), probs[rome].item())
-    return out
-
-targets = [prompt, "The Eiffel Tower is located in the city of",
-           "You can visit the Eiffel Tower in"]
-others = ["The Statue of Liberty is in the city of", "The capital of Japan is",
-          "Barack Obama was born in", "The Colosseum is in the city of",
-          "Big Ben is in the city of"]
-
-before = top(targets + others)
 weight, delta = rank_one_edit(layer=4)
 backup = weight.detach().clone()
 with torch.no_grad():
     weight += delta
 after = top(targets + others)
+show(after)
 
-for text in targets + others:
-    (b, _), (a, p_rome) = before[text], after[text]
-    print(f"{text!r:<44} {model.tokenizer.decode(b)!r:>9} -> "
-          f"{model.tokenizer.decode(a)!r:<9} p(Rome) {p_rome:.3f}")
-
-assert after[prompt][0] == rome
-assert all(after[t][0] == before[t][0] for t in others)      # specificity holds
+assert all(after[text][0] == rome for text in targets)                 # efficacy, generalization
+assert all(after[text][0] == before[text][0] for text in others)       # specificity
 
 with torch.no_grad():
     weight.copy_(backup)
-assert top(targets + others) == before                          # restored exactly
+assert top(targets + others) == before                                 # restored exactly
 ```
 
 ```
-'The Eiffel Tower is in the city of'          ' Paris' -> ' Rome'   p(Rome) 0.981
-'The Eiffel Tower is located in the city of'  ' Paris' -> ' Rome'   p(Rome) 0.968
-'You can visit the Eiffel Tower in'          ' London' -> ' Rome'   p(Rome) 0.525
-'The Statue of Liberty is in the city of'       ' New' -> ' New'    p(Rome) 0.044
-'The capital of Japan is'                       ' the' -> ' the'    p(Rome) 0.000
-'Barack Obama was born in'                      ' New' -> ' New'    p(Rome) 0.000
-'The Colosseum is in the city of'                 ' P' -> ' P'      p(Rome) 0.019
-'Big Ben is in the city of'                     ' New' -> ' New'    p(Rome) 0.004
+'The Eiffel Tower is in the city of'          ' Paris' -> ' Rome'  p(Rome) 0.006 -> 0.981
+'The Eiffel Tower is located in the city of'  ' Paris' -> ' Rome'  p(Rome) 0.005 -> 0.968
+'You can visit the Eiffel Tower in'          ' London' -> ' Rome'  p(Rome) 0.009 -> 0.525
+'The Statue of Liberty is in the city of'       ' New' -> ' New'   p(Rome) 0.047 -> 0.044
+'The capital of Japan is'                       ' the' -> ' the'   p(Rome) 0.000 -> 0.000
+'Barack Obama was born in'                      ' New' -> ' New'   p(Rome) 0.000 -> 0.000
+'The Colosseum is in the city of'                 ' P' -> ' P'     p(Rome) 0.014 -> 0.019
+'Big Ben is in the city of'                     ' New' -> ' New'   p(Rome) 0.004 -> 0.004
 ```
 
-The target and both paraphrases move; none of the five unrelated prompts changes
-its answer.
+The covariance needs enough text. With the corpus one sentence shorter, the
+Colosseum prompt, whose four top candidates lie between 0.014 and 0.019, flips
+to ` Rome`; with the first six sentences p(Rome) on the Statue of Liberty prompt
+rises to 0.11. ROME estimates `C` from a large corpus.
 
-**Always keep a backup.** A weight edit is global: everything holding the model
-sees it, including a direct `model(**ids)` call that an activation edit misses.
-
-On a tensor-parallel model, sharded weights are `DTensor`s and this code needs
-`.to_local()` — see the [tensor-parallel guide](tensor-parallel.md).
-
-### Which layer
-
-Edit at the layer a causal trace identified; find it with the [causal-tracing guide](causal-tracing.md). A small model may not show one: that guide reports GPT-2 small has no
-subject site on this prompt. Then sweep candidate layers and let the specificity
-check choose:
-
-```python
-for layer in (4, 6, 8):
-    weight, delta = rank_one_edit(layer)
-    backup = weight.detach().clone()
-    with torch.no_grad():
-        weight += delta
-    after = top(targets + others)
-    with torch.no_grad():
-        weight.copy_(backup)
-    changed = sum(after[t][0] != before[t][0] for t in others)
-    print(f"layer {layer}: p(Rome) {after[prompt][1]:.3f}, "
-          f"unrelated changed {changed}/{len(others)}")
-```
-
-```
-layer 4: p(Rome) 0.981, unrelated changed 0/5
-layer 6: p(Rome) 0.924, unrelated changed 0/5
-layer 8: p(Rome) 0.922, unrelated changed 0/5
-```
-
-All three flip the target cleanly here; when several pass, add paraphrases and
-unrelated prompts until the sweep tells them apart. Real ROME estimates `C` from
-far more text (Wikipedia statistics, not 20 sentences); this is the same move at
-small scale.
-
-## Loading a PEFT / LoRA adapter
-
-`TransformersModel` takes a `peft=` argument (a hub repo id or a local path) and
-grafts the adapter onto the model **in place**: each targeted module becomes the
-adapter's layer, and nothing else moves. Every path you wrote for the base model
-still names the same module, and the adapter's own modules join the envoy tree,
-so you can read *inside* the adapter:
-
-```python
-import tempfile
-from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM
-
-adapter_dir = tempfile.mkdtemp()             # a throwaway adapter; a repo id works the same
-get_peft_model(
-    AutoModelForCausalLM.from_pretrained("openai-community/gpt2"),
-    LoraConfig(r=4, target_modules=["c_attn"], fan_in_fan_out=True, init_lora_weights=False),
-).save_pretrained(adapter_dir)
-
-adapted = TransformersModel("openai-community/gpt2", peft=adapter_dir, dispatch=True)
-
-with adapted.trace(prompt):
-    lora_out = adapted.transformer.h[0].attn.c_attn.lora_B.default.output.save()
-    adapted_logits = adapted.output.logits[0, -1].detach().save()
-adapted.disable_adapters()                   # the base model, on the same tree
-with adapted.trace(prompt):
-    base_logits = adapted.output.logits[0, -1].detach().save()
-adapted.enable_adapters()
-
-print(type(adapted._module).__name__, tuple(lora_out.shape))
-print([p for p, _ in adapted.named_modules() if "lora_B" in p][:2])
-print(f"max logit shift vs base: {float((adapted_logits - base_logits).abs().max()):.2f}")
-assert type(adapted._module).__name__ == "GPT2LMHeadModel"      # not re-rooted
-```
-
-To study what a fine-tune changed, diff activations like this against the base
-model at every layer, not just the logits.
+Edit at the layer a causal trace implicates
+([causal-tracing](causal-tracing.md)). When it implicates none, sweep `layer` and
+keep the layers that pass the asserts: here 4, 6 and 8 all do, and a longer list
+of paraphrases and unrelated prompts is what separates them. On a
+tensor-parallel model the weights are sharded and need a different write:
+[tensor-parallel](tensor-parallel.md).
 
 ## Training an adapter through a frozen model
 
-nnsight's interleaved backward means an adapter inserted at any layer trains with
-ordinary torch. **Freeze the base first.** Without `model.requires_grad_(False)`
-the backward still fills `.grad` on every base weight; the base would not move,
-because the optimizer holds only the adapter's parameters, but those gradients
-cost a model's worth of memory and end up in anything that later calls `.step()`
-on `model.parameters()`.
-
-**Training against a *remote* model** needs a different recipe — the adapter and
-optimizer are built inside `model.session(remote=True)`. The [remote guide](remote.md)
-covers it.
+An adapter added at any layer trains with ordinary torch, because the backward
+pass runs through the intervention. Freeze the base first: without
+`model.requires_grad_(False)` each backward fills `.grad` on every base weight.
 
 ```python
 class LoRA(torch.nn.Module):
@@ -323,55 +194,64 @@ class LoRA(torch.nn.Module):
         super().__init__()
         self.down = torch.nn.Linear(dim, rank, bias=False)
         self.up = torch.nn.Linear(rank, dim, bias=False)
-        torch.nn.init.zeros_(self.up.weight)         # start as a no-op
+        torch.nn.init.zeros_(self.up.weight)         # starts as a no-op
 
     def forward(self, x):
         return self.up(self.down(x))
 
-model.requires_grad_(False)
+torch.manual_seed(0)
 lora = LoRA(model.config.n_embd).to(model.device)
+model.requires_grad_(False)
 optimizer = torch.optim.Adam(lora.parameters(), lr=1e-3)
 
-def route_lora(layer):
+def route_lora():
+    layer = model.transformer.h[9]
     hidden = layer.output
-    layer.output = hidden + lora(hidden)          # replacement, not [:]=
+    layer.output = hidden + lora(hidden)             # a replacement, not layer.output[:] = ...
 
+losses = []
 for step in range(30):
     with model.trace(prompt):
-        route_lora(model.transformer.h[9])
+        route_lora()
         loss = -model.output.logits[0, -1].log_softmax(-1)[rome]
         with loss.backward():
             pass
         tracked = nnsight.save(loss.item())
     optimizer.step()
     optimizer.zero_grad()
-    if step % 10 == 0:
-        print(f"step {step:2d}  loss {tracked:.3f}")
+    losses.append(tracked)
 
-with model.trace(prompt):
-    route_lora(model.transformer.h[9])
-    trained = model.output.logits[0, -1].argmax().save()
-
-print(f"with trained LoRA: {model.tokenizer.decode(trained)!r}")
+after = top(targets + others, route=route_lora)
+print("loss at steps 0, 10, 20:", [round(losses[step], 3) for step in (0, 10, 20)])
+print("say Rome:", sum(after[text][0] == rome for text in targets), "of 3 targets,",
+      sum(after[text][0] == rome for text in others), "of 5 unrelated prompts")
+assert all(after[text][0] == rome for text in targets + others)
 ```
 
 ```
-step  0  loss 5.084
-step 10  loss 0.969    (varies with initialization)
-step 20  loss 0.000
-with trained LoRA: ' Rome'
+loss at steps 0, 10, 20: [5.084, 0.538, 0.0]
+say Rome: 3 of 3 targets, 5 of 5 unrelated prompts
 ```
 
-**Use replacement assignment, not in-place, when gradients flow through the
-intervention** — the most common failure when training through nnsight.
-`layer.output[:] = hidden + lora(hidden)` modifies the tensor autograd needs and
-raises `RuntimeError: one of the variables needed for gradient computation has
-been modified by an inplace operation`; `layer.output = ...` keeps the graph.
+The adapter passes efficacy and generalization and fails specificity on every
+prompt: trained on one prompt with nothing holding the rest in place, it learned
+to say Rome. A penalty in the loss is not enough by itself either: a KL term to
+the base model's outputs on six other prompts brings their drift to 0.005 and
+still leaves three of the five unrelated prompts saying Rome. Measure specificity
+on prompts the training never saw.
 
-To make the adapter permanent, move the routing into an edit. A plain edit fires
-at each location's **first** occurrence, which under `generate` is prefill alone —
-so put the routing under `tracer.iter[:]`, and count the steps the adapter ran
-whenever an edit is supposed to hold across a generation:
+The routing assigns a replacement. Written in place (`layer.output[:] = ...`) it
+raises `RuntimeError: ... modified by an inplace operation`
+([gradients](gradients.md)). Training against a model on NDIF puts the adapter
+and the optimizer loop inside one `model.session(remote=True)`:
+[remote-sessions-and-jobs](remote-sessions-and-jobs.md).
+
+### Keeping the adapter on every run
+
+Attach the adapter to the module tree and move the routing into an edit. Under
+`generate` a plain edit runs on the first forward pass only, so the routing goes
+under `tracer.iter[:]`. Count the steps it ran whenever an edit must hold across
+a generation:
 
 ```python
 model.transformer.h[9].adapter = lora
@@ -381,136 +261,125 @@ with model.edit(inplace=True) as tracer:
         hidden = model.transformer.h[9].output
         model.transformer.h[9].output = hidden + model.transformer.h[9].adapter(hidden, hook=True)
 
-with model.generate(prompt, max_new_tokens=5, do_sample=False) as tracer:
+with model.generate(prompt, max_new_tokens=5, min_new_tokens=5, do_sample=False) as tracer:
     ran = tracer.cache(modules=[model.transformer.h[9].adapter])
-    ids = tracer.result.save()
 
-print(model.tokenizer.decode(ids[0]))
-print(f"adapter ran {len(ran['model.transformer.h.9.adapter'])} of 5 steps")
 assert len(ran["model.transformer.h.9.adapter"]) == 5      # 1 without the loop
 model.clear_edits()
 ```
 
-`hook=True` is what puts the adapter in the cache at all: a module you call
-yourself is not recorded otherwise.
+`hook=True` is what makes the call visible to the cache; without it the cache
+comes back empty ([modules-and-architectures](modules-and-architectures.md)).
 
-### Train and export a real PEFT adapter
+## PEFT adapters
 
-An adapter loaded with `peft=` trains through the same backward. Freeze the base
-after dispatch, before switching the adapter on: nnsight leaves the base
-trainable, so without `adapted.requires_grad_(False)` the backward fills `.grad`
-on every base weight. Then two traps.
-**It loads frozen**: PEFT sets `inference_mode`, so its `lora_` parameters arrive
-with `requires_grad=False` and must be switched on. **`save_pretrained` on the
-wrapped module writes a full model**: `adapted._module.save_pretrained(dir)` is
-the transformers method and silently saves every base weight next to the LoRA
-ones. Write the adapter files yourself:
+The examples in this section need the `peft` package. `peft=` takes the repo id
+or local path of an adapter that adds layers (LoRA and its relatives) and
+attaches it to the model in place: each targeted module becomes the adapter's
+layer and holds the original as `base_layer`. No other module moves, so every
+path into the base model still names the same module, and the adapter's own
+modules are in the tree to read. `model.load_adapter(peft_id)` attaches or swaps
+an adapter on a loaded model, and `model.load_adapter(None)` removes it.
+
+For the base and the adapted side of one experiment, keep the adapter attached
+and switch it between traces: `disable_adapters()` runs the base model's forward
+bit for bit, `enable_adapters()` the adapted one, and `adapters_enabled` holds
+the state.
 
 ```python
+adapter_id = "peft-internal-testing/gpt2-lora-random"     # a LoRA for this base model: repo id or path
+adapted = TransformersModel("openai-community/gpt2", task="text-generation",
+                            peft=adapter_id, dispatch=True)
+c_attn = adapted.transformer.h[0].attn.c_attn
+
+with torch.no_grad(), adapted.trace(prompt):
+    base_part = c_attn.base_layer.output.save()
+    lora_part = c_attn.lora_B.default.output.save()
+    total = c_attn.output.save()
+    adapted_logits = adapted.output.logits[0, -1].save()
+
+adapted.disable_adapters()                    # the same tree, the base model's forward
+with torch.no_grad(), adapted.trace(prompt):
+    base_logits = adapted.output.logits[0, -1].save()
+adapted.enable_adapters()
+
+with torch.no_grad(), model.trace(prompt):    # the plain gpt2 from the first block
+    plain_logits = model.output.logits[0, -1].save()
+
+scaling = c_attn.scaling["default"]           # lora_alpha / r
+assert type(adapted._module).__name__ == "GPT2LMHeadModel"        # attached in place, not wrapped
+assert torch.allclose(total, base_part + scaling * lora_part, atol=1e-5)
+assert torch.equal(base_logits, plain_logits) and adapted.adapters_enabled
+print(f"largest logit change from the adapter: {float((adapted_logits - base_logits).abs().max()):.2f}")
+```
+
+```
+largest logit change from the adapter: 5.22
+```
+
+- **`lora_B.default.output` is the adapter's contribution before scaling.** The
+  module's output is `base_layer.output + (lora_alpha / r) · lora_B.output`.
+- **While the adapter is off its own modules do not run.** Reading
+  `lora_B.default.output` then raises `OutOfOrderError`. `base_layer` runs in
+  both states.
+- **Switch between traces.** Called inside a trace body, `disable_adapters()`
+  stays in force after the trace. For a base row and an adapted row in one
+  forward pass, assign `base_layer.output` to `output` on every adapted layer
+  inside the base row's invoke.
+- **Attaching changes no `requires_grad` flag of the base model**, and neither
+  does switching or removing, so gradients with respect to activations work as
+  on the base model. The adapter's own parameters arrive frozen.
+- **On a half-precision model the adapter is held in float32**, so
+  `lora_B.default.output` is float32 where the layer's output is in the model's
+  dtype. `autocast_adapter_dtype=False`, on the constructor or `load_adapter`,
+  holds the adapter in the model's dtype.
+
+### Train and export
+
+An attached adapter trains through the same backward block. Set the flags first,
+on the loaded model (flags set before the weights load are lost). The adapter's
+parameters arrive frozen, and left that way the loop runs without an error and
+the adapter never moves. The base model's are as you left them, and left on,
+every backward fills `.grad` on every base weight. To save the result, write the
+adapter files yourself: `adapted._module.save_pretrained(dir)` is the
+transformers method and writes the whole model, base weights included.
+
+```python
+import tempfile
 from peft.utils import get_peft_model_state_dict
 from safetensors.torch import save_file
 
-lora_params = [p for name, p in adapted._module.named_parameters() if "lora_" in name]
-assert not any(p.requires_grad for p in lora_params)          # loaded for inference
-adapted.requires_grad_(False)                                 # the base, after dispatch
-for p in lora_params:
-    p.requires_grad_(True)
-optimizer = torch.optim.Adam(lora_params, lr=1e-3)
+for name, parameter in adapted.named_parameters():
+    parameter.requires_grad_("lora_" in name)                 # train the adapter and nothing else
+optimizer = torch.optim.Adam([p for p in adapted.parameters() if p.requires_grad], lr=1e-3)
 
+losses = []
 for _ in range(5):
     with adapted.trace(prompt):
         loss = -adapted.output.logits[0, -1].log_softmax(-1)[rome]
         with loss.backward():
             pass
+        tracked = nnsight.save(loss.item())
     optimizer.step()
     optimizer.zero_grad()
+    losses.append(tracked)
+assert losses[-1] < losses[0]
 
 export_dir = tempfile.mkdtemp()
 state = get_peft_model_state_dict(adapted._module)
-save_file({f"base_model.model.{k}": v.detach().contiguous() for k, v in state.items()},
+save_file({f"base_model.model.{key}": value.detach().contiguous() for key, value in state.items()},
           f"{export_dir}/adapter_model.safetensors")
 adapted._module.peft_config["default"].save_pretrained(export_dir)
 
-reloaded = TransformersModel("openai-community/gpt2", peft=export_dir, dispatch=True)
-c_attn = reloaded.transformer.h[0].attn.c_attn
-with adapted.trace(prompt):
-    trained_logits = adapted.output.logits.detach().save()
-with reloaded.trace(prompt):
-    base_part = c_attn.base_layer.output.detach().save()
-    lora_part = c_attn.lora_B.default.output.detach().save()
-    total = c_attn.output.detach().save()
-    reloaded_logits = reloaded.output.logits.detach().save()
-
-assert torch.equal(trained_logits, reloaded_logits)           # bit-identical round trip
-scaling = reloaded._module.transformer.h[0].attn.c_attn.scaling["default"]  # alpha / r
-assert torch.allclose(total, base_part + scaling * lora_part, atol=1e-5)
+reloaded = TransformersModel("openai-community/gpt2", task="text-generation",
+                             peft=export_dir, dispatch=True)
+with torch.no_grad(), adapted.trace(prompt):
+    trained_logits = adapted.output.logits.save()
+with torch.no_grad(), reloaded.trace(prompt):
+    reloaded_logits = reloaded.output.logits.save()
+assert torch.equal(trained_logits, reloaded_logits)           # the export is the trained adapter
 ```
 
-`lora_B.default.output` is the adapter's contribution **before** scaling: the
-module's output is `base_layer.output + (lora_alpha / r) · lora_B.output`. Scale it
-before comparing it with anything in the residual stream.
-
-## Evaluating an edit
-
-Changing the target prompt is the easy part and proves nothing. Three tests:
-
-**Efficacy** — does the target prompt produce the new answer? (Shown above.)
-
-**Generalization** — do paraphrases follow? An edit that only fires on the exact
-string is a lookup table, not knowledge.
-
-**Specificity** — is everything *else* unchanged? The test that fails most often
-and the one people skip.
-
-```python
-def predictions(texts, edited):
-    with model.trace() as tracer:
-        out = nnsight.save([])
-        for text in texts:
-            with tracer.invoke(text):
-                if edited:
-                    route_lora(model.transformer.h[9])
-                out.append(model.output.logits[0, -1].argmax())
-    return [model.tokenizer.decode(token) for token in out]
-
-paraphrases = [
-    "The Eiffel Tower is located in the city of",
-    "You can visit the Eiffel Tower in",
-    "The Eiffel Tower stands in",
-]
-unrelated = [
-    "The Colosseum is in the city of",
-    "The capital of Japan is",
-    "Water freezes at a temperature of",
-]
-
-for texts in (paraphrases, unrelated):
-    for text, before, after in zip(texts, predictions(texts, False), predictions(texts, True)):
-        flag = "   <-- COLLATERAL DAMAGE" if texts is unrelated and before != after else ""
-        print(f"{text!r:<45} {before!r:<9} -> {after!r}{flag}")
-```
-
-```
-'The Eiffel Tower is located in the city of'  ' Paris'  -> ' Rome'
-'You can visit the Eiffel Tower in'           ' London' -> ' Rome'
-'The Eiffel Tower stands in'                  ' the'    -> ' Rome'
-'The Colosseum is in the city of'             ' P'      -> ' Rome'   <-- COLLATERAL DAMAGE
-'The capital of Japan is'                     ' the'    -> ' Rome'   <-- COLLATERAL DAMAGE
-'Water freezes at a temperature of'           ' about'  -> ' -'   <-- COLLATERAL DAMAGE
-```
-
-The LoRA generalizes perfectly and is a catastrophe: trained on one prompt with
-no constraint on anything else, it learned "always say Rome". The targeted
-rank-one edit above passes the same test because its key is specific to the
-subject. For a trained adapter the fixes are the ones real editing methods use — train on a **set** of prompts, add a KL or L2 term
-pinning behavior on unrelated inputs, use the smallest rank and fewest layers
-that work, and stop at the efficacy you need. Report all three numbers.
-
-## Related guides
-
-- [causal-tracing](causal-tracing.md) — finding the layer worth editing
-- [nnsight](../SKILL.md) — `edit`, attaching modules, gradients
-- [model-steering](model-steering.md) — inference-time behavior change without touching weights
-- [debugging](debugging.md) — the in-place/autograd error above and others
-- [remote](remote.md) — training against NDIF
-- [tensor-parallel](tensor-parallel.md) — editing sharded (`DTensor`) weights
+The exported directory also loads with `PeftModel.from_pretrained`. Switching the
+adapter off and on keeps what was trained; removing it and loading it again
+reads the weights from the id.

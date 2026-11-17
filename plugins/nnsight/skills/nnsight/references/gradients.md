@@ -1,307 +1,181 @@
-# Gradients and Backward Passes
+# Gradients: Many Layers, Edits, Training Through the Model
 
-`with tensor.backward():` runs a **real backward pass interleaved with your code**,
-the same way `model.trace` interleaves the forward. Inside that block you can read
-and replace `.grad` on any tensor you captured during the forward.
+[SKILL.md](../SKILL.md) has the basic pattern and its four rules: capture in the
+forward, then inside `with metric.backward():` read `.grad` on the exact captured
+tensors, last layer first.
 
 ```python
 import torch
 import nnsight
 from nnsight import TransformersModel
 
-model = TransformersModel("openai-community/gpt2", dispatch=True)
+model = TransformersModel("openai-community/gpt2", task="text-generation", dispatch=True)
 prompt = "The Eiffel Tower is in the city of"
-paris = model.tokenizer.encode(" Paris")[0]
+paris = model.tokenizer.encode(" Paris", add_special_tokens=False)[0]
+n_layers = len(model.transformer.h)
 ```
 
-## The shape of every gradient experiment
+## When a `.grad` read fails
+
+The error names an object id where a module path would be:
+
+```
+OutOfOrderError: '139853884760112.grad.i0' was requested but the model already ran past it
+```
+
+It has three causes:
+
+- **gradients read in forward order.** The backward pass reaches the last layer
+  first, so read last layer first;
+- **`.grad` asked of a slice.** `hidden[0].grad` and `block.output[0].grad` are
+  new tensors that never receive a gradient. Ask the tensor you captured, and
+  slice the gradient;
+- **the tensor is not on the metric's path**: a branch computed off to the side,
+  or anything upstream of a value replaced by a fresh tensor
+  ([below](#replacements-and-the-graph)).
+
+## Every layer in one backward pass
 
 ```python
 with model.trace(prompt):
-    hidden = model.transformer.h[-1].output       # 1. capture during the forward
-    metric = model.output.logits[0, -1, paris]    # 2. build a scalar metric
+    resid = [block.output for block in model.transformer.h]       # forward order
+    metric = model.output.logits[0, -1, paris]
+    with metric.backward():
+        grads = nnsight.save([])
+        for layer in reversed(range(n_layers)):                    # reverse order
+            grads.append(resid[layer].grad[:, -1].norm())
 
-    with metric.backward():                       # 3. backward, interleaved
-        grad = hidden.grad.clone().save()         # 4. read grads (reverse order)
-
-print(grad.shape)
+norms = [float(g) for g in reversed(grads)]                        # back to layer order
+assert len(norms) == n_layers and min(norms) > 0
 ```
 
-Four rules, and every gradient bug is one of them:
-
-1. **Capture forward tensors before the backward block.** The forward is over once
-   autograd runs; reading `.output` inside the backward block raises
-   `OutOfOrderError`.
-2. **Read `.grad` in reverse-forward order** — last layer first.
-3. **Ask for `.grad` on the exact tensor you captured**, not a slice of it.
-   `hidden.grad` works; `hidden[0].grad` is a different tensor and raises.
-4. **`.grad` lives on tensors, not modules.** There is no `module.output.grad`
-   shortcut that skips capturing the tensor first.
-
-No `requires_grad_(True)` is needed for activations — they are non-leaf tensors
-already in the graph. The call is a no-op on them: a captured `.output` is already
-`requires_grad=True, is_leaf=False`, and calling it changes nothing. Only a leaf
-you build yourself needs it — an integrated-gradients baseline, a steering vector
-under an optimizer.
-
-A gradient is readable only while the block is open. Afterwards `t.grad` is `None`
-again, with nothing but PyTorch's non-leaf warning to say so, so `.save()` what you
-want inside.
-
-### When not to use the block
-
-Rules 2 and 3 exist because the block runs interleaved. If you only want to *read*
-gradients, `retain_grad()` plus a plain `loss.backward()` after the trace gets
-byte-identical numbers under no ordering rule at all:
+To read gradients with no ordering rule, retain them and call plain
+`backward()` after the trace. This holds every `.grad` in memory, which the
+interleaved block does not:
 
 ```python
 with model.trace(prompt):
     refs = nnsight.save([])
-    for i in range(len(model.transformer.h)):
-        hidden = model.transformer.h[i].output
-        hidden.retain_grad()                  # forward order, any order
+    for block in model.transformer.h:
+        hidden = block.output
+        hidden.retain_grad()
         refs.append(hidden)
-    loss = model.output.logits.sum().save()
+    loss = model.output.logits[0, -1, paris].save()
 
-loss.backward()                               # outside the trace, plain PyTorch
-retained = [r.grad[:, -1, :].norm().item() for r in refs]
-assert all(x > 0 for x in retained)
+loss.backward()
+assert all(float(r.grad[:, -1].norm()) > 0 for r in refs)
+model.zero_grad(set_to_none=True)
 ```
 
-It materializes and holds every `.grad`, which the interleaved block does not. Use
-`with metric.backward():` when you want to edit a gradient mid-pass, or when you
-want only a few of them.
+## Editing a gradient, and several backward passes
 
-## Per-layer saliency
-
-The canonical layer-importance sweep. Capture every layer's residual in forward
-order, then read gradients in reverse:
-
-```python
-n_layers = len(model.transformer.h)
-
-with model.trace(prompt):
-    resid = [model.transformer.h[i].output for i in range(n_layers)]   # forward order
-    metric = model.output.logits[0, -1, paris]
-
-    with metric.backward():
-        grads = nnsight.save([])
-        for i in reversed(range(n_layers)):                            # reverse order
-            grads.append(resid[i].grad[:, -1, :].norm())
-
-norms = [g.item() for g in reversed(grads)]
-assert len(norms) == n_layers and min(norms) > 0
-for i, g in enumerate(norms):
-    print(f"layer {i:2d}  ||grad|| = {g:.4f}")
-```
-
-## Input × gradient
-
-Attribution that weights each activation by its own gradient — one number per
-position, the standard saliency map:
-
-```python
-with model.trace(prompt):
-    embeds = model.transformer.wte.output
-    metric = model.output.logits[0, -1, paris]
-    with metric.backward():
-        attribution = (embeds * embeds.grad).sum(dim=-1).save()
-
-tokens = [model.tokenizer.decode([i]) for i in model.tokenizer(prompt).input_ids]
-for token, score in zip(tokens, attribution[0].tolist()):
-    print(f"{token!r:20} {score:+.3f}")
-```
-
-## Editing gradients mid-backward
-
-Assigning to `.grad` replaces what flows further back — useful for gradient
-surgery, blocking paths, or scaling a component's contribution:
+Assigning to `.grad` replaces what flows further back:
 
 ```python
 with model.trace(prompt):
     early = model.transformer.h[2].output
     late = model.transformer.h[9].output
-    metric = model.output.logits[0, -1, paris]
-
-    with metric.backward():
-        late.grad = late.grad * 0        # cut the gradient path at layer 9
-        blocked = early.grad.norm().save()
-
-assert blocked.item() == 0.0             # nothing flows past the cut
-print(blocked.item())
-```
-
-## Several backward passes
-
-Pass `retain_graph=True` to every backward but the last:
-
-```python
-with model.trace(prompt):
-    hidden = model.transformer.h[-1].output
     logits = model.output.logits
 
-    with logits[0, -1, paris].backward(retain_graph=True):
-        g1 = hidden.grad.clone().save()
-    with (logits[0, -1, paris] * 3).backward():
-        g2 = hidden.grad.clone().save()
+    with logits[0, -1, paris].backward(retain_graph=True):   # every pass but the last
+        late.grad = late.grad * 0                            # cut the path at layer 9
+        blocked = early.grad.norm().save()
+    with logits[0, -1, paris].backward():
+        full = early.grad.norm().save()
 
-assert torch.allclose(g2, g1 * 3, atol=1e-4)
+assert blocked.item() == 0.0 and full.item() > 0
 ```
 
-## Gradients per invoke
+In a batched trace each invoke reads the gradient of its own rows. The block
+works on any tensor with a live graph, no model needed
+(`with loss.backward(): g = x.grad.save()`), and a bare `tensor.backward()` with
+no `with` is plain PyTorch.
 
-Each invoke sees the gradient for its own rows, even though they share one forward
-and one backward:
+## Training a tensor through the model
 
-```python
-with model.trace() as tracer:
-    with tracer.invoke("The Eiffel Tower is in"):
-        pass
-    with tracer.invoke("The Great Wall is in"):
-        hidden = model.transformer.h[-1].output
-        with model.output.logits.sum().backward():
-            grad = hidden.grad.norm().save()
-
-print(round(grad.item(), 3))
-```
-
-## Standalone backward, no model
-
-The context manager works on any tensor whose graph is alive:
+An intervention is ordinary tensor arithmetic, so gradients flow through it to
+anything you add. Freeze the model first: otherwise the backward fills `.grad`
+on every weight.
 
 ```python
-x = torch.tensor([2.0, 3.0], requires_grad=True)
-loss = (x * x).sum()
-with loss.backward():
-    g = x.grad.save()
-
-print(g)          # tensor([4., 6.])
-```
-
-A bare `tensor.backward()` with no `with` block is untouched vanilla PyTorch.
-
-## Gradients through an intervention
-
-Interventions are ordinary tensor ops, so gradients flow through them. This is how
-you optimize a steering vector or a soft prompt against a frozen model:
-
-```python
-direction = torch.zeros(768, requires_grad=True)
+model.requires_grad_(False)
+direction = torch.zeros(768, device=model.device, requires_grad=True)
 optimizer = torch.optim.SGD([direction], lr=1.0)
 
 losses = []
 for _ in range(3):
     with model.trace(prompt):
-        model.transformer.h[6].output[:, -1, :] += direction.to(model.device)
+        model.transformer.h[6].output[:, -1, :] += direction
         loss = -model.output.logits[0, -1, paris]
         with loss.backward():
             pass
-        tracked = nnsight.save(loss.item())
+        value = nnsight.save(loss.item())
     optimizer.step()
     optimizer.zero_grad()
-    losses.append(tracked)
-    print(f"loss {tracked:.3f}  ||v|| {direction.norm().item():.4f}")
+    losses.append(value)
 
-assert losses[0] > losses[-1] and direction.norm() > 0     # the vector is learning
+assert losses[0] > losses[-1] and direction.norm() > 0
+model.requires_grad_(True)
 ```
 
-The model's own parameters are untouched — only `direction` receives updates.
-
-**Replace, don't write through, when the new value is computed from the old.**
+**Replace, do not write through, when the new value is computed from the old.**
 `module.output = f(module.output)` and `module.output += delta` differentiate.
 `module.output[:] = f(module.output)` raises `RuntimeError: one of the variables
 needed for gradient computation has been modified by an inplace operation`
 whenever `f`'s backward needs the tensor being overwritten, as a LoRA's
-`hidden + lora(hidden)` does. `output[:] = output * 2` happens to pass because
-scaling by a constant saves nothing, so don't rely on it. A replacement built from
-nothing cuts the graph instead
-([below](#replacements-and-the-graph)).
+`hidden + lora(hidden)` does.
 
-**Edit at the point you intercept.** Reading a *later* module's output advances the
-forward past the earlier one, and an in-place write after that point lands on a
-value the model has already consumed:
+**Edit at the point you intercept.** An in-place write to a tensor after a later
+module was read is a silent no-op on a forward-only trace
+([SKILL.md](../SKILL.md), trap 2). With a backward pass the same code raises that
+`RuntimeError` instead, naming `version 1; expected version 0`.
 
-```python
-with model.trace(prompt):
-    hidden = model.transformer.h[6].output
-    later = model.transformer.h[8].output    # the forward is now past layer 6
-    hidden *= 2                              # too late
-    logits_late = model.output.logits.save()
+## Replacements and the graph
 
-with model.trace(prompt):
-    logits_plain = model.output.logits.save()
+A replacement has to descend from the value it replaces if gradients are to pass
+it. `output = torch.zeros_like(output)` hands the model a tensor autograd has
+never seen:
 
-assert torch.equal(logits_late, logits_plain)   # the late write did nothing
-```
+- replace a whole block's `.output` and a later `.grad` read upstream fails with
+  the object-id `OutOfOrderError` above;
+- replace a submodule the residual stream routes around (an MLP, an attention)
+  and upstream `.grad` reads **succeed**, silently missing that module's path.
+  A detached copy of the same values does this too: the forward is bit-identical
+  and the gradient is wrong.
 
-On a forward-only trace it is a silent no-op — no error, no effect. Add a backward
-and the same code raises instead:
+`output[:] = 0` writes through the existing tensor and keeps the graph. So does
+any replacement built from the old value (`output * 0`, `output + steering`).
 
 ```python
-with model.trace(prompt):
-    hidden = model.transformer.h[6].output
-    later = model.transformer.h[8].output
-    hidden *= 2
-    with model.output.logits.sum().backward():
-        grad = later.grad.norm().save()
-# RuntimeError: one of the variables needed for gradient computation has been
-# modified by an inplace operation: [torch.cuda.FloatTensor [1, 10, 768]], which
-# is output 0 of Mul, is at version 1; expected version 0 instead.
+def upstream_grad(replace):
+    with model.trace(prompt):
+        early = model.transformer.h[2].output
+        mlp = model.transformer.h[5].mlp
+        mlp.output = replace(mlp.output)
+        with model.output.logits[0, -1, paris].backward():
+            grad = early.grad.clone().save()
+    return grad
+
+kept = upstream_grad(lambda out: out * 1.0)
+cut = upstream_grad(lambda out: out.detach().clone())
+assert not torch.allclose(kept, cut)          # same forward, different gradient
 ```
-
-Moving `hidden *= 2` above the `h[8]` read fixes both.
-
-### Replacements and the graph
-
-**A replacement has to descend from the value it replaces if you want gradients.**
-`output = torch.zeros_like(output)` hands the model a tensor autograd has never
-seen and cuts the graph there, with two different consequences:
-
-- Replace a whole block's `.output` (every path severed) and a later `.grad` read
-  on anything captured upstream fails with an object id for a location:
-  `OutOfOrderError: '139932764543792.grad.i0' was requested but the model already
-  ran past it`.
-- Replace a bypassed submodule's `.output` (an MLP or attention — the residual
-  stream routes around it) and upstream `.grad` reads **succeed**, silently
-  missing that module's path. Even a detached copy of the very same values leaves
-  the forward bit-identical and the upstream gradient wrong, with no warning.
-
-`output[:] = 0` writes through the existing tensor and keeps the graph; so does any
-replacement built from the old value (`output = output * 0`,
-`output = output + steering`). A long
-number where an error should name a module path means this happened; with no
-error, audit fresh-tensor replacements for a silently partial gradient.
 
 ## Where gradients are unavailable
 
-**Inside `model.generate()`.** HuggingFace decorates `GenerationMixin.generate`
-with `@torch.no_grad()`, so activations captured in a generation trace come back
-with `requires_grad=False` and opening a backward block raises
-`NotImplementedError: This tensor does not require grad, so a backward session
-cannot produce gradients`. `torch.enable_grad()` around the call does not override
-the decorator. Drive the decoding yourself instead — a `model.trace` per step over
-the growing prefix, with the backward inside each.
+- **Inside `model.generate`.** HuggingFace runs `generate` under
+  `torch.no_grad()`, so a backward block raises `NotImplementedError: This tensor
+  does not require grad, so a backward session cannot produce gradients`. Drive
+  the decoding yourself: one `model.trace` per step over the growing prefix.
+- **On a frozen model with nothing trainable in the path.** The same
+  `NotImplementedError`. Once you inject a tensor that requires grad, gradients
+  exist from that point downstream; `.grad` on an activation upstream of it
+  raises `RuntimeError: cannot register a hook on a tensor that doesn't require
+  gradient`.
+- **Outside the backward block.** `.grad` is `None` there, with only PyTorch's
+  non-leaf warning to say so.
+- **On an `int8`-quantized model with a large loss**, gradients overflow to NaN:
+  [quantization](quantization.md).
 
-**On a frozen model.** After `model.requires_grad_(False)` the same
-`NotImplementedError` appears, because no parameter is in the graph. Inject a
-tensor that does require grad — a steering vector, an adapter — and gradients exist
-from that point downstream; reading `.grad` on an activation *upstream* of the
-injection raises `RuntimeError: cannot register a hook on a tensor that doesn't
-require gradient`.
-
-**After the metric's path ends.** Asking for the `.grad` of a tensor autograd never
-reaches, such as a branch computed off to the side, raises `OutOfOrderError` at the
-end of the run rather than hanging.
-
-## Where this leads
-
-- **Attribution patching** — gradients times clean/corrupt activation differences,
-  a linear approximation of activation patching that costs 2 passes instead of N.
-  See the [attribution-patching guide](attribution-patching.md).
-- **Integrated gradients** — average `input × grad` along a path from a baseline;
-  a loop of the pattern above.
-
-## Related
-
-- [access-and-modify.md](access-and-modify.md) — capturing the forward values
-- [execution-model.md](execution-model.md) — why ordering matters
+Gradient-times-difference attribution over a clean and a corrupt run is the
+[attribution-patching guide](attribution-patching.md).
