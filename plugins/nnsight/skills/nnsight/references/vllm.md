@@ -10,10 +10,14 @@ engine. It has no gradients, `model.scan()` or image inputs
 pip install "nnsight[vllm]"
 ```
 
-The extra pins the vLLM release nnsight supports; another vLLM installed over it
-can be wrong without an error. Every example on this page needs a CUDA GPU and
-that install. They use `HuggingFaceTB/SmolLM2-135M-Instruct`, a Llama-style trunk,
-so what they show about layer outputs holds for Llama, Qwen and Mistral.
+nnsight targets vLLM 0.33: the extra pins `vllm>=0.33,<0.34`, and another vLLM
+installed over it can be wrong without an error. That vLLM needs Python 3.11 or
+later, and its wheel is built for CUDA 13, so on an NVIDIA driver too old for
+CUDA 13 torch finds no GPU.
+
+Every example on this page needs a CUDA GPU and that install. They use
+`HuggingFaceTB/SmolLM2-135M-Instruct`, a Llama-style trunk, so what they show
+about layer outputs holds for Llama, Qwen and Mistral.
 
 - [serving](vllm-serving.md): open it to run `nnsight-serve`, to trace or edit
   from a client with no GPU (`serve=url`), or to stream tokens from the async
@@ -78,8 +82,8 @@ forces the token the engine continues from.
 `mlp.gate_up_proj` are fused projections, and every linear layer returns
 `(value, bias)`, so its value is `.output[0]`. A decoder layer's `.input` is the
 positions tensor: `args, _ = layer.inputs` gives `(positions, hidden, residual)`,
-and `args[1] + args[2]` is the stream entering the layer (`residual` is `None` at
-layer 0). `print(model)` shows the tree, without `dispatch=True` too;
+and `args[1] + args[2]` is the stream entering the layer. `print(model)` shows
+the tree, without `dispatch=True` too;
 `scripts/inspect_model.py` describes the transformers tree. Attention heads are
 slices of `self_attn.o_proj.input`, as in
 [access-and-modify](access-and-modify.md).
@@ -98,9 +102,10 @@ the first trace. Other keywords are vLLM engine arguments
   finished its bootstrapping phase`.
 - **Leave the engine's mode to nnsight.** It runs eagerly and serves every
   location unless you declare `taps=`
-  ([throughput](vllm-throughput-and-architectures.md)), and it sets prefix
-  caching and chunked prefill off and `VLLM_USE_V2_MODEL_RUNNER=0` itself. The
-  [error table](#errors-and-warnings) shows what overriding them gets you.
+  ([throughput](vllm-throughput-and-architectures.md)), and it builds with prefix
+  caching and chunked prefill off. Leave `VLLM_USE_V2_MODEL_RUNNER` unset as
+  well: `0` selects a runner nnsight does not instrument. The
+  [error table](#errors-and-warnings) shows what overriding these gets you.
 - **Prompts.** A string, a list of token ids, a tokenizer's output or a vLLM
   prompt dict. A chat messages list is read as several prompts (`ValueError:
   Multiple prompts per invoke are not supported`): pass
@@ -145,20 +150,18 @@ assert tokens == list(result.outputs[0].token_ids) and tokens[2] == 3_000
 
 ## Logit lens
 
-`model.lm_head(h)` raises `RuntimeError: LMHead's weights should be used in the
-sampler`. Decode through the model's own logits path, `logits_processor`.
+`model.lm_head(h)` raises `LMHead's weights should be used in the sampler`.
+Decode through the model's own logits path, `logits_processor`.
 `norm(h)` returns a tensor; `norm(h, residual)` is the fused add and returns a
 pair.
 
 ```python
-final = len(model.model.layers) - 1
 with model.trace("The Eiffel Tower is in the city of", temperature=0.0, max_tokens=1):
-    out = model.model.layers[final].output
+    out = model.model.layers[20].output
     h = (out[0] + out[1])[-1:]                         # residual stream, last token: [1, hidden]
     lens = model.logits_processor(model.lm_head, model.model.norm(h)).argmax(-1).item().save()
-    token = model.samples.item().save()
 
-assert lens == token          # wiring check: after the last layer the lens is the model's own prediction
+print(model.tokenizer.decode(lens))
 ```
 
 ## One prompt per invoke
@@ -223,9 +226,9 @@ it. Slice the donor to the rows you write.
 
 Sampling keywords on `trace(...)` fill in what an invoke did not name; whatever an
 invoke names wins. `n=k` fans one prompt into `k` sequences and the block runs
-once per sequence, so every saved name comes back as a list of `k` values.
-`tracer.result` is the exception: one `RequestOutput` whose `.outputs[i]` is
-sequence `i`.
+once per sequence, so every saved name comes back as a list of `k` values in
+sequence order. That includes `tracer.result`: `result[i].outputs` holds sequence
+`i` alone.
 
 ```python
 with model.trace("My favourite colour is", temperature=0.9, seed=0, n=3, max_tokens=4, ignore_eos=True) as tracer:
@@ -235,7 +238,7 @@ with model.trace("My favourite colour is", temperature=0.9, seed=0, n=3, max_tok
     result = tracer.result.save()
 
 assert len(caps) == 3 and len(caps[1]) == 4      # one list per sequence, four steps each
-assert len(result.outputs) == 3                  # one RequestOutput, three completions
+assert len(result) == 3 and [o.index for o in result[1].outputs] == [1]
 ```
 
 ## Sweeps: `model.edit()`
@@ -264,8 +267,10 @@ assert feats.shape == (200, 576) and len(texts) == 200
 ```
 
 The same sweep as one invoke per prompt serializes the block once per invoke, and
-the model with it when the block reads `model.logits`, `model.samples` or
-`tracer.result`: prefer the edit.
+the model's whole envoy tree with it when the block names `model`
+(`model.logits`, `model.samples`, `model.model.layers[i]`) or reads
+`tracer.result`. Prefer the edit, and where you do trace a sweep bind the layer
+outside the block (`layer = model.model.layers[20]`).
 
 - `edit.clear()` removes one edit, `model.clear_edits()` all of them. Afterwards
   an output has no `.saves` attribute at all: read `getattr(output, "saves", {})`.
@@ -291,25 +296,26 @@ model = VLLM("HuggingFaceTB/SmolLM2-135M-Instruct", dispatch=True, enable_lora=T
 adapter = LoRARequest(lora_name="mine", lora_int_id=1, lora_path="/path/to/adapter")
 model.vllm_entrypoint.llm_engine.add_lora(adapter)    # load it now; raises if it cannot
 
-with model.trace(temperature=0.0, max_tokens=1) as tracer:
-    with tracer.invoke("The Eiffel Tower is in the city of", lora_request=adapter):
+with model.trace(temperature=0.0, max_tokens=1, lora_request=adapter) as tracer:
+    with tracer.invoke("The Eiffel Tower is in the city of"):                      # the trace's adapter
         adapted = model.logits.save()
-    with tracer.invoke("The Eiffel Tower is in the city of"):         # no adapter: the base model
+    with tracer.invoke("The Eiffel Tower is in the city of", lora_request=None):   # opts out: the base model
         base = model.logits.save()
 
 assert not torch.equal(adapted, base)         # a trained adapter moves the logits
 ```
 
 - **Load the adapter with `add_lora` first.** A request naming an adapter the
-  engine cannot load (a missing path, a rank over `max_lora_rank`, default 16)
-  kills the engine with `EngineDeadError`. `add_lora` raises an ordinary exception
-  with the real message, and the engine keeps serving.
-- **`lora_request=` goes on the request**: a `tracer.invoke(...)`, a
-  `trace(prompt, ...)` or a plain `model.generate(...)`. A prompt-less
-  `trace(lora_request=...)` raises `TypeError: unexpected trace argument
-  'lora_request'`.
+  engine cannot load (a missing path, a rank over `max_lora_rank`) kills the
+  engine with `EngineDeadError`. `add_lora` raises an ordinary exception with the
+  real message, and the engine keeps serving.
+- `lora_request=` goes on `trace`, `invoke` or a plain `generate`. On `trace` it
+  is the default for its invokes; an invoke that names its own, `None` included,
+  keeps it.
+- `max_lora_rank` (vLLM's default is 16) has to cover the adapter's rank;
+  `max_loras` (default 1) is how many different adapters one step can hold.
 - A LoRA-wrapped layer's `.output` is the adapted value. Over `serve=`, start the
-  server with `--enable-lora True`; the path is read on the server.
+  server with `--enable-lora True`; `lora_path` is read on the server.
 
 ## `.skip()` can kill the engine
 
@@ -334,10 +340,10 @@ module's output instead (`model.model.layers[L].mlp.output[:] = 0`).
   [diffusion-and-multimodal](diffusion-and-multimodal.md).
 - **Pipeline and data parallelism, speculative decoding.**
   `pipeline_parallel_size > 1` builds and then fails every trace with
-  `RuntimeError: UnknownPersistentIdError: Module:...`; `data_parallel_size > 1`
-  and `speculative_config=` raise `NotImplementedError: ... is not supported on
-  an nnsight engine` at construction. Shard with `tensor_parallel_size`, or build
-  one `VLLM` per GPU.
+  `RuntimeError: UnknownPersistentIdError: Module:...`; `data_parallel_size > 1`,
+  `speculative_config=` and `enable_batch_sharded_sampling=True` raise
+  `NotImplementedError: ... is not supported on an nnsight engine` at
+  construction. Shard with `tensor_parallel_size`, or build one `VLLM` per GPU.
 
 ## Errors and warnings
 
@@ -345,7 +351,8 @@ An exception in a block ends its own request only. It is re-raised in your proce
 as a `RuntimeError` whose message starts with the original type and message and
 carries an "Intervention traceback" at your line: `1 / 0` arrives as
 `RuntimeError: ZeroDivisionError: division by zero`. Catch `RuntimeError` and
-match on the text. **Warnings do not come back**: the engine's
+match on the text. A trace that raises binds none of its saved names, not even
+another invoke's. **Warnings do not come back**: the engine's
 `(EngineCore pid=...)` process prints them.
 
 | Message contains | Cause and fix |
@@ -353,7 +360,8 @@ match on the text. **Warnings do not come back**: the engine's
 | `is not a tap on this engine` | A block read a module location that is not in `taps=`; its request's `RuntimeError`. Add the location, or build without `taps` |
 | `prompt was split across steps by chunked prefill` | The engine was built with `enable_chunked_prefill=True`; that request's `RuntimeError`. Drop the flag, or raise `max_num_batched_tokens` |
 | `enforce_eager=... contradicts taps=[...]` | `ValueError` when the engine is built: its mode follows from `taps`. Drop `enforce_eager` |
-| `VLLM_USE_V2_MODEL_RUNNER='1' selects vLLM's V2 GPU model runner` | `NotImplementedError` when the engine is built: the variable is set in your environment. Unset it |
+| `vLLM chose its V1 model runner for this engine` | In the `(EngineCore pid=...)` log of a build that failed: `VLLM_USE_V2_MODEL_RUNNER=0` is set, or an engine option only vLLM's older runner supports was passed. Unset the variable, or drop the option the log names |
+| `records full CUDA graphs, which no tap can be registered in` | In the log of a build that failed: a `compilation_config` asking for full graphs on a `taps=` engine. Drop its `cudagraph_mode` |
 | `EngineDeadError` | The engine process died, with every in-flight request: a `.skip()`, a replacement with the wrong rows, or a `lora_request` it could not load. The cause is in the `(EngineCore pid=...)` log. Build a new engine |
 | `Can't pickle`, `cannot pickle 'generator' object`, `Can't get local object` | That request's `RuntimeError`: saved values come home through plain `pickle`, which cannot carry a lambda, a generator or an instance of a locally defined class. Save tensors, numbers and plain containers |
 | `Engine core initialization failed` | The build failed in the worker; the real message is in the `(EngineCore pid=...)` lines above it. Common: a `.source` operation in `taps=` that the forward does not have, and on a shared GPU `Error in memory profiling` (build again) |

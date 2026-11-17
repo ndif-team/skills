@@ -60,20 +60,22 @@ if __name__ == "__main__":
   next step. Un-cloned decode entries all come back holding the last step's
   values, while the prefill entry, a separate buffer, survives: the list looks
   partly right and nothing warns.
+- **Tapped graphs are piecewise.** A tapped engine sets
+  `cudagraph_mode="PIECEWISE"`; a `compilation_config` that asks for full graphs
+  fails the engine build.
 
 ## Tensor parallelism
 
 `tensor_parallel_size=N` shards the model over N GPUs, and a block does not
 change: nnsight gathers a sharded value into the whole tensor before the block
-reads it and re-splits what the block writes. N must divide the number of
-attention heads. This example needs two GPUs.
+reads it and re-splits what the block writes. This example needs two GPUs.
 
 ```python
 import nnsight
 from nnsight.modeling.vllm import VLLM
 
 if __name__ == "__main__":
-    model = VLLM("Qwen/Qwen2.5-0.5B-Instruct", dispatch=True, tensor_parallel_size=2,     # 14 heads
+    model = VLLM("Qwen/Qwen2.5-0.5B-Instruct", dispatch=True, tensor_parallel_size=2,     # 14 heads: splits in two
                  gpu_memory_utilization=0.2, max_model_len=1024)
 
     with model.trace("The capital of France is", temperature=0.0, max_tokens=1):
@@ -156,7 +158,5 @@ if __name__ == "__main__":
 ```
 
 The recurrent state lives in vLLM's state cache, not in any module output, so it
-is not a location. `taps=` works on these models: nnsight builds a tapped hybrid
-or attention-free engine with `cudagraph_mode="FULL_DECODE_ONLY"`, because a full
-graph captured over a recurrent layer miscomputes silently. A `compilation_config`
-of your own that sets `cudagraph_mode` overrides that, so do not set it.
+is not a location. `taps=` works on these models: a tapped engine matches the
+eager one exactly.

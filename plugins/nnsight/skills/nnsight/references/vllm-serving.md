@@ -52,17 +52,18 @@ assert tuple(resid.shape) == (576,) and resid.device.type == "cpu"
 print(model.tokenizer.batch_decode(top[0]), result.outputs[0].text)
 ```
 
-- Saved names are bound after the block as on a local engine, and tensors arrive
-  on the CPU. Only saved values come back: save `tracer.result` for the text.
-- **Give each invoke its own names.** Over `serve=`, a name saved in several
-  invokes keeps only the last invoke's value, and a container saved above the
-  invokes is not merged. With `n > 1` only the first sequence's values come back.
+- Saved names are bound after the block as on a local engine, a list for a name
+  saved in several invokes or under `n > 1`, and tensors arrive on the CPU. Only
+  saved values come back: save `tracer.result` for the text.
+- **Save inside the invokes.** A `nnsight.save(...)` in the trace body above them
+  fails the served trace with `RuntimeError: ValueError: save() was called
+  outside a trace`.
 - **`serve=` is for `trace` and `edit`.** `model.generate(..., serve=url)` outside
   a `with` is not routed and tries to build a local engine.
-- An error in the block arrives as the `RuntimeError` of the vLLM guide. A
-  transport failure is `ConnectionError: nnsight-serve returned <status>:
-  <detail>`, such as 401 for a wrong key: with `--api-key SECRET` on the server,
-  pass `api_key="SECRET"` beside `serve=`.
+- An error in the block arrives as the `RuntimeError` of the vLLM guide, and the
+  trace binds nothing. A transport failure is `ConnectionError: nnsight-serve
+  returned <status>: <detail>`, such as 401 for a wrong key: with
+  `--api-key SECRET` on the server, pass `api_key="SECRET"` beside `serve=`.
 
 ## An edit that every request runs
 
