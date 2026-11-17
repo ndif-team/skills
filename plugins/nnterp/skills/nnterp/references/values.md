@@ -353,7 +353,7 @@ weight |= {("mlp", i): after[i + 1] for i in range(model.num_layers)}
 ```
 
 SmallDoge's Doge-20M, -40M and -260M load and run (Doge-160M and -320M do not:
-size mismatches), and Doge-40M-MoE from transformers 5.18. **ZAYA** merges each
+size mismatches), and so does Doge-40M-MoE. **ZAYA** merges each
 sublayer's output `o` into the stream `r` as
 `(o + hidden_states_bias) * hidden_states_scale + (r + residual_bias) * residual_scale`
 (each merge's parameters on `layers[i].post_attention_residual_scale._module` /

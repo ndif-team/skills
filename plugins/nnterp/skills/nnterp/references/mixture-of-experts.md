@@ -163,7 +163,7 @@ place included, and `model.rank(name, i)` sorts a list of reads by it
 | Laguna | `expert_outputs.sum(2) * routed_scaling_factor == routed_output` |
 | Qwen2-MoE, Qwen3-Next, Qwen3.5-MoE | `shared_expert_output` is the sigmoid-gated product; `shared_experts.output` is ungated |
 | Nemotron-H with `moe_latent_size` | `routed_output` is the latent up-projection's output; `expert_outputs` unavailable |
-| Doge | all six unavailable: `router_gate` gives two sets of product-key logits per token, not one per expert, and the experts are embedding rows (the mixture runs from transformers 5.18). The routing views `router_gate`'s output as `(2, batch * seq, -1)`, so on the `is_moe` checkpoints a prompt's outputs depend on its length and on the other prompts in the trace: trace clean and corrupt prompts separately |
+| Doge | all six unavailable: `router_gate` gives two sets of product-key logits per token, not one per expert, and the experts are embedding rows. The routing views `router_gate`'s output as `(2, batch * seq, -1)`, so on the `is_moe` checkpoints a prompt's outputs depend on its length and on the other prompts in the trace: trace clean and corrupt prompts separately |
 
 The nnterp repo pages behind this file: `docs/usage/mixture-of-experts.md`,
 `docs/patterns/expert-ablation.md`.

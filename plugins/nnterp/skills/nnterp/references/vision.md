@@ -238,7 +238,7 @@ assert not torch.equal(edited, vlogits)
   16 x 4096 x 4096 pattern for autograd unless it runs under `torch.no_grad()`.
 
 Read order is the forward's: `vision.image_token_mask` first (it comes off the inputs, like
-`input_ids`; under `generate` on transformers 5.18 and later it comes after the tower,
+`input_ids`; under `generate` it comes after the tower,
 [below](#under-generate)), then `token_embeddings` (the wrapper embeds the ids before it runs
 the tower; under `generate`, after the tower and the mask), then `vision.patch_embeddings`, the tower's blocks (a block's attention
 interior before its `layer_output`), `vision.tower_output`, `projector`, then
@@ -261,12 +261,12 @@ with vlm.trace() as tracer:
 The tower runs once, for the prompt. `vision.image_token_mask` is `[batch, prompt_len]`
 on step 0 and `[batch, 1]`, all false, on every decode step; `image_features` and the
 tower's values have one occurrence, step 0's, so read them under `tracer.iter[0]`.
-On transformers 5.18 and later `generate` encodes the images before the first forward
+`generate` encodes the images before the first forward
 (it hands the model `mm_encoder_outputs`), so there the tower's values come *before*
-`vision.image_token_mask`, which is read off the root's inputs; before 5.18, and on
+`vision.image_token_mask`, which is read off the root's inputs; on
 Qwen3.5 and Qwen3.5-MoE, whose classes do not list images among their `input_modalities`,
 the mask comes first. `vision.image_features`, at the scatter, is after both either way,
-so the mask and the features read in that order on every version; read the mask and a
+so the mask and the features read in that order on every wrapper; read the mask and a
 tower value in separate generates. An edit before any step lands on the prompt call. The per-step table is in
 [generation-and-helpers.md](generation-and-helpers.md#images-under-generate).
 
@@ -399,8 +399,8 @@ scatters, the family's `ROOT_SCATTER`.
 | `ministral3` | Mistral 3 (`mistral3`, Ministral 3) | Pixtral |
 | `qwen2_vl_text`, `qwen2_5_vl_text`, `qwen3_vl_text`, `qwen3_vl_moe_text` | Qwen2-VL (`qwen2_vl`), Qwen2.5-VL (`qwen2_5_vl`), Qwen3-VL (`qwen3_vl`), Qwen3-VL-MoE (`qwen3_vl_moe`) | the Qwen ViT |
 | `qwen3_5_text`, `qwen3_5_moe_text` | Qwen3.5 (`qwen3_5`), Qwen3.5-MoE (`qwen3_5_moe`) | the Qwen ViT |
-| `hyperclovax` | HyperCLOVA X Vision V2 (`hyperclovax_vision_v2`; transformers 5.18 and later) | the Qwen2.5-VL ViT (a `QwenVision`) at `model.model.vision_model`; `projector` is the linear `model.model.projector` after it |
-| `nemotron_h` | NemotronH Omni (`nemotron_h_omni`; transformers 5.18 and later) | RADIO (a `RadioVision`) at `model.vision_model`, every image's tokens in one row; `projector` is `model.multi_modal_projector` |
+| `hyperclovax` | HyperCLOVA X Vision V2 (`hyperclovax_vision_v2`) | the Qwen2.5-VL ViT (a `QwenVision`) at `model.model.vision_model`; `projector` is the linear `model.model.projector` after it |
+| `nemotron_h` | NemotronH Omni (`nemotron_h_omni`) | RADIO (a `RadioVision`) at `model.vision_model`, every image's tokens in one row; `projector` is `model.multi_modal_projector` |
 | `llama4_text` | Llama 4 (`llama4`) | Llama 4's ViT |
 | `gemma4_text` | Gemma 4 (`gemma4`) | Gemma 4's ViT |
 | `gemma4_unified_text` | Gemma 4 unified (`gemma4_unified`) | the encoder-free embedder |
