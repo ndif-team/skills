@@ -253,9 +253,9 @@ write is rotated for the position it lands at, as here. Three things differ:
   range(tokens))` is the `attention_queries` vLLM's attention layer receives, bit for bit, and
   outside a trace it raises `RuntimeError`. `positions` is `[tokens]`; on the M-RoPE rotary
   of the Qwen-VL text families a position is a text token's, the same on all three rows.
-- **Not served on vLLM's transformers backend** (OLMo, OLMo 2, SmolLM3, StarCoder2): the
-  rotary is a call inside a forward the backend rewrites at load, which nnsight cannot
-  instrument.
+- **Not served on the families vLLM runs through its transformers backend** (OLMo 2 and 3
+  and Pythia among them; `support()` gives this reason): the rotary is a call inside a
+  forward the backend rewrites at load, which nnsight cannot instrument.
 - **Not served under latent attention** (DeepSeek-V2/V3, Kimi-K2, GLM-4.7-Flash): vLLM
   rotates only each query head's rope slice and the shared rope key, inside its
   latent-attention layer, where `StandardizedTransformer` serves whole-head queries.
@@ -286,9 +286,9 @@ print(tuple(q_src.shape), torch.equal(moved[:, :, -1:], expected))
 # (1, 9, 6, 64) True
 ```
 
-HunYuan's and Llama 4's attention norm the queries and keys after the rotary on this engine
-too, so `attention_queries` is the norm of `rotate(...)` there; on Llama 4 both values, and
-`rotate`'s input and output, are in transformers' channel order.
+Llama 4's attention norms the queries and keys after the rotary on this engine too, so
+`attention_queries` is the norm of `rotate(...)` there, and both values, and `rotate`'s
+input and output, are in transformers' channel order.
 
 ## Requirement: eager attention
 
