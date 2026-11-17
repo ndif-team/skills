@@ -82,7 +82,7 @@ other command replaces it (`docker run --rm ndif/ndif version`), and
   resolution ask the Hub, so a boot deployment, `ndif deploy <repo>` and a
   first request all fail with `offline mode is enabled`. With no network, a
   `models.yaml` entry that gives both `model_key` and `size_bytes` loads from
-  the cache and serves; plain `ndif status` does not list it, `--verbose` does.
+  the cache and serves.
 - **A full `/tmp`**: `-e NDIF_RAY_TEMP_DIR=/ndifray -v /big/disk/ray:/ndifray`.
   Keep the path short. Ray puts Unix sockets under it, and past 107 bytes ray
   dies at start with `OSError: validate_socket_filename failed: AF_UNIX path
