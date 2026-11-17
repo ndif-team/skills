@@ -54,6 +54,8 @@ ndif export --stdout > models.yaml                       # the HOT set as a file
   key. With `--replica` a HOT replica is demoted to WARM when the node's
   host-RAM budget has room, and removed otherwise. `--all` reads the HOT set,
   so a model that is only WARM has to be named.
+- **`status`** lists COLD models by name with `--show-cold`, and `--watch` on
+  `status` or `queue` refreshes every two seconds.
 - **`export` is not a full snapshot.** It writes one entry per key with
   `model_key`, `dtype` and `actor_class`, plus `pinned`, `replicas`, `gpus` and
   the timeout where they are not the default. Padding, `size_bytes` and
@@ -74,8 +76,9 @@ models:
 ```
 
 Other fields: `revision`, `task`, `trust_remote_code`, `gpus`, `size_bytes`,
-`padding_bias`, `max_tp`, `actor_class`, `envoy_class`, `model_key`. An unknown
-field is dropped without a word. `ndif deploy -f models.yaml` adds what the
+`padding_bias`, `max_tp`, `actor_class`, `envoy_class` (the nnsight wrapper
+class, `TransformersModel` by default), `model_key`. An unknown field is
+dropped without a word. `ndif deploy -f models.yaml` adds what the
 file lists. `--sync` makes the cluster match it: every HOT key not in the file
 is evicted, pinned or not, surplus replicas are trimmed, and only the shortfall
 is deployed.
@@ -163,12 +166,12 @@ ask for it.
 - **Quantization needs `bitsandbytes` in the server's Python**, and the image
   does not install it: the load fails with `ImportError: Using bitsandbytes
   4-bit quantization requires bitsandbytes`. `docker exec ndif pip install
-  bitsandbytes` serves until the container is removed; a derived image keeps
-  it.
+  bitsandbytes` serves until the container is removed. A two-line Dockerfile
+  keeps it: `FROM ndif/ndif`, `RUN pip install bitsandbytes`.
 - **The estimate for a quantized model runs low.** It is parameters times the
   nominal width, but embeddings, norms and the head stay 16-bit.
-  Llama-3.2-1B at `nf4` reserves 1.23 GB (base 0.62 GB) and its process holds
-  1.38 GB. Give it a measured `--size-bytes`.
+  Llama-3.2-1B at `nf4` reserves 1,178 MiB and takes 1,385 MiB on the card.
+  Give it a measured `--size-bytes`.
 
 ## Tensor parallelism
 
@@ -206,11 +209,13 @@ installed too.
 
 ## Packages a block may import
 
-A block that imports a package the server lacks fails with `Your request
-payload could not be read (ModuleNotFoundError: ...)`. The image installs
-`datasets`, `einops`, `pillow`, `diffusers`, `scipy` and `nnterp` for blocks to
-use (the package's `ext` extra). Add another the way `bitsandbytes` is added
-above; replicas loaded afterwards see it.
+A block that imports a package the server lacks fails with a traceback ending
+`ModuleNotFoundError: No module named '<package>'` at the user's import line,
+or with `Your request payload could not be read (ModuleNotFoundError: ...)`
+when an object the client shipped refers to it. The image installs `datasets`,
+`einops`, `pillow`, `diffusers`, `scipy` and `nnterp` for blocks to use (the
+package's `ext` extra). Add another the way `bitsandbytes` is added above;
+replicas loaded afterwards see it.
 
 ## trust_remote_code
 

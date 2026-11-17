@@ -11,7 +11,7 @@ curl -si localhost:8001/connected   # 200, or 503 while the dispatcher has no Ra
 ndif status                         # what the controller has placed, and where
 ndif queue                          # what the dispatcher is doing; fails if the dispatcher is gone
 ndif doctor                         # GPU as torch sees it, binaries, which endpoints answer
-ndif env                            # the server's package versions, to compare with the client's
+ndif env                            # the server's package versions (also GET /env), to compare with the client's
 ```
 
 On compose, `just ps` first: it shows which container is unhealthy or
@@ -199,8 +199,10 @@ before the user's code existed.
   server lacks (`ModuleNotFoundError`), an nnsight difference (an unpickling
   error on a class), or damage in transit. Re-send once before digging.
 
-`ndif env` prints the server's nnsight, transformers and torch; compare with
-the client's, or run `from nnsight import ndif; print(ndif.compare())` there.
+`ndif env` prints the server's nnsight, transformers and torch (`curl -s
+localhost:8001/env | jq '.packages | {nnsight, transformers, torch}'` is the
+same data); compare with the client's, or run `from nnsight import ndif;
+print(ndif.compare())` there.
 On compose also `just nnsight`: an editable nnsight on the host may be mounted
 over the image's. Setting `NDIF_MIN_NNSIGHT_VERSION` on the api turns the whole
 class into a 400 at submit that names the minimum.

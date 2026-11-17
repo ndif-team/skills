@@ -56,8 +56,10 @@ Each of these is real memory on the card that the controller never subtracted.
   said it fit".
 - **The CUDA context**, a few hundred MiB per process per card. A WARM replica
   keeps its process and its context. The 500 MiB bias covers one.
-- **A restarted controller.** The ledger is in memory, so a new controller
-  starts with every card marked free.
+- **A restarted controller.** The ledger is in memory, so a controller that
+  restarts while its node stays up starts with every card marked free and the
+  old model actors still loaded. `ndif evict` cannot see them; restarting the
+  `ray` service clears them.
 - **User code.** Actors see every GPU on the node, so a block can allocate on a
   card its replica was not given.
 
@@ -69,7 +71,7 @@ Each of these is real memory on the card that the controller never subtracted.
 | `asked for N GPUs, but this model shards at most M ways...` | The placement asked for cannot be made. Choose a divisor of M, or `--max-tp 0` |
 | `No GPU nodes available.` | The controller has no node that reports a GPU. Not a memory problem: `ndif doctor` |
 | A Hub error (repository not found, gated repo, 401, no network) | Sizing failed before placement. Fix the name, set `HF_TOKEN` where the deploy runs, or pass `--size-bytes` |
-| `initialization failed - ...` with `torch.OutOfMemoryError` | The load ran out of memory: the estimate was low, or the card held something the ledger cannot see. The controller logs `Deployment <key> failed during create`, removes the actor and returns its bytes. A client waiting on the model gets `Error starting model.` |
+| `✗ <key> [id]: initialization failed - The actor died because of an error raised in its creation task ...` ending `torch.OutOfMemoryError: CUDA out of memory` | The load ran out of memory: the estimate was low, or the card held something the ledger cannot see. The controller logs `Deployment <key> failed during create`, removes the actor and returns its bytes. A client waiting on the model gets `Error starting model.` |
 | `RuntimeError: '<weight>' is on 'cpu', expected one of CUDA devices [...]` at load | A multi-card load overflowed its budget onto the CPU and the actor refused to serve it. Read it as "the estimate was too low" |
 | `CUDA out of memory ... N MiB allowed` inside a block | The replica's own cap. The weights fit and the activations did not; the replica keeps serving. Raise the padding, or save less |
 

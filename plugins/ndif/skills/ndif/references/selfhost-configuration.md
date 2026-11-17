@@ -38,7 +38,8 @@ environment), `-e`.
 | Variable | Default | Set it when |
 |---|---|---|
 | **every service** | | |
-| `NDIF_REDIS_URL` | `redis://localhost:6379` | Redis is another container or host. Every service must name the same one; left at the default in a separate `ray` container, actors cannot publish and requests look hung |
+| `NDIF_REDIS_URL` | `redis://localhost:6379` | Redis is another container or host. Every service must name the same one; left at the default in a separate `ray` container, actors cannot publish and requests look hung. Two deployments must not share a Redis: the keys have no prefix |
+| `NDIF_API_URL` | `http://localhost:8001` | `ndif env`, `ndif info` or the dashboard run where the API is not on localhost. In the compose `ray` container that is `ndif env --api-url http://api:8001` |
 | `NDIF_ENVIRONMENT` | `dev` | You run more than one deployment: it labels every log record and metric |
 | `NDIF_LOKI_URL` | unset, console only | You ship logs to Loki (`http://loki:3100/loki/api/v1/push`) |
 | `NDIF_INFLUX_URL`, `NDIF_INFLUX_TOKEN` | unset, no metrics | You record request metrics in InfluxDB 2 (`NDIF_INFLUX_ORG` `ndif`, `NDIF_INFLUX_BUCKET` `metrics`) |
@@ -51,7 +52,7 @@ environment), `-e`.
 | `NDIF_API_PORT`, `NDIF_API_WORKERS`, `NDIF_API_TIMEOUT` | `8001`, `1`, `120` | Workers scale ingress only; there is always one dispatcher |
 | **ray** | | |
 | `NDIF_DEPLOYMENTS` | unset | Models must be loaded, pinned, at start. `\|`-separated model keys, not repo ids ([operate](operate.md#loading-at-boot)) |
-| `NDIF_MODEL_IMPORT_PATH` | the in-process `ModelActor` | Anyone else can submit: the sandbox actor class. Compose sets the older name `NDIF_DEFAULT_MODEL_ACTOR_CLASS`, read as a fallback |
+| `NDIF_MODEL_IMPORT_PATH` | the in-process `ModelActor` | Anyone else can submit: the sandbox actor class. Compose sets `NDIF_DEFAULT_MODEL_ACTOR_CLASS`, a second name read as a fallback |
 | `NDIF_TP_MODEL_ACTOR_CLASS` | unset, tensor parallelism off | Multi-GPU models should shard within layers ([operate](operate.md#tensor-parallelism)) |
 | `NDIF_DEFAULT_EXECUTION_TIMEOUT_SECONDS` | unset, no cap | The server is shared: a runaway block otherwise holds its replica for ever |
 | `NDIF_DEFAULT_PADDING_FACTOR`, `NDIF_DEFAULT_PADDING_BIAS`, `NDIF_DEFAULT_DTYPE` | `0.15`, `524288000`, `bfloat16` | The sizing defaults do not suit your models |

@@ -113,7 +113,8 @@ does that.
   deserialize_ms)`; set `self.execution_ident` on the worker thread before
   anything can block, or a cancel is silently dropped; be interruptible; raise
   `CachedActorError` when WARM so the queue re-queues; leave no request state
-  behind. Select it with `--actor-class`, `NDIF_MODEL_IMPORT_PATH`, or
+  behind. `cancel(KILL_REASON_PREEMPTED)` re-queues the request at the front;
+  use it for a deliberate cancel and the request runs again for ever. Select it with `--actor-class`, `NDIF_MODEL_IMPORT_PATH`, or
   `NDIF_TP_MODEL_ACTOR_CLASS` for tensor-parallel replicas; the path is imported
   inside the Ray worker. A constructor argument of your own has no route from
   the controller: read it from the environment.

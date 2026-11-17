@@ -35,7 +35,7 @@ Every refusal is also a line in the api log: `[ndif.api] api request rejected:
 
 | Message begins | Means |
 |---|---|
-| `Your request payload could not be read (` | The block could not be deserialized. `ModuleNotFoundError` in the parentheses is a package the server lacks; an unpickling error on a class is an nnsight difference; otherwise re-send once |
+| `Your request payload could not be read (` | The block could not be deserialized. `ModuleNotFoundError` in the parentheses is a package the server lacks that an object shipped by the client refers to; an unpickling error on a class is an nnsight difference; otherwise re-send once |
 | `The model architecture on this server doesn't match the one your code was traced against` | Client and server built different module trees, nearly always a transformers difference. The path named is the first divergence |
 | `Your job exceeded the execution timeout of Ns.` | A configured timeout. There is none by default |
 | `Your job was cancelled or preempted by the server.` | The actor stopped the block on request: `ndif kill`. A blocking client has already been told `Request cancelled by operator.` |
@@ -62,7 +62,8 @@ None of these hurts the replica.
 | the user's own line | Their code raised. The replica keeps serving; a retry needs a code change |
 | `OutOfOrderError: '<location>' was requested but the model already ran past it` | Modules accessed out of forward-pass order. With `.grad` in the location, a gradient asked for by an untrusted request on a sandbox actor |
 | `NotImplementedError: Cannot copy out of meta tensor; no data!` | An untrusted request saved something derived from a weight; the runner holds no weights |
-| `torch.OutOfMemoryError: CUDA out of memory ... N MiB allowed` | The block passed the replica's memory cap: [sizing and placement](operate-sizing-and-placement.md#reading-a-refusal) |
+| `ModuleNotFoundError: No module named '<package>'` at an import in the block | The server does not have that package: [operate](operate.md#packages-a-block-may-import) |
+| `torch.OutOfMemoryError: CUDA out of memory ... N MiB allowed`, in the block | The block passed the replica's memory cap: [sizing and placement](operate-sizing-and-placement.md#reading-a-refusal) |
 | `ConnectionError: connection closed before message complete`, `runner process exited before its socket was ready`, `timed out waiting for the runner socket` | The sandbox runner died or did not start. Expected when a timeout or a kill stopped it; otherwise a server fault |
 | NDIF or Ray frames only | A server fault. The full traceback is in the model actor's log as `model execution errored` |
 
@@ -71,10 +72,13 @@ None of these hurts the replica.
 `device-side assert triggered`, `an illegal memory access was encountered` and
 `unspecified launch failure` leave the process's CUDA context unusable, so the
 actor kills itself and Ray brings it back with a reload. The request that
-caused it still gets its traceback. No action is needed: `ndif status` keeps
-showing the replica HOT, requests that arrive during the reload get `Error
-submitting request to model deployment.` or wait, and the next one works. The
-usual innocent cause of the first is a prompt longer than the model's context.
+caused it still gets its traceback, `torch.AcceleratorError: CUDA error:
+device-side assert triggered`. No action is needed: `ndif status` shows the
+replica HOT and `DEPLOYING` while it reloads, the model actor logs `Restarting
+model actor for <key>`, and requests that arrive meanwhile wait or get `Error
+submitting request to model deployment.` The usual innocent cause of the first
+is a prompt longer than the model's context (1,100 tokens into gpt2's 1,024
+positions).
 
 ## No error at all
 

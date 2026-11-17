@@ -50,6 +50,10 @@ other command replaces it (`docker run --rm ndif/ndif version`), and
 - **`ndif info` inside the container lists every service as stopped.** It
   tracks processes started by a detached `ndif start`. Read its Connectivity
   lines.
+- **Your own build**: from the repository root, `docker build -f
+  docker/Dockerfile -t my-ndif .` gives the same image from that checkout.
+  `--build-arg TORCH_CUDA=cu130` picks the CUDA line and `--build-arg
+  NDIF_VERSION=<version>` the version it reports (`docker/README.md`).
 - **LAN clients**, once auth and the sandbox are on: publish 8001 and 9000 on
   the interface they use and set
   `NDIF_OBJECT_STORE_PUBLIC_URL=http://<server>:9000`.
@@ -81,7 +85,8 @@ just ps            # status and health
 just logs api      # follow one service
 ```
 
-`just` is a one-line wrapper over `docker compose -f docker/docker-compose.yml`;
+`just` is a one-line wrapper over `docker compose -f docker/docker-compose.yml`
+(`just up` is that plus `up -d`), so the stack runs without it;
 `just --dry-run <recipe>` prints the command. The containers are redis, rustfs,
 api, ray, dashboard, postgres, influxdb, loki, prometheus and grafana, with the
 same image run three times as `api`, `ray` and `dashboard`. Beside the API it
@@ -155,7 +160,8 @@ ndif stop
   `logs/<service>.log`, and RustFS's data. `ndif stop` stops what `ndif start`
   started and nothing else.
 - **The dashboard is named explicitly**: `ndif start dashboard`, and
-  `ndif stop dashboard`, since a bare `ndif stop` leaves it running.
+  `ndif stop dashboard`, since a bare `ndif stop` leaves it running and
+  `ndif info` does not list it.
 - **Options**: `ndif start -e KEY=VALUE` sets a variable for the services it
   starts, `ndif start api --restart` replaces a running one, and `--foreground`
   attaches for a supervisor.
@@ -186,3 +192,5 @@ docker run -d --name ndif-worker --gpus all --shm-size 4g --network host \
 - **It shows in `ndif status` within 30 seconds.** `Nodes` up but `Total GPUs`
   not means the worker reported no GPU. A worker stuck on `Waiting for Ray head
   at ...` cannot reach the head's port.
+- **A node Ray reports dead, even briefly, loses its replicas** on the
+  controller's next pass.

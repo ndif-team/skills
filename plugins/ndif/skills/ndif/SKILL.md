@@ -119,7 +119,8 @@ requests go straight to `QUEUED`. No API key is needed while auth is off.
 A client on another machine needs two addresses: the API in `CONFIG.API.HOST`,
 and the object store under exactly the host and port in
 `NDIF_OBJECT_STORE_PUBLIC_URL`, because a presigned URL's signature covers
-them. With the ports on loopback as above, tunnel both:
+them. With the ports on loopback as above, tunnel both (illustrative: it
+needs a second machine):
 `ssh -fN -L 8001:localhost:8001 -L 9000:localhost:9000 user@server`.
 
 ## Run models
@@ -219,7 +220,7 @@ The logs are in two places, and the second is the one people miss.
 | `Could not deploy this model. CANT_ACCOMMODATE...`, or `Error starting model.` | The ledger is full, or the load failed. The controller log has `Analyzing deployment ... with size <bytes>` and `failed during create` |
 | `CUDA out of memory ... MiB allowed` inside a block | The replica's own cap, above. Not a full card |
 | `COMPLETED`, then the client cannot download the result | `NDIF_OBJECT_STORE_PUBLIC_URL` is not an address the client reaches, or port 9000 is not published |
-| `The model architecture on this server doesn't match...` or `Your request payload could not be read (...)` | Client and server package versions differ: `ndif env` against the client's `pip show nnsight transformers` |
+| `The model architecture on this server doesn't match...` or `Your request payload could not be read (...)` | Client and server package versions differ: `curl localhost:8001/env` (or `ndif env`) against the client's `pip show nnsight transformers` |
 
 ## Guides
 

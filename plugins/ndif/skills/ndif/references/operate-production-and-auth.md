@@ -18,9 +18,9 @@ before anyone else can reach the API.
 | `ndif.services.ray.tp.model.TPModelActor` | in the model process, on every rank |
 | `ndif.services.ray.tp.model.SandboxedTPModelActor` | in one runner the whole group shares |
 
-The controller reads `NDIF_MODEL_IMPORT_PATH`, then the older
-`NDIF_DEFAULT_MODEL_ACTOR_CLASS` (what compose sets), then falls back to the
-base `ModelActor`. `NDIF_TP_MODEL_ACTOR_CLASS` is separate and replaces the
+The controller reads `NDIF_MODEL_IMPORT_PATH`, then
+`NDIF_DEFAULT_MODEL_ACTOR_CLASS` (the name compose sets), then falls back to
+the base `ModelActor`. `NDIF_TP_MODEL_ACTOR_CLASS` is separate and replaces the
 class for a tensor-parallel replica. A per-deployment `--actor-class` overrides
 both, so check every replica: `ndif status --json-output | jq -r
 '.deployments[] | select(.model_key) | .actor_class'`.
@@ -68,7 +68,7 @@ The server acts on three tag names. Any other name is inert.
 |---|---|
 | `trusted` | runs in the model process, and may deploy a `trust_remote_code` model |
 | `trust_remote_code` | may deploy a model whose key carries `trust_remote_code`, and nothing more |
-| `priority` | is served before untagged requests for the same model, first come first served among priority requests |
+| `priority` | is served before every untagged request for the same model, so sustained priority traffic starves the rest |
 
 An API key is the `key_id` UUID of a row in `keys`; the API runs one read-only
 query and issues nothing. Create the tags once, then a user and a key:
@@ -168,8 +168,8 @@ checkpoint's code onto the cluster.
   header. Terminate TLS in a proxy and never publish 8001 itself.
 - **No key on result retrieval.** `GET /response/{id}` and a presigned result
   URL need only the id or the URL.
-- **No rate limits, quotas or multi-tenancy.** Every key shares the same
-  deployments and GPUs.
+- **No rate limits, quotas, request-size cap or multi-tenancy.** Every key
+  shares the same deployments and GPUs.
 - **No authentication on Redis, the Ray client port or the Ray dashboard.**
   Auth is checked at the API only; anyone who reaches 6379, 10001 or 8265
   bypasses it.
