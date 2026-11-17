@@ -5,7 +5,7 @@ Three ways to make a change that outlasts one trace:
 | Change | Where it lives | Undo | Use it to |
 |---|---|---|---|
 | activation edit (`model.edit`) | an intervention nnsight replays on every run | `model.clear_edits()` | hold an intervention across many runs |
-| adapter / LoRA | added parameters routed into the forward | stop routing it, or `model.load_adapter(None)` for a PEFT adapter | change behavior across many inputs, or study an existing fine-tune |
+| adapter / LoRA | added parameters routed into the forward | stop routing it, or `model.disable_adapters()` for a PEFT adapter | change behavior across many inputs, or study an existing fine-tune |
 | weight edit | the model's own parameters | only from a copy you kept | overwrite one association and ship it in the weights |
 
 An activation edit is stored on one envoy and replayed only by runs through
@@ -279,8 +279,12 @@ attaches it to the model in place: each targeted module becomes the adapter's
 layer and holds the original as `base_layer`. No other module moves, so every
 path into the base model still names the same module, and the adapter's own
 modules are in the tree to read. `model.load_adapter(peft_id)` attaches or swaps
-an adapter on a loaded model, and `model.load_adapter(None)` removes it, which is
-how the same object runs the base model's forward.
+an adapter on a loaded model, and `model.load_adapter(None)` removes it.
+
+For the base and the adapted side of one experiment, keep the adapter attached
+and switch it between traces: `disable_adapters()` runs the base model's forward
+bit for bit, `enable_adapters()` the adapted one, and `adapters_enabled` holds
+the state.
 
 ```python
 adapter_id = "peft-internal-testing/gpt2-lora-random"     # a LoRA for this base model: repo id or path
@@ -294,36 +298,51 @@ with torch.no_grad(), adapted.trace(prompt):
     total = c_attn.output.save()
     adapted_logits = adapted.output.logits[0, -1].save()
 
-adapted.load_adapter(None)                    # the base model
+adapted.disable_adapters()                    # the same tree, the base model's forward
 with torch.no_grad(), adapted.trace(prompt):
     base_logits = adapted.output.logits[0, -1].save()
-adapted.load_adapter(adapter_id)              # attached again, weights read from adapter_id
+adapted.enable_adapters()
+
+with torch.no_grad(), model.trace(prompt):    # the plain gpt2 from the first block
+    plain_logits = model.output.logits[0, -1].save()
 
 scaling = c_attn.scaling["default"]           # lora_alpha / r
 assert type(adapted._module).__name__ == "GPT2LMHeadModel"        # attached in place, not wrapped
 assert torch.allclose(total, base_part + scaling * lora_part, atol=1e-5)
-assert not any(parameter.requires_grad for parameter in adapted.parameters())
+assert torch.equal(base_logits, plain_logits) and adapted.adapters_enabled
 print(f"largest logit change from the adapter: {float((adapted_logits - base_logits).abs().max()):.2f}")
+```
+
+```
+largest logit change from the adapter: 5.22
 ```
 
 - **`lora_B.default.output` is the adapter's contribution before scaling.** The
   module's output is `base_layer.output + (lora_alpha / r) · lora_B.output`.
-- **Attaching freezes the whole model.** peft switches `requires_grad` off on
-  every base parameter, a saved adapter loads frozen, and `load_adapter(None)`
-  does not switch the base back on. A backward block then raises
-  `NotImplementedError: This tensor does not require grad`. For gradients with
-  respect to activations call `adapted.requires_grad_(True)` first.
-- **`load_adapter` reads the weights from the id every time.** Removing an
-  adapter discards what was trained in memory, so export first.
-- `adapted.disable_adapters()` reaches the transformers method, which does not
-  know this adapter and raises `ValueError: No adapter loaded`.
+- **While the adapter is off its own modules do not run.** Reading
+  `lora_B.default.output` then raises `OutOfOrderError`. `base_layer` runs in
+  both states.
+- **Switch between traces.** Called inside a trace body, `disable_adapters()`
+  stays in force after the trace. For a base row and an adapted row in one
+  forward pass, assign `base_layer.output` to `output` on every adapted layer
+  inside the base row's invoke.
+- **Attaching changes no `requires_grad` flag of the base model**, and neither
+  does switching or removing, so gradients with respect to activations work as
+  on the base model. The adapter's own parameters arrive frozen.
+- **On a half-precision model the adapter is held in float32**, so
+  `lora_B.default.output` is float32 where the layer's output is in the model's
+  dtype. `autocast_adapter_dtype=False`, on the constructor or `load_adapter`,
+  holds the adapter in the model's dtype.
 
 ### Train and export
 
-An attached adapter trains through the same backward block once its parameters
-are switched on. To save it, write the adapter files yourself:
-`adapted._module.save_pretrained(dir)` is the transformers method and writes the
-whole model, base weights included.
+An attached adapter trains through the same backward block. Set the flags first,
+on the loaded model (flags set before the weights load are lost). The adapter's
+parameters arrive frozen, and left that way the loop runs without an error and
+the adapter never moves. The base model's are as you left them, and left on,
+every backward fills `.grad` on every base weight. To save the result, write the
+adapter files yourself: `adapted._module.save_pretrained(dir)` is the
+transformers method and writes the whole model, base weights included.
 
 ```python
 import tempfile
@@ -361,4 +380,6 @@ with torch.no_grad(), reloaded.trace(prompt):
 assert torch.equal(trained_logits, reloaded_logits)           # the export is the trained adapter
 ```
 
-The exported directory also loads with `PeftModel.from_pretrained`.
+The exported directory also loads with `PeftModel.from_pretrained`. Switching the
+adapter off and on keeps what was trained; removing it and loading it again
+reads the weights from the id.
