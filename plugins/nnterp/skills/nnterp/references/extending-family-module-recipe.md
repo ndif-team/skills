@@ -359,10 +359,12 @@ def project_on_vocab(model: "StandardizedTransformer", hidden: torch.Tensor) -> 
 The others: Cohere-2 (imports Cohere's), Granite
 (`/ logits_scaling`; GraniteMoE, GraniteMoE-Shared, GraniteMoE-Hybrid, Granite-SWA,
 GraniteMoE-SWA import it), Falcon-H1 (`* lm_head_multiplier`), HyperCLOVA X
-(`* logits_scaling`), Gemma-2 and Gemma-3 (the cap only on the causal-LM class), Mamba,
-Falcon-Mamba, Mamba-2 and Nemotron-H (the head in its own dtype, float32 logits), ZAYA (the
-float32 stream cast to the final norm's dtype first), OPT (`project_out` where the decoder
-has it), DeepSeek-V4 (collapses its parallel streams with `hc_head` first).
+(`* logits_scaling`), Gemma-2 (the cap where the loaded class's forward applies it, read
+off that forward's source, so PaliGemma 2's wrapper is followed too), Gemma-3 (the cap only
+on the causal-LM class), Mamba, Falcon-Mamba, Mamba-2 and Nemotron-H (the head in its own
+dtype, float32 logits), ZAYA (the float32 stream cast to the final norm's dtype first), OPT
+(`project_out` where the decoder has it), DeepSeek-V4 (collapses its parallel streams with
+`hc_head` first).
 Each block's own sizes are not module functions but properties on the family's envoy
 subclasses ([extending-descriptors.md](extending-descriptors.md)).
 
