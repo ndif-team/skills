@@ -359,7 +359,8 @@ sublayer's output `o` into the stream `r` as
 (each merge's parameters on `layers[i].post_attention_residual_scale._module` /
 `post_mlp_residual_scale._module`); `attention_output` / `mlp_output` are the first
 term, and the stream term rescales and biases what came before. Unroll it the way
-the Doge loop does.
+the Doge loop does. They are computed copies divided back on write, as on the Granite line,
+so in bf16 a position-specific edit shifts every position: edit in float32.
 
 **DeepSeek-V4**: parallel streams. The residual between blocks is `hc_mult` (4)
 copies of the stream: `layer_output` and `layers[i].input` are `[batch, seq,
@@ -386,7 +387,9 @@ keepdim=True) * mlp_output`, within ~2e-6 relative). Code that assumes rank 3
 the plain identity raises a shape error at most lengths. `project_on_vocab`
 collapses the streams with the model's `hc_head` and equals `logits` at the last
 block; `skip_layers` and `steer` work unchanged (a `[hidden]` vector adds to every
-stream).
+stream). Each sublayer reads a weighted sum of the streams whose weights need not sum to
+one, so a steered vector arrives multiplied by that sum (between 0 and 4): a factor tuned
+on another family does not carry over.
 
 ## Root values
 
@@ -551,6 +554,18 @@ with model.trace(prompt):
     pattern = model.layers[0].self_attn.attention_probabilities.save()
 
 assert isinstance(pattern, Pattern) and isinstance(q, Queries) and not isinstance(q[0], Queries)   # rank and dtype
+```
+
+`nnterp.axis_size(envoy, axis)` resolves an axis named after a size the model holds
+(`hidden_size`, `num_heads`, `num_kv_heads`, `head_dim`, `vocab_size`, `num_experts`) to a
+number for a value served on that envoy, the block's own where blocks differ, so a script
+checks or allocates shapes without naming a family's config key. `batch`, `seq`, `query`,
+`key` and the recurrent layouts' axes name no such size and raise `ValueError`:
+
+```python
+from nnterp import axis_size
+
+assert axis_size(model.layers[0].self_attn, "num_heads") == 12 and axis_size(model.layers[0], "hidden_size") == 768
 ```
 
 `isinstance` checks rank and dtype, not axis sizes. Batch is axis 0 everywhere;

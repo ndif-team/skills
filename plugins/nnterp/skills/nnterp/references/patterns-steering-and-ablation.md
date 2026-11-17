@@ -140,7 +140,7 @@ with model.trace(steer_prompt):
     model.steer(LAYER, vector, factor=-factor, token_positions=-1)
     negated = model.next_token_probs.save()
 
-great, terrible = model.tokenizer.encode(" great")[0], model.tokenizer.encode(" terrible")[0]
+great, terrible = [model.tokenizer(w, add_special_tokens=False).input_ids[0] for w in (" great", " terrible")]
 assert steered[0, great] > baseline[0, great] and negated[0, terrible] > baseline[0, terrible]
 ```
 
@@ -297,13 +297,14 @@ One invoke per head, each zeroing its own head's output.
 ```python
 rows = []
 with model.trace() as tracer:
-    for head in range(model.num_heads):
+    for head in range(model.layers[LAYER].self_attn.num_heads):
         with tracer.invoke(prompt):
-            model.layers[LAYER].self_attn.attention_head_outputs[..., head, :] = 0
+            # any attn_implementation; the same numbers as attention_head_outputs on a plain attention
+            model.layers[LAYER].self_attn.attention_premix[..., head, :] = 0
             rows.append(model.next_token_probs[0, paris].save())
 
 print([round(float(p), 3) for p in rows])
-assert len(rows) == model.num_heads
+assert len(rows) == model.layers[LAYER].self_attn.num_heads
 ```
 
 ### A recurrent mixer on a hybrid
@@ -337,7 +338,7 @@ for i, probs in enumerate(outs):
 ```
 
 The same loop runs on a non-hybrid, where every `mixer(layer)` is `self_attn`; the
-per-family version is in `references/patterns-sweeps-and-probing.md`.
+per-family version is in [patterns-sweeps-and-probing.md](patterns-sweeps-and-probing.md).
 
 ### Measuring
 

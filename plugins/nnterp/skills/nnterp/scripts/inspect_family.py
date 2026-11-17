@@ -161,7 +161,7 @@ def summarize(repo_id: str, layer: int | None, eager: bool, trust_remote_code: b
     print()
 
     print("## RENAME (native -> standard alias)")
-    print_kv([(k, str(v)) for k, v in model.family.RENAME.items()])
+    print_kv([(getattr(k, "__name__", str(k)), str(v)) for k, v in model.family.RENAME.items()])
     print()
 
     print("## standard name -> native path")

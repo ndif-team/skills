@@ -1,16 +1,11 @@
 # nnterp Patterns
 
-The recipes below are shorter than the ones in the `nnsight` skill's technique guides for one
-reason: the standard values do the normalization. A block's residual stream is
-`layer_output` on every family, a sublayer's contribution is `attention_output` /
-`mlp_output` (defined by `layers[i].input + attention_output + mlp_output ==
-layer_output`), the pattern is `attention_probabilities`, the per-head view is
-`attention_head_outputs` (or `attention_premix` at the output projection, under any
-attention implementation), an MLP's neurons are `mlp_neurons`, and `project_on_vocab`
-is the model's own head. Nothing here indexes `.output[0]` or names `ln_f` versus
-`norm`. The executed blocks run on
-`openai-community/gpt2`, `HuggingFaceTB/SmolLM2-135M-Instruct` (30 layers, 576
-hidden, 9 heads, 3 kv heads, bf16) and `trl-internal-testing/tiny-LlavaForConditionalGeneration`.
+The recipes below are shorter than the ones in the `nnsight` skill's technique guides because the
+standard values ([SKILL.md](../SKILL.md)) do the normalization: nothing here indexes
+`.output[0]` or names `ln_f` versus `norm`, so each trace body runs on every family. The
+executed blocks run on `openai-community/gpt2`, `HuggingFaceTB/SmolLM2-135M-Instruct`
+(30 layers, 576 hidden, 9 heads, 3 kv heads, bf16) and
+`trl-internal-testing/tiny-LlavaForConditionalGeneration`.
 
 ```python
 import torch
@@ -41,13 +36,9 @@ LAYER = model.num_layers // 2          # a depth, not a constant: the same line 
 ATTN = attn_blocks[len(attn_blocks) // 2]   # an attention block: on a hybrid, not every block has self_attn
 ```
 
-`target_token` catches the two silent failures: `tokenizer.encode(" Paris")[0]` is
-BOS on Llama-3 and Gemma, and a word that splits (`' Par', 'is'` on Granite;
-`'▁', 'Paris'` on a Llama-2 / Mistral tokenizer, where `"Paris"` without the space
-is the one token) is not one logit. `kl` works from logits: the textbook
-`p * (p.log() - q.log())` is NaN wherever `next_token_probs` holds an exact zero
-(Pythia). `attn_implementation="eager"` is only needed for the attention interior;
-the boundary values and `project_on_vocab` work on an `sdpa` load.
+`target_token` refuses a word that is not one token (never `encode(word)[0]`, the BOS
+token on Llama-3 and Gemma); `kl` works from float32 logits, safe where a probability is
+exactly zero. `attn_implementation="eager"` is only needed for the attention interior.
 
 ## Logit lens
 
@@ -69,11 +60,10 @@ assert torch.equal(lens[model.num_layers - 1], logits[0, -1])   # the wiring che
 ```
 
 The last assertion is the check to run on any new checkpoint before reading a
-curve: `project_on_vocab` on the last block *is* the final computation (softcap,
-`logit_scale`, `/ logits_scaling`, DeepSeek-V4's `hc_head`). It holds on every
-family, Gemma-4 and Granite included. Argmax hides a race: P(" Paris") peaks at
+curve: `project_on_vocab` on the last block *is* the final computation, any softcap or
+scale included, on every family. Argmax hides a race: P(" Paris") peaks at
 layer 9 (0.25) and is 0.07 at the output; the curve is in
-`patterns-logit-lens-and-attribution.md`.
+[patterns-logit-lens-and-attribution.md](patterns-logit-lens-and-attribution.md).
 
 ## Direct logit attribution
 
@@ -93,12 +83,10 @@ assert torch.allclose(sum(dla.values()), head_final, atol=1e-3)     # linear: th
 print({i: round(float(dla["attn", i][paris]), 1) for i in range(model.num_layers)})
 ```
 
-This is on the *unnormed* scale. **On Gemma-4, Doge, ZAYA and DeepSeek-V4 the
-plain sum is wrong** (Gemma-4: by ~7,700%, naming block 0's attention the top
-term): weight each term first, with the recipes in the `references/values.md`. Putting the terms on the model's scale needs the final
-norm's family details (LayerNorm centering and bias, Gemma's `1 + w`, Granite's
-`logits_scaling`, an `lm_head` bias); `patterns-logit-lens-and-attribution.md`
-lists them, plus the per-head split.
+This is on the *unnormed* scale. **On Gemma-4, Doge, ZAYA and DeepSeek-V4 the plain sum is
+wrong**: weight each term first (the [values.md](values.md), "Blocks that are
+not a plain sum"). The terms on the model's scale, and the per-head split:
+[patterns-logit-lens-and-attribution.md](patterns-logit-lens-and-attribution.md).
 
 ## Attention patterns
 
@@ -112,11 +100,10 @@ previous = pattern.diagonal(offset=-1, dim1=-2, dim2=-1).mean(-1)[0]   # mass on
 first = pattern[0, :, 1:, 0].mean(-1)                                  # mass on key 0: sink heads
 ```
 
-Index blocks through `attn_blocks` (decided outside the trace): on a Qwen3.5 or
-Mamba hybrid most blocks have no `self_attn`. In a padded batch, pad *query* rows attend
-uniformly: mask them with `attention_mask` before averaging a head metric. Edits,
-the previous-token head search and the sink caveats:
-`patterns-patching-and-attention.md`.
+Index blocks through `attn_blocks` (setup): a hybrid's recurrent blocks have no
+`self_attn`. In a padded batch, pad *query* rows attend uniformly: mask them with
+`attention_mask` before averaging a head metric. Edits, the previous-token head search and
+the sink caveats: [patterns-patching-and-attention.md](patterns-patching-and-attention.md).
 
 ## Ablation
 
@@ -143,11 +130,11 @@ Zero ablation can *raise* a target too: zeroing block 6's `mlp_output` moves
 P(Paris) from 0.070 to 0.080 here. Report the KL alongside the target, and say
 which ablation you ran. Mean ablation, `skip_layers`, one head via
 `attention_head_outputs`, `attention_premix` or the pattern, MLP neurons via
-`mlp_neurons`, a recurrent mixer: `patterns-steering-and-ablation.md`.
+`mlp_neurons`, a recurrent mixer: [patterns-steering-and-ablation.md](patterns-steering-and-ablation.md).
 
 ### Expert ablation (mixtures of experts)
 
-On a `Moe` (`layers[i].mlp` on the 39 MoE families), remove expert `e` by zeroing
+On a `Moe` (`layers[i].mlp` on a mixture-of-experts family), remove expert `e` by zeroing
 the weights of the slots that chose it. Ran on the tiny Mixtral checkpoint nnterp
 pins:
 
@@ -170,9 +157,8 @@ effects = torch.stack(rows) - base                  # [experts]: change in log p
 ```
 
 Load float32 for single-expert effects: on a bf16 GraniteMoE this batched sweep
-correlated 0.32 with per-trace ablation and named a different top expert. Count
-usage and entropy over real tokens only (pad tokens take 25-31% of the slots).
-Usage, entropy, rerouting and per-family gaps: the `references/mixture-of-experts.md`.
+correlated 0.32 with per-trace ablation and named a different top expert. Usage, entropy
+over real tokens, rerouting and per-family gaps: the [mixture-of-experts.md](mixture-of-experts.md).
 
 ## Activation patching
 
@@ -194,35 +180,22 @@ assert patched[0, paris] > baseline[0, paris]
 ```
 
 One layer at the last position is a weak probe (0.0032 to 0.0056 here); the
-per-layer sweep and the layer×position map are where the result is. On SmolLM2
-the map is textbook: the clean fact restores P(Paris) to 0.9 when patched at the
-subject's second token through layer 22, and at the last position from layer 23
-on. Sweep, map, barrier and session forms, and the Gemma-4 / Granite write
-caveats: `patterns-patching-and-attention.md`.
+per-layer sweep and the layer×position map are where the result is. Sweep, map, barrier
+and session forms, and the per-family caveats: [patterns-patching-and-attention.md](patterns-patching-and-attention.md).
 
-To patch a query or key from another prompt or position, write it before the rotary:
-`self_attn.attention_queries_prerope` / `attention_keys_prerope` are the queries and keys
-the block's rotary embedding receives, under any attention implementation, and the block
-rotates what you write for the position it lands at, so the transplant is one assignment
-([SKILL.md](../SKILL.md), "Before the rotary embedding", runs it on SmolLM2; GPT-2 has no
-rotary). `attention_queries` / `attention_keys` are already rotated for the position they
-ran at.
+A query or key patched from another prompt or position goes in before the rotary, at
+`self_attn.attention_queries_prerope` / `attention_keys_prerope`: the [attention-interior.md](attention-interior.md), "Before the rotary embedding".
 
 ### Head-selective K/V patching
 
 To make chosen query heads read another run's keys and values over a span, without the
 rest of their group, the other rows or the KV cache seeing the edit, do not write
-`attention_keys` / `attention_values`: they are `num_kv_heads` wide (an edit of key/value
-head `g` reaches every query head `h` with `h // group == g`), every query row reads them
-(an edit at the span moves every row from the span on), and under `generate` they are the
-cache (an in-place edit stays for every later step). Clone the keys and values, replace the
-span for the chosen heads' key/value heads, call `self_attn.interface` (the block's own
-attention function, with this call's mask and scale) on the copies, and write only the
-chosen heads' last row of `attention_head_outputs`. The same patch runs on every
-`generate` step, and the cache keeps the target's own keys. Eager only, and unavailable
-on BLOOM, MPT, Falcon, XGLM and DeepSeek-V4 (`support()["self_attn.interface"]` says so).
-The recipe, the bleed it avoids and the `generate` form run on SmolLM2 in
-`patterns-patching-and-attention.md`, "Head-selective K/V patching"; [SKILL.md](../SKILL.md)'s "Calling the attention function again" has the rules.
+`attention_keys` / `attention_values`: every query head of the group and every row reads
+them, and under `generate` an in-place edit stays in the cache. Clone the keys and values,
+replace the span, call `self_attn.interface` (the block's own attention function) on the
+copies, and write only the chosen heads' last row of `attention_head_outputs`. Eager only;
+`support()["self_attn.interface"]` says where it is unavailable. The recipe and its
+`generate` form: [patterns-patching-and-attention.md](patterns-patching-and-attention.md), "Head-selective K/V patching".
 
 ## Steering
 
@@ -259,9 +232,7 @@ assert not torch.equal(plain, steered)
 A bare `steer` in a `generate` body fires on the prefill only. The useful band is
 per model: a factor of 4 barely moves GPT-2 (stream norm ~92 mid-depth), while
 Gemma-3 degenerates at half the stream norm; sweep the fraction and watch fluency.
-On Gemma-4 `steer` adds after the block's `layer_scalar`, so it is not the same
-as adding to a contribution. Hand-written form, `batch_index`, both poles:
-`patterns-steering-and-ablation.md`.
+Hand-written form, `batch_index`, both poles: [patterns-steering-and-ablation.md](patterns-steering-and-ablation.md).
 
 ## Probing
 
@@ -279,9 +250,8 @@ assert acts.shape == (model.num_layers, len(texts), model.hidden_size)
 `idx=-1` needs left padding, which nnsight's tokenizer sets for causal models;
 pass `tokenizer_kwargs={"padding_side": "left", "pad_token": ...}` where it does
 not (check `model.tokenizer.pad_token`: GPT-2's `<|endoftext|>` is not Llama's).
-On DeepSeek-V4 `layer_output` is rank 4 (`Streams`): a probe written for
-`[batch, seq, hidden]` runs and answers per stream. The ridge probe, the
-shuffled-label control and the mass-mean direction: `patterns-sweeps-and-probing.md`.
+The ridge probe, the shuffled-label control and the mass-mean direction:
+[patterns-sweeps-and-probing.md](patterns-sweeps-and-probing.md).
 
 ## Recurrent state patching (hybrids, Mamba)
 
@@ -308,10 +278,8 @@ with hybrid.generate(prompt, max_new_tokens=3, do_sample=False) as tracer:
 ```
 
 Assert on the state: on Qwen3.5-0.8B the write lands and the greedy tokens do not
-change. The state is not all a block remembers (a short conv window carries the
-last few tokens). On Mamba decode steps read `state_output` before
-`attention_head_outputs`. Per-token states (`states`, `set_state_after`):
-`patterns-sweeps-and-probing.md` and the `references/recurrent-mixers.md`.
+change. Per-token states (`states`, `set_state_after`) and the decode-step read order:
+[patterns-sweeps-and-probing.md](patterns-sweeps-and-probing.md) and the [recurrent-mixers.md](recurrent-mixers.md).
 
 ## The image pathway
 
@@ -366,12 +334,9 @@ assert to_image.shape == (vlm.num_layers, vlm.layers[0].self_attn.num_heads)
 ```
 
 1. **Read the mask first, `image_features` after the tower's values and before the text
-   model's**; out of order raises `OutOfOrderError`. **One image-carrying invoke per
-   trace**: clean and ablated runs are two traces. Several images go in one invoke as a
-   list. `model.trace(prompt, images=[...])` refuses to batch two image-carrying invokes;
-   chat-message inputs that embed the image do run as one batch, but there
-   `image_features` is flat over the whole batch's image tokens in every invoke, and a
-   write in one invoke reaches every row.
+   model's. One image-carrying invoke per trace**: clean and ablated runs are two traces.
+   Chat-message inputs that embed the image do batch, but there `image_features` is flat
+   over the whole batch's image tokens, and a write in one invoke reaches every row.
 2. **A tower edit that changes nothing is at a block the wrapper does not read.** Llava 1.5's
    projector reads `vision.layers[-2].layer_output`, so zeroing `tower_output` leaves the
    logits unchanged; `model.projector.input` is what the projector receives.
@@ -379,7 +344,7 @@ assert to_image.shape == (vlm.num_layers, vlm.layers[0].self_attn.num_heads)
    after blocks 0 to 2 (`layers[k].deepstack_output`); zero those too.
 
 Inside the tower, patching part of an image, and editing the image positions of a text
-block: `patterns-image-pathway.md`.
+block: [patterns-image-pathway.md](patterns-image-pathway.md).
 
 ## The same recipes on SmolLM2
 
@@ -411,73 +376,42 @@ assert lp_ablated[0, lparis] < lp_clean[0, lparis] and kl(lclean, lablated)[0] >
 ```
 
 SmolLM2 decodes punctuation for 27 layers and then " Paris" at 27, 28, 29; the
-wiring check passes the same way. It loads in bf16, so `next_token_probs` is a bf16
-softmax (take `logits.float().softmax(-1)`, as above) and the linear DLA sum is
-off by a couple of percent of the logit range; load `dtype=torch.float32` for the
-exact checks.
+wiring check passes the same way. It loads in bf16, where the linear DLA sum is off by a
+couple of percent of the logit range; load `dtype=torch.float32` for the exact checks.
 
 ## Gotchas that bite in recipes
 
-- **Target token**: `model.tokenizer(word, add_special_tokens=False).input_ids`, one
-  element, checked (`target_token` above). A recipe on the BOS token runs and prints 0.
-- **KL from logits in float32** (`kl` above); a bf16 KL between nearly equal rows can
-  come out slightly negative, which the float32 form avoids.
-- **Nothing bound inside a trace survives it unless saved.** Make containers outside
-  (`lens = {}`) and `.save()` each entry, or save the container inside the trace
-  (`lens = nnsight.save({})`, then `lens[i] = value`). Only the second form comes back from
-  `StandardizedVLLM`; there the first comes back empty, without an error.
+[SKILL.md](../SKILL.md)'s traps (the target token, `[0]`, blocks that are not a plain sum, late
+reads under `tracer.iter`, overwriting the scores, bf16 metrics) all apply. Five more are
+about recipes:
+
 - **A write in one invoke that consumes another invoke's value needs
   `tracer.barrier`**; two traces with a `.save()` between them, or a
   `model.session()`, need nothing.
-- **`skip_layers` goes in a trace of its own, or in every invoke**: inside one
-  invoke of several it raises `ValueError: A batched .skip() has to cover every row`.
-- **Decide blocks outside the trace** (`getattr(layer, "self_attn", None) is not
-  None`): `getattr` inside a trace can trip a served value, and `hasattr(envoy, value)`
-  raises instead of answering. Guard on `model.support()`.
-- **Reads follow the forward within one invoke**: one loop over the layers is
-  ordered, two comprehensions over them are not; queries/keys/values before the
-  pattern, the pattern before `attention_head_outputs`, both before
-  `attention_output`; `model.logits` after the loop. Out of order raises
-  `OutOfOrderError`; under `generate` + `tracer.iter` a late read past step 0, or one
-  inside the attention call (the scores, the pattern), binds the *next* step instead and
-  per-step lists come back shifted by one. To read, patch or ablate
-  several sites in one invoke, sort them by `model.rank(name, layer)` first ([SKILL.md](../SKILL.md), trap 6).
-- **Overwriting `attention_scores` lifts the causal mask**; add to them instead.
-- **A query or key patched to another position goes in before the rotary**
-  (`attention_queries_prerope` / `attention_keys_prerope`): a rotated
-  `attention_queries` written elsewhere is attended with the position it came from.
-  A direction found on unrotated queries or keys is added there too.
-- **What some heads read is patched through `self_attn.interface`, never by writing
-  `attention_keys` / `attention_values`**, which reaches the whole GQA group, every row
-  from the span on and, in place under `generate`, the cache. Clone `k` and `v` before
-  editing, read `interface` once with the queries, call it before the scores, the pattern
-  or the head outputs, and pass whole tensors (the call takes the live call's query and key
-  lengths) then slice the result. One invoke is bit for bit; across invokes it matches the
-  model to rounding only.
+- **One loop over the layers is ordered, two comprehensions over them are not**: one over
+  every attention then one over every MLP raises `OutOfOrderError`. To read, patch or
+  ablate several sites in one invoke, sort them by `model.rank(name, layer)` first.
 - **Equal prompt lengths for a layer×position map**: assert
   `len(tokenizer(clean).input_ids) == len(tokenizer(corrupt).input_ids)`.
 - **Pick layers as depths** (`model.num_layers // 2`), never as constants, and
   attention layers from `attn_blocks`.
-- **On a vision-language model, read `vision.image_token_mask` first** (under `generate` on
-  transformers 5.18 and later, after the tower's values) and keep one
-  image-carrying invoke per trace; clean and ablated runs are two traces.
 - **Compare against a baseline in the same trace**: the clean row of a batched trace
   is not bit-equal to the prompt run alone (5e-7 apart on GPT-2), and in bf16 an
   edit in one invoke can move another invoke's logits by more than a small effect.
 
 ## References
 
-- `patterns-logit-lens-and-attribution.md`: the lens, top-k grid, target curve,
+- [patterns-logit-lens-and-attribution.md](patterns-logit-lens-and-attribution.md): the lens, top-k grid, target curve,
   softcap; direct logit attribution by block, sublayer and head; the final-norm and
   non-additive caveats.
-- `patterns-steering-and-ablation.md`: the steering vector, `steer` and `+=`,
+- [patterns-steering-and-ablation.md](patterns-steering-and-ablation.md): the steering vector, `steer` and `+=`,
   under `generate`; zero/mean ablation, `skip_layers`, heads, a recurrent mixer.
-- `patterns-patching-and-attention.md`: saved, barrier and session patching,
+- [patterns-patching-and-attention.md](patterns-patching-and-attention.md): saved, barrier and session patching,
   sweeps, the layer×position map; head-selective K/V patching through
   `self_attn.interface`; pattern metrics and edits.
-- `patterns-sweeps-and-probing.md`: the cross-family loop, ridge probing with
+- [patterns-sweeps-and-probing.md](patterns-sweeps-and-probing.md): the cross-family loop, ridge probing with
   controls, recurrent state patching.
-- `patterns-image-pathway.md`: on a vision-language model, ablating the image at
+- [patterns-image-pathway.md](patterns-image-pathway.md): on a vision-language model, ablating the image at
   `image_features` and inside the tower, patching one image into another's run, attention
   onto the image, editing the image positions of a text block.
 - nnterp docs: `docs/patterns/index.md` and one page per technique under

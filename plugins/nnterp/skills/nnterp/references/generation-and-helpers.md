@@ -1,4 +1,4 @@
-# Generation, the helper modules, and `remote=True`
+# Generation, the helper modules, `remote=True`, vLLM and several GPUs
 
 ```python
 import torch
@@ -325,5 +325,54 @@ with model.trace(prompt, remote=True):
 print(last.shape, model.tokenizer.decode(probs.argmax()))
 ```
 
+## The vLLM engine: `StandardizedVLLM`
+
+`nnterp.StandardizedVLLM(repo_id, dispatch=True, ...)` is the same vocabulary, values and
+layouts on nnsight's `VLLM` engine. Pick it for throughput: many concurrent prompts, long
+generations, a served engine. Stay on `StandardizedTransformer` for gradients, an edit of
+the attention pattern or a decode step's pattern, `self_attn.interface`, and the values the
+engine does not have (a gated MLP's `mlp_activation`; `attention_mask`, since a request is
+one unpadded sequence; and `lm_head_output` where vLLM's logits processor softcaps or
+scales, Gemma-2, Cohere and Granite, where it is unavailable naming which; elsewhere it is
+the logits). `model.order()` / `model.rank()` work on it: the transformers model's ranks,
+measured on a weightless `StandardizedTransformer` of the checkpoint, for the values the
+engine serves; `model.generation_config` is the checkpoint's. Both classes are
+`nnterp.Standardized`, so a helper written against the standard names takes either.
+
+```python
+from nnterp import StandardizedVLLM
+
+vmodel = StandardizedVLLM("HuggingFaceTB/SmolLM2-135M-Instruct", dispatch=True, gpu_memory_utilization=0.2, max_model_len=1024)
+layer = vmodel.layers[12]
+with vmodel.trace("The Eiffel Tower is in the city of", temperature=0.0, max_tokens=1):   # sampling settings on trace
+    stream_in = layer.layer_input.save()          # never layers[i].input: natively the positions
+    stream = layer.layer_output.save()            # [1, tokens, hidden_size]: one prompt per invoke, a private copy
+    vlogits = vmodel.logits.save()                # [1, 1, vocab_size]: the last position only
+```
+
+- The pattern and scores are recomputed from the queries and keys: read-only, prefill only.
+- `self_attn.rotate`, `project_on_vocab` and `get_topk_closest_tokens` run inside a trace
+  only (they call the engine's modules; outside one the last two fail with
+  `RuntimeError: Tensor on device meta ...`).
+- An assigned value must keep the shape it was served with.
+- Errors from the engine's worker arrive as `RuntimeError` naming the original type, an
+  unavailable read inside a trace included (`RuntimeError: Unavailable: ...`, not
+  `nnterp.Unavailable`): guard with `support()` before the trace.
+- Collect into a container saved inside the trace (`lens = nnsight.save({})`, then
+  `lens[i] = ...`), which works on both engines; a container made outside the trace and
+  filled with `.save()`d entries comes back empty from the engine, without an error.
+
+vLLM itself is the `nnsight` skill's vllm guide.
+
+## Several GPUs
+
+A model too big for one GPU loads sharded with
+`distributed_config=DistributedConfig(tp_size=N)` under `torchrun`. Every value reads whole
+on every rank (the attention interior and `mlp_activation` gathered where a rank holds a
+piece, edits split back), except a split mixture's `expert_outputs`, a per-rank partial sum:
+read `routed_output`. Read values unconditionally, never under a branch on the rank. The
+`nnsight` skill's tensor-parallel guide covers the launch.
+
 The nnterp repo pages behind this file: `docs/usage/generation.md`,
-`docs/usage/activations.md`, `docs/usage/prompt-utils.md`, `docs/usage/remote.md`.
+`docs/usage/activations.md`, `docs/usage/prompt-utils.md`, `docs/usage/remote.md`,
+`docs/usage/vllm.md`, `docs/usage/loading.md`.
