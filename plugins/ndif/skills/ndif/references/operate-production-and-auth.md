@@ -42,7 +42,7 @@ docker run -d --name ndif-pg --network ndif-net \
     -v ndif-pgdata:/var/lib/postgresql/data \
     -v "$PWD/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro" \
     postgres:16-alpine
-docker run -d --name ndif --network ndif-net --gpus all --shm-size 10g \
+docker run -d --name ndif --network ndif-net --gpus all --shm-size 16g \
     -p 127.0.0.1:8001:8001 -p 127.0.0.1:9000:9000 \
     -e NDIF_POSTGRES_URL=postgresql://ndifapi:admin@ndif-pg:5432/ndif \
     -e NDIF_MODEL_IMPORT_PATH=ndif.services.ray.sandbox.model.SandboxModelActor \

@@ -165,11 +165,6 @@ per-model `execution_timeout_seconds` is set. With one, the client gets
 weights load and how the model is sized. Client code does not change and cannot
 ask for it.
 
-- **Quantization needs `bitsandbytes` in the server's Python**, and the image
-  does not install it: the load fails with `ImportError: Using bitsandbytes
-  4-bit quantization requires bitsandbytes`. `docker exec ndif pip install
-  bitsandbytes` serves until the container is removed. A two-line Dockerfile
-  keeps it: `FROM ndif/ndif`, `RUN pip install bitsandbytes`.
 - **The estimate for a quantized model runs low.** It is parameters times the
   nominal width, but embeddings, norms and the head stay 16-bit.
   Llama-3.2-1B at `nf4` reserves 1,178 MiB and takes 1,385 MiB on the card.
@@ -216,7 +211,9 @@ A block that imports a package the server lacks fails with a traceback ending
 or with `Your request payload could not be read (ModuleNotFoundError: ...)`
 when an object the client shipped refers to it. The image installs `datasets`,
 `einops`, `pillow`, `diffusers`, `scipy` and `nnterp` for blocks to use (the
-package's `ext` extra). Add another the way `bitsandbytes` is added above;
+package's `ext` extra). Add another with `docker exec ndif pip
+install <package>`, which serves until the container is removed, or keep it
+with a two-line Dockerfile (`FROM ndif/ndif`, `RUN pip install <package>`);
 replicas loaded afterwards see it.
 
 ## trust_remote_code
