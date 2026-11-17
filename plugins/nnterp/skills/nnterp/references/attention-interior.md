@@ -525,13 +525,14 @@ keys (CodeGen); `Conv1D` columns and rows (GPT-2). MiMo-V2-Flash's `value_weight
 On a BitNet load (transformers' `AutoBitLinear` or `BitLinear`) both raise `Unavailable`:
 those layers apply a function of the weight they store.
 
-Under a PEFT adapter the weight is the one the LoRA layer applies, computed as `merge()`
-computes it, in the base weight's dtype: the base plus each active adapter's delta; the base
-alone once an adapter is merged (the forward then runs the base layer only); the base without
-a merged adapter when the adapters are disabled (the forward unmerges first). That is a new
-tensor; otherwise the result is a view of the parameter. A DoRA or aLoRA adapter, or another
-tuner, raises `NotImplementedError`. An undispatched model's weights (meta) and a quantized
-model's (codes) raise `Unavailable`.
+Under a PEFT adapter the weight is the one the adapted layer's next forward applies, in the
+base weight's dtype: the base layer's weight plus each active adapter's delta while the layer
+is enabled and unmerged, the base layer's weight alone once it is merged or disabled (a layer
+left merged with its adapters disabled is unmerged by the read, as its forward would do
+first). The sum is a new tensor; otherwise the result is a view of the parameter. An active,
+unmerged adapter that is no delta on the base weight (DoRA, OFT, IA3) raises
+`NotImplementedError`. An undispatched model's weights (meta) and a quantized model's
+(codes) raise `Unavailable`.
 
 The gains are measured by calling the norm on `+-256` in alternating channels, which any
 RMS norm or LayerNorm normalizes to `+-1`: exact on a norm without a bias, to rounding with
